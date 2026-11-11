@@ -178,7 +178,9 @@ def _run_calibration(job, device, pattern_path, base):
         calibration = {"standard": job["standard"], "pattern": pattern_path.name, "source_profile": job["profile"],
                        "detw": round(fit["detw"], 5), "detw_start": fit["detw_start"], "rwp_start": fit["rwp_start"],
                        "rwp": fit["rwp"], "apparent_size_nm": fit["apparent_size_nm"],
-                       "curve": [[round(d, 5), r] for d, r in fit["curve"]], "date": day}
+                       "curve": [[round(d, 5), r] for d, r in fit["curve"]], "date": day,
+                       # Best value at the end of the scanned range: the true minimum may lie outside it.
+                       "at_scan_edge": fit["detw"] in (min(d for d, _ in fit["curve"]), max(d for d, _ in fit["curve"]))}
         files = {".geq": fit["geq"], **({".ger": fit["ger"]} if fit["ger"] else {}), ".sav": fit["sav"]}
         notes = (f"DetW fitted to {job['standard']} ({pattern_path.name}): {fit['detw_start']:g} -> {fit['detw']:.4g} mm, "
                  f"Rwp {fit['rwp_start']:.2f} -> {fit['rwp']:.2f} %"
