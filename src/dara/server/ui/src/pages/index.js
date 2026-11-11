@@ -3,7 +3,7 @@ import styled from 'styled-components';
 import Layout from '../components/Layout';
 import { Alert, AutoComplete, Button, Form, Input, InputNumber, message, Modal, Radio, Select, Space, Switch, Table, Tag, Typography, Upload } from 'antd';
 import { MinusCircleOutlined, PlusOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
-import { DEFAULT_CONTROLS, InstrumentManager, RefinementControlsEditor } from '../components/PracticalControls';
+import { CalibrateProfile, DEFAULT_CONTROLS, InstrumentManager, RefinementControlsEditor } from '../components/PracticalControls';
 import { detailMessage, qualityAlertItems, qualityStatText, wavelengthMismatch } from '../components/dataQuality.mjs';
 import { MpKeyStatus, ReferenceLibraryField, useReferenceLibrary } from '../components/ReferenceLibrary';
 import { MAX_SERIES_FILES, seriesPreviewRows } from '../components/seriesTrends.mjs';
@@ -179,6 +179,7 @@ function Submission() {
   const [previousInstrument, setPreviousInstrument] = useState('Aeris-fds-Pixcel1d-Medipix3');
   const [instrumentNames, setInstrumentNames] = useState(INSTRUMENT_NAMES);
   const [instrumentDetails, setInstrumentDetails] = useState({});
+  const [calibratable, setCalibratable] = useState([]);
   const [refinementControls, setRefinementControls] = useState(DEFAULT_CONTROLS);
   const selectedInstrument = Form.useWatch('instrument_profile', form);
   const [patternInspection, setPatternInspection] = useState(null);
@@ -260,6 +261,7 @@ function Submission() {
       .then(data => {
         if (Array.isArray(data.profiles) && data.profiles.length) setInstrumentNames(data.profiles);
         setInstrumentDetails(data.details || {});
+        setCalibratable(data.calibratable || []);
       })
       .catch(() => {});
   }, []);
@@ -841,12 +843,21 @@ function Submission() {
                   <InstrumentManager buttonLabel="Register profile…" buttonSize="middle" onRegistered={profile => {
                     setInstrumentNames(previous => [...previous, profile.id]);
                     setInstrumentDetails(previous => ({ ...previous, [profile.id]: profile }));
+                    if (profile.has_sav) setCalibratable(previous => [...previous, profile.id]);
                     form.setFieldsValue({ instrument_profile: profile.id });
                   }} />
+                  <CalibrateProfile profile={selectedInstrument} enabled={calibratable.includes(selectedInstrument)}
+                    wavelength={watchedWavelengthLab || 'Cu'} onCalibrated={profile => {
+                      setInstrumentNames(previous => [...previous, profile.id]);
+                      setInstrumentDetails(previous => ({ ...previous, [profile.id]: profile }));
+                      setCalibratable(previous => [...previous, profile.id]);
+                      form.setFieldsValue({ instrument_profile: profile.id });
+                    }} />
                 </div>
               </Form.Item>
               {selected ? <Alert type={selected.verified ? 'info' : 'warning'} showIcon
-                message={`${selected.label} — ${selected.verified ? 'verification declared by ' + selected.verified_by : 'not verified against a standard'}`}
+                message={`${selected.label} — ${selected.verified ? 'verification declared by ' + selected.verified_by
+                  : selected.calibration ? `DetW fitted to a ${selected.calibration.standard} standard` : 'not verified against a standard'}`}
                 description={<>{selected.geometry} · {selected.radiation}<br />{selected.notes}</>} /> : null}
               <div className="dara-field-row">
                 {!synchrotron ? (

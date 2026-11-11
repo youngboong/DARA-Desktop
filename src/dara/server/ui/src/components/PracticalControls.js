@@ -135,6 +135,68 @@ function InstrumentSetupFields({ form }) {
   </div>;
 }
 
+// Fits DetW of a profile with a device file (.sav) to a measured standard; saves a new profile.
+export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibrated }) {
+  const [open, setOpen] = React.useState(false);
+  const [standard, setStandard] = React.useState('LaB6');
+  const [radiation, setRadiation] = React.useState(wavelength);
+  const [file, setFile] = React.useState(null);
+  const [job, setJob] = React.useState(null);
+  const [error, setError] = React.useState('');
+  const running = job?.status === 'running';
+  const done = React.useRef(onCalibrated);
+  done.current = onCalibrated;  // the parent passes a new function on every render
+  React.useEffect(() => {
+    if (!running) return undefined;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(`${API}/instrument-profiles/calibrate/${job.id}`);
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || 'Calibration status unavailable');
+        setJob(body);
+        if (body.status === 'done') done.current(body.result);
+      } catch (e) { setError(e.message); setJob(null); }
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [job, running]);
+  const start = async () => {
+    if (!file) { message.error('Select the measured standard pattern.'); return; }
+    const data = new FormData();
+    data.append('profile', profile); data.append('standard', standard); data.append('wavelength', radiation); data.append('pattern_file', file);
+    setError('');
+    try {
+      const response = await fetch(`${API}/instrument-profiles/calibrate`, { method: 'POST', body: data });
+      const body = await response.json();
+      if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : 'Check the calibration inputs.');
+      setJob(body);
+    } catch (e) { setError(e.message); }
+  };
+  const result = job?.status === 'done' ? job.result : null;
+  const fit = result?.calibration;
+  const button = <Button size="middle" disabled={!enabled && !job} onClick={() => setOpen(true)}>{running ? 'Calibrating…' : 'Calibrate with a standard…'}</Button>;
+  return <>{enabled || job ? button : <Tooltip title="Needs a profile with a device file (.sav): built from the instrument setup or a bundled template."><span>{button}</span></Tooltip>}
+    <Modal title="Calibrate the profile with a standard" open={open} width={560} onCancel={() => setOpen(false)}
+      onOk={result || job?.status === 'failed' ? () => { setJob(null); setOpen(false); } : start}
+      okText={result || job?.status === 'failed' ? 'Close' : 'Start calibration'} okButtonProps={{ disabled: running }} cancelButtonProps={{ style: running || result ? { display: 'none' } : undefined }}>
+      <p>DARA fits the detector width (DetW) of “{profile}” to a measured line-profile standard: up to six profile compiles, each followed by a refinement without sample broadening. The best DetW is saved as a new profile; the original stays unchanged. This takes tens of minutes and continues on the server when you close this window.</p>
+      {!job ? <Space wrap align="start">
+        <label>Standard<br /><Select aria-label="Standard material" value={standard} onChange={setStandard} style={{ width: 160 }}
+          options={[{ value: 'LaB6', label: 'LaB6 (Pm-3m)' }, { value: 'Si', label: 'Si (Fd-3m)' }, { value: 'Al2O3', label: 'Al2O3 corundum' }]} /></label>
+        <label>Radiation<br /><Select aria-label="Calibration radiation" value={radiation} onChange={setRadiation} style={{ width: 100 }}
+          options={['Cu', 'Co', 'Cr', 'Fe', 'Mo'].map(value => ({ value, label: value }))} /></label>
+        <label>Measured standard pattern<br /><input aria-label="Standard pattern file" type="file" onChange={e => setFile(e.target.files[0])} /></label>
+      </Space> : null}
+      {running ? <><Progress percent={Math.round(100 * job.completed / job.total)} status="active" />
+        <p>{job.completed} / {job.total} profile compiles finished (each takes a few minutes).</p></> : null}
+      {job?.status === 'failed' ? <Alert type="error" showIcon message="Calibration failed" description={job.error} /> : null}
+      {fit ? <Alert type="success" showIcon message={`Saved and selected: ${result.label}`}
+        description={<>DetW {fit.detw_start} → {fit.detw} mm · Rwp {fit.rwp_start.toFixed(2)} → {fit.rwp.toFixed(2)} %<br />
+          Apparent crystallite size of the standard: {fit.apparent_size_nm ? `${Math.round(fit.apparent_size_nm)} nm` : 'not determined'}.
+          A small size means instrument broadening is still missing from the profile.</>} /> : null}
+      {error ? <Alert type="error" showIcon message={error} /> : null}
+    </Modal></>;
+}
+
 export function InstrumentManager({ onRegistered, buttonLabel = 'Register instrument profile', buttonSize = 'small' }) {
   const [open, setOpen] = React.useState(false);
   const [form] = Form.useForm();
