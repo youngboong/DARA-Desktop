@@ -100,7 +100,10 @@ function CandidateList({ search, peaks, limit, previewRef, onPreview, onAdd, bus
       <Text type="secondary">Searching…</Text>
     </Space>;
   }
-  if (!candidates.length) return <Text type="secondary">{emptyText}{pending ? ' Still searching COD…' : ''}</Text>;
+  // While COD is still loading, "no match" would be premature.
+  if (!candidates.length) {
+    return <Text type="secondary">{pending ? <><Spin size="small" style={{ marginRight: 8 }} />Searching COD…</> : emptyText}</Text>;
+  }
   const shown = limit && !expanded ? candidates.slice(0, limit) : candidates;
   return <>
     {pending ? <Text type="secondary" style={{ display: 'block', marginBottom: 8 }}>Still searching COD…</Text> : null}

@@ -16,8 +16,6 @@ function numbersOf(values) {
   return type ? Array.from(new type(bytes.buffer)) : [];
 }
 
-const round2 = value => Math.round(value * 100) / 100;
-
 function traceByName(plot, name) {
   return (plot?.data || []).find(trace => trace.name === name);
 }
@@ -28,12 +26,13 @@ const UNEXPLAINED_NAMES = ['Unexplained peaks', 'Missing peaks'];
 /**
  * 2θ of the clicked peak, or `null`. Clicking an "Unexplained peaks" marker uses its own x; clicking
  * "Observed" snaps to the nearest missing-peak marker within 0.3 deg, else to the local maximum of
- * the observed intensity within ±0.15 deg. Other traces are ignored.
+ * the observed intensity within ±0.15 deg. Other traces are ignored. Not rounded: the dashed
+ * selection line must sit exactly on the marker or point (labels round to 0.01).
  */
 export function peakFromClick(plot, traceName, x) {
   if (!Number.isFinite(Number(x))) return null;
   const clicked = Number(x);
-  if (UNEXPLAINED_NAMES.includes(traceName)) return round2(clicked);
+  if (UNEXPLAINED_NAMES.includes(traceName)) return clicked;
   if (traceName !== 'Observed') return null;
   const marker = UNEXPLAINED_NAMES.map(name => traceByName(plot, name)).find(Boolean);
   const missing = numbersOf(marker?.x).filter(Number.isFinite);
@@ -43,7 +42,7 @@ export function peakFromClick(plot, traceName, x) {
       nearest = value;
     }
   }
-  if (nearest !== null) return round2(nearest);
+  if (nearest !== null) return nearest;
   const observed = traceByName(plot, 'Observed');
   const xs = numbersOf(observed?.x);
   const ys = numbersOf(observed?.y);
@@ -51,7 +50,7 @@ export function peakFromClick(plot, traceName, x) {
   for (let i = 0; i < xs.length && i < ys.length; i += 1) {
     if (Math.abs(xs[i] - clicked) <= LOCAL_MAX_DEG && Number.isFinite(ys[i]) && (best === null || ys[i] > ys[best])) best = i;
   }
-  return round2(best === null ? clicked : xs[best]);
+  return best === null ? clicked : xs[best];
 }
 
 /**

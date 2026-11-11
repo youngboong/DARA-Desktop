@@ -16,7 +16,7 @@ const plot = {
 };
 
 // click mapping
-assert.equal(peakFromClick(plot, 'Missing peaks', 35.4249), 35.42);
+assert.equal(peakFromClick(plot, 'Missing peaks', 35.4249), 35.4249, 'the marker x itself, not rounded');
 assert.equal(peakFromClick(plot, 'Observed', 35.3), 35.42, 'snaps to a missing peak within 0.3 deg');
 assert.equal(peakFromClick(plot, 'Observed', 35.0), 35.1, 'local maximum within 0.15 deg');
 assert.equal(peakFromClick(plot, 'Observed', 40.0), 40, 'no neighbours -> the point itself');
@@ -168,6 +168,6 @@ import { peakFromPlotClick, compareCandidates, CANDIDATES_SHOWN } from '../src/d
 {
   // New marker name is clickable too.
   const renamed = { data: [{ name: 'Unexplained peaks', x: [35.42] }, { name: 'Observed', x: [35.3, 35.4], y: [1, 2] }] };
-  assert.equal(peakFromClick(renamed, 'Unexplained peaks', 35.4249), 35.42);
+  assert.equal(peakFromClick(renamed, 'Unexplained peaks', 35.42), 35.42);
   assert.equal(peakFromClick(renamed, 'Observed', 35.5), 35.42);
 }
