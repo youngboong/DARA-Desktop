@@ -174,7 +174,7 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
   const result = job?.status === 'done' ? job.result : null;
   const fit = result?.calibration;
   const button = <Button size="middle" disabled={!enabled && !job} onClick={() => setOpen(true)}>{running ? 'Calibrating…' : 'Calibrate with a standard…'}</Button>;
-  return <>{enabled || job ? button : <Tooltip title="Needs a profile with a device file (.sav): built from the instrument setup or a bundled template."><span>{button}</span></Tooltip>}
+  return <>{enabled || job ? button : <Tooltip title="Needs a profile with a device file (.sav) and a numeric DetW: built from the instrument setup or most bundled templates."><span>{button}</span></Tooltip>}
     <Modal title="Calibrate the profile with a standard" open={open} width={560} onCancel={() => setOpen(false)}
       onOk={result || job?.status === 'failed' ? () => { setJob(null); setOpen(false); } : start}
       okText={result || job?.status === 'failed' ? 'Close' : 'Start calibration'} okButtonProps={{ disabled: running }} cancelButtonProps={{ style: running || result ? { display: 'none' } : undefined }}>

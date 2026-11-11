@@ -808,14 +808,15 @@ def _parse_string_list(value: str | None) -> list[str]:
 @router.get("/instrument-profiles")
 async def instrument_profiles():
     """Return the instrument profiles actually bundled with this server."""
-    from dara.instrument_profiles import device_file_text, registered_profiles
+    from dara.instrument_profiles import device_detw, device_file_text, registered_profiles
 
     custom = registered_profiles()
     profiles = _available_instrument_profiles() + list(custom)
     calibratable = []
-    for name in profiles:  # profiles with a device file (.sav) can be calibrated with a standard
+    for name in profiles:  # a device file (.sav) with a numeric DetW can be calibrated with a standard
         try:
-            if device_file_text(name) is not None:
+            device = device_file_text(name)
+            if device is not None and device_detw(device) is not None:
                 calibratable.append(name)
         except (OSError, ValueError):
             continue
