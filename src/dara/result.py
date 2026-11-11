@@ -1,0 +1,729 @@
+"""The parser for the result from the refinement."""
+
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING, Any, Optional, Union
+
+import numpy as np
+import pandas as pd
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pymatgen.core import Composition, Lattice, Structure, get_el_sp
+
+from dara.plot import cached_spacegroup, visualize
+from dara.utils import (
+    angular_correction,
+    get_number,
+    get_wavelength,
+    intensity_correction,
+)
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+_LATTICE_ARGS = {
+    "cubic": ("a",),
+    "tetragonal": ("a", "c"),
+    "orthorhombic": ("a", "b", "c"),
+    "monoclinic": ("a", "b", "c", "beta"),
+    "hexagonal": ("a", "c"),
+    "rhombohedral": ("a", "alpha"),
+}
+_POSITION_LINE = re.compile(
+    r"^\s*(\d+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+E=\((.*)\)\s*$"
+)
+_REFINED_LINE = re.compile(r"^([A-Za-z_]\w*)=(\S+)\s*$")
+
+
+def parse_atom_positions(text: Optional[str]) -> list[dict]:
+    """Parse the body of an "Atomic positions for phase" block of a ``.lst`` file.
+
+    A position line (``multiplicity x y z E=(El(occ),...)``) starts a site; the
+    ``name=value[+-esd]`` lines that follow belong to that site and list the coordinates
+    BGMN refined (no esd: the value sits at its limit). Blank lines are ignored.
+    """
+    positions: list[dict] = []
+    for line in (text or "").splitlines():
+        match = _POSITION_LINE.match(line)
+        if match:
+            species = {
+                element.capitalize(): float(occupancy)
+                for element, occupancy in re.findall(
+                    r"([A-Za-z][A-Za-z0-9+\-]*)\(([\d.]+)\)", match.group(5)
+                )
+            }
+            positions.append(
+                {
+                    "multiplicity": int(match.group(1)),
+                    "xyz": [float(match.group(i)) for i in (2, 3, 4)],
+                    "species": species,
+                    "refined": {},
+                }
+            )
+            continue
+        refined = _REFINED_LINE.match(line.strip())
+        if refined and positions:
+            value = parse_lst_value(refined.group(2))
+            if isinstance(value, tuple):
+                positions[-1]["refined"][refined.group(1)] = [value[0], value[1]]
+            elif isinstance(value, (int, float)):
+                positions[-1]["refined"][refined.group(1)] = [float(value), None]
+    return positions
+
+
+class PhaseResult(BaseModel):
+    """The result for each phase."""
+
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    spacegroup_no: Optional[int] = Field(alias="SpacegroupNo")
+    hermann_mauguin: Optional[str] = Field(alias="HermannMauguin")
+    xray_density: Optional[float] = Field(alias="XrayDensity")
+    rphase: Optional[float] = Field(alias="Rphase")
+    unit: str = Field(alias="UNIT")
+    gewicht: Union[float, tuple[float, float], None] = Field(alias="GEWICHT")
+    gewicht_name: Optional[str] = Field(alias="GEWICHT_NAME")
+
+    a: Optional[Union[float, tuple[float, float]]] = Field(None, alias="A")
+    b: Optional[Union[float, tuple[float, float]]] = Field(None, alias="B")
+    c: Optional[Union[float, tuple[float, float]]] = Field(None, alias="C")
+    alpha: Optional[Union[float, tuple[float, float]]] = Field(None, alias="ALPHA")
+    beta: Optional[Union[float, tuple[float, float]]] = Field(None, alias="BETA")
+    gamma: Optional[Union[float, tuple[float, float]]] = Field(None, alias="GAMMA")
+
+    atom_positions_string: Optional[str] = Field(
+        None, alias="Atomic positions for phase"
+    )
+    # [{"multiplicity", "xyz", "species": {element: occupancy}, "refined": {"x": [v, esd|None]}}]
+    atom_positions: Optional[list[dict]] = Field(None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_gewicht(cls, values):
+        if "GEWICHT" in values and isinstance(values["GEWICHT"], str):
+            geweicht = values["GEWICHT"]
+            geweicht_mean = float(re.search(r"(\d+\.\d+)", geweicht).group(1))
+            geweicht_name = re.search(r"^([A-Z\d]+)", geweicht).group(1)
+            values["GEWICHT"] = geweicht_mean
+            values["GEWICHT_NAME"] = geweicht_name
+        else:
+            values["GEWICHT_NAME"] = None
+        return values
+
+    def get_structure(self, lattice_fallback: Optional[dict] = None) -> Structure:
+        """
+        Get the refined structure from the phase result.
+
+        Args:
+            lattice_fallback: lattice values (``a``, ``b``, ``c`` in Angstrom, angles in
+                degrees) used for the keys the listing does not carry, i.e. a phase whose
+                lattice was held fixed.
+
+        Returns
+        -------
+            the refined structure as ``pymatgen.Structure`` object
+        """
+        positions = self.atom_positions or parse_atom_positions(self.atom_positions_string)
+        if not positions:
+            raise ValueError(
+                "Cannot find the atomic positions from the phase result. "
+                "Please make sure the result is refined using dara >= 0.9.1"
+            )
+        # get lattice
+        lattice_data = {
+            "a": self.a,
+            "b": self.b,
+            "c": self.c,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "gamma": self.gamma,
+        }
+        lattice_data = {
+            k: get_number(v) for k, v in lattice_data.items() if v is not None
+        }
+        for k in ["a", "b", "c"]:
+            if k in lattice_data:
+                lattice_data[k] = lattice_data[k] * 10
+        spacegroup = cached_spacegroup(int(self.spacegroup_no))
+        crystal_system = spacegroup.crystal_system
+        if crystal_system == "trigonal":
+            crystal_system = "hexagonal"
+        for k in _LATTICE_ARGS.get(crystal_system, ()):
+            if k not in lattice_data and lattice_fallback and lattice_fallback.get(k) is not None:
+                lattice_data[k] = float(lattice_fallback[k])
+        lattice = getattr(Lattice, crystal_system, Lattice.from_parameters)(
+            **lattice_data
+        )
+
+        # get species and coords
+        all_coords = []
+        all_species = []
+        for position in positions:
+            all_coords.append(list(position["xyz"]))
+            species = {}
+            for element, occupancy in position["species"].items():
+                # parse the specie into pymatgen Species ("Ni+2" -> "Ni2+")
+                species[get_el_sp(re.sub(r"([+-])(\d+)", r"\2\1", element))] = occupancy
+            all_species.append(Composition(species))
+
+        return Structure.from_spacegroup(
+            sg=self.spacegroup_no,
+            lattice=lattice,
+            species=all_species,
+            coords=all_coords,
+            tol=2e-4,  # BGMN only has 4 decimal places for atomic positions
+        )
+
+
+class LstResult(BaseModel):
+    """Refinement result parsed from the .lst file."""
+
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    raw_lst: str
+    pattern_name: str
+
+    num_steps: int
+    rp: float = Field(alias="Rp")
+    rpb: float = Field(alias="Rpb")
+    r: float = Field(alias="R")
+    rwp: float = Field(alias="Rwp")
+    rexp: float = Field(alias="Rexp")
+    d: float = Field(alias="d")
+    rho: float = Field(alias="1-rho")
+    phases_results: dict[str, PhaseResult]
+
+
+class DiaResult(BaseModel):
+    """Refinement result parsed from the .dia file. Mainly some x-y data for plotting."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    x: list[float]
+    y_obs: list[float]
+    y_calc: list[float]
+    y_bkg: list[float]
+    structs: dict[str, list[float]]
+
+
+class RefinementMetrics(BaseModel):
+    """Derived peak-matching diagnostics and refinement quality metrics.
+
+    Holds the missing/extra/intensity-mismatch peak markers produced by peak
+    matching after a refinement, plus the refinement's Rwp.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+
+    missing_peaks: np.ndarray | None = Field(default=None, repr=False)
+    extra_peaks: np.ndarray | None = Field(default=None, repr=False)
+    intensity_mismatch_peaks: np.ndarray | None = Field(default=None, repr=False)
+    rwp: float
+
+    @field_validator(
+        "missing_peaks",
+        "extra_peaks",
+        "intensity_mismatch_peaks",
+        mode="before",
+    )
+    @classmethod
+    def deserialize_peak_arrays(cls, value):
+        """Restore NumPy peak arrays serialized as JSON-compatible lists."""
+        if value is None or isinstance(value, np.ndarray):
+            return value
+        array = np.asarray(value, dtype=float)
+        return array.reshape(-1, 2) if array.size else np.empty((0, 2))
+
+
+class RefinementResult(BaseModel):
+    """The result from the refinement, which is parsed from the .lst and .dia files.
+
+    ``refinement_metrics`` holds the peak-matching diagnostics attached after
+    refinement (see ``RefinementMetrics``).
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+
+    lst_data: LstResult
+    plot_data: DiaResult = Field(repr=False)
+    peak_data: pd.DataFrame = Field(repr=False)
+    refinement_metrics: RefinementMetrics
+
+    @field_validator("peak_data", mode="before")
+    @classmethod
+    def transform(cls, data: dict) -> pd.DataFrame:
+        """Create pandas dataframe from peak data dict."""
+        return pd.DataFrame(data)
+
+    def visualize(
+        self,
+        diff_offset=False,
+        plot_refinement_metrics: bool = True,
+        phase_colors: dict[str, str] | None = None,
+    ):
+        """Visualize the refinement result with plotly.
+
+        Args:
+            diff_offset: passed through to ``dara.plot.visualize``.
+            plot_refinement_metrics: when True (default) and ``refinement_metrics``
+                is present, draw its missing/extra/intensity-mismatch peak markers.
+                When False, or when ``refinement_metrics`` is unavailable, no peak
+                markers are drawn.
+
+        Returns
+        -------
+            the plotly ``Figure`` for the refinement plot
+        """
+        metrics = getattr(self, "refinement_metrics", None)
+        if metrics is not None and plot_refinement_metrics:
+            # A trace with zero points never appears in the legend even with
+            # showlegend=True, so an empty category gets a single non-rendering
+            # NaN point instead, just to keep its legend entry toggleable.
+            placeholder = np.array([[np.nan, np.nan]])
+            return visualize(self, diff_offset=diff_offset,
+                             missing_peaks=metrics.missing_peaks if metrics.missing_peaks is not None else placeholder,
+                             extra_peaks=metrics.extra_peaks if metrics.extra_peaks is not None else placeholder,
+                             intensity_mismatch_peaks=metrics.intensity_mismatch_peaks
+                             if metrics.intensity_mismatch_peaks is not None else placeholder,
+                             phase_colors=phase_colors)
+        return visualize(self, diff_offset=diff_offset, phase_colors=phase_colors)
+
+    def get_phase_weights(self, normalize=True) -> dict[str, float]:
+        """Return the weights for each phase. Default is to normalize and return weight fractions.
+
+        Args:
+            normalize: Whether to normalize and return weight fractions. Defaults to True.
+
+        Returns
+        -------
+            A dictionary of phase names and their weights.
+        """
+        weights = {}
+        for phase, data in self.lst_data.phases_results.items():
+            weights[phase] = get_number(data.gewicht)
+
+        if normalize:
+            tot = np.sum(list(weights.values()))
+            weights = {k: v / tot for k, v in weights.items()}
+        return weights
+
+    def export_structure(self, phase_name: str) -> Structure:
+        """
+        Export the refined structure from the phase result.
+
+        Args:
+            phase_name: the name of the phase
+
+        Returns
+        -------
+            the refined structure as ``pymatgen.Structure`` object
+        """
+        return self.lst_data.phases_results[phase_name].get_structure()
+
+
+class ParseError(Exception):
+    """Error when parsing the result."""
+
+
+def _dedupe_phase_names(phase_names: list[str]) -> list[str]:
+    """Return phase names with deterministic suffixes for duplicates.
+
+    Refinement outputs are stored in dict-backed containers in several places
+    (lst/dia/par). Duplicate phase names would overwrite earlier entries, so
+    we disambiguate repeated names as ``name__dupN`` where N starts at 2.
+    """
+    counts: dict[str, int] = {}
+    out: list[str] = []
+    for name in phase_names:
+        counts[name] = counts.get(name, 0) + 1
+        n = counts[name]
+        out.append(name if n == 1 else f"{name}__dup{n}")
+    return out
+
+
+def get_result(control_file: Path) -> RefinementResult:
+    """
+    Get the result from the refinement.
+
+    :param control_file: the path to the control file (.sav)
+    """
+    # get phase names from sav file first
+    # example
+    # STRUC[1]=Bi2Fe4O9.str
+    # STRUC[2]=Bi25FeO39.str
+    # STRUC[3]=BiFeO3.str
+    try:
+        sav_text = control_file.read_text()
+        phase_names = re.findall(r"STRUC\[\d+]=(.+?)\.str", sav_text)
+        phase_names = _dedupe_phase_names(phase_names)
+
+        lst_path = control_file.parent / f"{control_file.stem}.lst"
+        dia_path = control_file.parent / f"{control_file.stem}.dia"
+        par_path = control_file.parent / f"{control_file.stem}.par"
+
+        lst_data = parse_lst(lst_path, phase_names=phase_names)
+        result = {
+            "lst_data": lst_data,
+            "plot_data": parse_dia(dia_path, phase_names=phase_names),
+            "peak_data": parse_par(par_path, phase_names=phase_names,
+                                   fixed_eps=fixed_eps_from_control(sav_text)),
+            "refinement_metrics": RefinementMetrics(rwp=lst_data.rwp),
+        }
+
+        return RefinementResult(**result)
+    except Exception as e:
+        raise ParseError(f"Error in parsing the result from {control_file}") from e
+
+
+def parse_lst_value(v_: str) -> float | tuple[float, float] | str | int | None:
+    """Parse one BGMN ``.lst`` value (``x``, ``x+-esd``, ``x%``; ERROR/UNDEF -> None)."""
+    try:
+        v_ = v_.strip("%")
+        if v_ == "ERROR" or v_ == "UNDEF":
+            return None
+        if "+-" in v_:
+            v_ = (float(v_.split("+-")[0]), float(v_.split("+-")[1]))
+        else:
+            v_ = float(v_)
+            if v_.is_integer():
+                v_ = int(v_)
+    except ValueError:
+        pass
+    return v_
+
+
+def parse_lst_section(text: str) -> dict[str, Any]:
+    """Parse the ``key=value`` lines of one ``.lst`` section."""
+    # Parenthesized profile parameters such as GrainSize(1,1,1) are valid
+    # BGMN output keys and must not be silently discarded.
+    # The "Atomic positions" block repeats x=, y=, z= per site; it is not phase-level.
+    text = text.split("\nAtomic positions for phase", 1)[0]
+    section = dict(re.findall(r"^([^\s=]+)=(.+?)$", text, re.MULTILINE))
+    return {k: parse_lst_value(v) for k, v in section.items()}
+
+
+def lst_phase_sections(texts: str) -> list[str]:
+    """Raw "Local parameters and GOALs" sections of a ``.lst`` text, in phase order."""
+    return [body for _, body in lst_phase_sections_by_name(texts)]
+
+
+def lst_phase_sections_by_name(texts: str) -> list[tuple[str, str]]:
+    """``(phase name, raw section)`` of every "Local parameters and GOALs" block, in order."""
+    heads = list(re.finditer(r"^Local parameters and GOALs for phase (.+?)[ \t\r]*$", texts, re.M))
+    sections = []
+    for index, head in enumerate(heads):
+        end = heads[index + 1].start() if index + 1 < len(heads) else len(texts)
+        body = texts[head.end() : end].strip("\r\n").rstrip()
+        if "Atomic positions for phase" not in body:
+            body = re.split(r"\n[ \t\r]*\n", body, maxsplit=1)[0]
+        sections.append((head.group(1).strip(), body))
+    return sections
+
+
+def parse_lst(lst_path: Path, phase_names: list[str]) -> LstResult:
+    """
+    Get results from the .lst file. This file mainly contains some numbers for the refinement.
+
+    Example of the .lst file:
+
+    .. code-block:: none
+
+        Rietveld refinement to file(s) Mg3MnNi3O8.xy
+        BGMN version 4.2.23, 8301 measured points, 78 peaks, 20 parameters
+        Start: Mon Dec 18 11:43:20 2023; End: Mon Dec 18 11:43:21 2023
+        43 iteration steps
+
+        Rp=4.14%  Rpb=50.39%  R=13.55%  Rwp=8.98% Rexp=1.47%
+        Durbin-Watson d=0.06
+        1-rho=13.6%
+
+        Global parameters and GOALs
+        ****************************
+        QMg3MnNi3O8166sym=0.0700+-0.0046
+        QNiO=0.9300+-0.0046
+        EPS2=-0.001657+-0.000033
+
+        Local parameters and GOALs for phase Mg3MnNi3O8166sym
+        ******************************************************
+        SpacegroupNo=166
+        HermannMauguin=R-32/m
+        XrayDensity=4.943
+        Rphase=26.64%
+        UNIT=NM
+        A=0.5898+-0.0013
+        C=1.4449+-0.0062
+        k1=1.00000
+        B1=0.00492+-0.00076
+        GEWICHT=0.0288+-0.0019
+        GrainSize(1,1,1)=64.7+-10.0
+        Atomic positions for phase Mg3MnNi3O8166sym
+        ---------------------------------------------
+          9     0.5000  0.0000  0.0000     E=(MG(1.0000))
+          3     0.0000  0.0000  0.0000     E=(MN(1.0000))
+          9     0.5000  0.0000  0.5000     E=(NI(1.0000))
+         18     0.0268 -0.0268  0.7429     E=(O(1.0000))
+          6     0.0000  0.0000  0.2511     E=(O(1.0000))
+
+        Local parameters and GOALs for phase NiO
+        ******************************************************
+        SpacegroupNo=225
+        HermannMauguin=F4/m-32/m
+        XrayDensity=6.760
+        Rphase=11.31%
+        UNIT=NM
+        A=0.418697+-0.000027
+        k1=0
+        B1=0.00798+-0.00022
+        GEWICHT=0.3827+-0.0049
+        GrainSize(1,1,1)=53.2+-1.5
+        Atomic positions for phase NiO
+        ---------------------------------------------
+          4     0.0000  0.0000  0.0000     E=(NI+2(1.0000))
+          4     0.5000  0.5000  0.5000     E=(O-2(1.0000))
+
+    Args:
+        lst_path:
+
+    Returns
+    -------
+        phase_results: a dictionary of the results for each phase.
+            Duplicate input names should be disambiguated by the caller.
+
+    """
+
+    parse_section = parse_lst_section
+
+    if not lst_path.exists():
+        raise FileNotFoundError(f"Cannot find the .lst file from {lst_path}")
+
+    with lst_path.open() as f:
+        texts = f.read()
+
+    pattern_name = re.search(r"Rietveld refinement to file\(s\) (.+?)\n", texts).group(
+        1
+    )
+    result = {"raw_lst": texts, "pattern_name": pattern_name}
+
+    num_steps = int(re.search(r"(\d+) iteration steps", texts).group(1))
+    result["num_steps"] = num_steps
+
+    for var in ["Rp", "Rpb", "R", "Rwp", "Rexp"]:
+        result[var] = float(re.search(rf"{var}=(\d+(\.\d+)?)%", texts).group(1))
+    result["d"] = (
+        float(d.group(1))
+        if (d := re.search(r"Durbin-Watson d=(\d+(\.\d+)?)", texts))
+        else None
+    )
+    result["1-rho"] = (
+        float(rho.group(1))
+        if (rho := re.search(r"1-rho=(\d+(\.\d+)?)%", texts))
+        else None
+    )
+
+    # global goals
+    global_parameters_text = re.search(
+        r"Global parameters and GOALs\n(.*?)\n(?:\n|\Z)", texts, re.DOTALL
+    )
+    if global_parameters_text:
+        global_parameters_text = global_parameters_text.group(1)
+        global_parameters = parse_section(global_parameters_text)
+        result.update(global_parameters)
+
+    phases_results = lst_phase_sections(texts)
+
+    result["phases_results"] = {
+        phase_name: parse_section(phase_result)
+        for phase_name, phase_result in zip(phase_names, phases_results)
+    }
+
+    # add atomic positions
+    for phase_name, phase_result in zip(phase_names, phases_results):
+        atom_section = re.search(
+            r"Atomic positions for phase .+?\n(-+)\n(.*?)$",
+            phase_result,
+            re.DOTALL,
+        ).group(2)
+        result["phases_results"][phase_name]["atom_positions"] = parse_atom_positions(
+            atom_section
+        )
+        # position lines only (the refined x=, y=, z= lines live in ``atom_positions``)
+        result["phases_results"][phase_name]["atom_positions_string"] = "\n".join(
+            line.rstrip() for line in atom_section.splitlines() if _POSITION_LINE.match(line)
+        )
+    return LstResult(**result)
+
+
+def parse_dia(dia_path: Path, phase_names: list[str]) -> DiaResult:
+    """
+    Get the results from the .dia file. This file mainly contains curves for the refinement.
+
+    // layout of the scanHeap:
+    // [0] = 2theta
+    // [1] = iObs
+    // [2] = iCalc
+    // [3] = iBkgr
+    // [4...n] = strucs
+    """
+    if not dia_path.exists():
+        raise FileNotFoundError(f"Cannot find the .dia file from {dia_path}")
+
+    # read first line to get the keys
+    dia_text = dia_path.read_text().split("\n")
+
+    raw_data = np.loadtxt(dia_text[1:])
+    data = {
+        "x": raw_data[:, 0].tolist(),
+        "y_obs": raw_data[:, 1].tolist(),
+        "y_calc": raw_data[:, 2].tolist(),
+        "y_bkg": raw_data[:, 3].tolist(),
+        "structs": {
+            name: raw_data[:, i + 4].tolist() for i, name in enumerate(phase_names)
+        },
+    }
+    return DiaResult(**data)
+
+
+def fixed_eps_from_control(sav_text: str) -> dict:
+    """EPS1/EPS2 held fixed in a BGMN control file (``EPS2=-0.0027``, not ``PARAM[..]=EPS2=``)."""
+    fixed = {}
+    for name in ("EPS1", "EPS2"):
+        match = re.search(rf"^{name}=([+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)\s*$", sav_text, re.MULTILINE)
+        if match:
+            fixed[name] = float(match.group(1))
+    return fixed
+
+
+def parse_par(par_file: Path, phase_names: list[str], fixed_eps: dict | None = None) -> pd.DataFrame:
+    """
+    Get the parameters from the .par file (hkl).
+
+    Only work for Cu K alpha!!!
+
+    BGMN writes EPS1/EPS2 into the .par header only when they are refined; a value held
+    fixed in the control file is passed in ``fixed_eps`` ({"EPS1": v, "EPS2": v}).
+    """
+
+    def _make_dataframe(peak_list) -> pd.DataFrame:
+        return pd.DataFrame(
+            peak_list,
+            columns=[
+                "2theta",
+                "intensity",
+                "b1",
+                "b2",
+                "h",
+                "k",
+                "l",
+                "phase",
+                "phase_idx",
+            ],
+        ).astype(
+            {
+                "2theta": float,
+                "intensity": float,
+                "b1": float,
+                "b2": float,
+                "h": int,
+                "k": int,
+                "l": int,
+                "phase": str,
+                "phase_idx": int,
+            }
+        )
+
+    content = par_file.read_text().split("\n")
+    peak_list = []
+
+    if len(content) < 2:
+        return _make_dataframe(peak_list)
+
+    peak_num = re.search(r"PEAKZAHL=(\d+)", content[0])
+
+    if not peak_num:
+        return _make_dataframe(peak_list)
+
+    # parse some global parameters
+    eps1 = re.search(r"EPS1=([+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)", content[0])
+    eps2 = re.search(r"EPS2=([+-]?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)", content[0])
+    pol = re.search(r"POL=(\d+(\.\d+)?)", content[0])
+    wavelength = re.search(r"LAMBDA=(\S+)", content[0])
+    if not wavelength:
+        wavelength = re.search(r"SYNCHROTRON=(\S+)", content[0])
+    if not wavelength:
+        raise ValueError("Cannot find the wavelength from the .par file")
+
+    fixed_eps = fixed_eps or {}
+    eps1 = float(eps1.group(1)) if eps1 else fixed_eps.get("EPS1", 0.0)
+    eps2 = float(eps2.group(1)) if eps2 else fixed_eps.get("EPS2", 0.0)
+    pol = float(pol.group(1)) if pol else 1.0
+    wavelength = get_wavelength(wavelength.group(1))
+    peak_num = int(peak_num.group(1))
+
+    # get the mapping between the peak's phase name to the actual phase name
+    all_peak_phase_names = re.findall(r"PHASE=(\w+)", "\n".join(content))
+    peak_phase_names = list(dict.fromkeys(all_peak_phase_names))
+    phase_names_mapping = {
+        peak_phase_name: (phase_name, i)
+        for i, (peak_phase_name, phase_name) in enumerate(
+            zip(peak_phase_names, phase_names)
+        )
+    }
+
+    for i in range(1, peak_num + 1):
+        if i >= len(content):
+            break
+
+        numbers = re.split(r"\s+", content[i])
+
+        if numbers:
+            rp = int(numbers[0])
+            intensity = float(numbers[1])
+            d_inv = float(numbers[2])
+            gsum = re.search(r"GSUM=(\d+(\.\d+)?)", content[i])
+            gsum = float(gsum.group(1)) if gsum is not None else 1.0
+            intensity = intensity_correction(
+                intensity=intensity,
+                d_inv=d_inv,
+                gsum=gsum,
+                wavelength=wavelength,
+                pol=pol,
+            )
+            if rp == 2:
+                b1 = 0
+                b2 = 0
+            elif rp == 3:
+                b1 = float(numbers[3])
+                b2 = 0
+            elif rp == 4:
+                b1 = float(numbers[3])
+                b2 = float(numbers[4]) ** 2
+            else:
+                b1 = 0
+                b2 = 0
+
+            h = int(numbers[-3])
+            k = int(numbers[-2])
+            l = int(numbers[-1])  # noqa: E741
+
+            phase = re.search(r"PHASE=(\w+)", content[i]).group(1)
+            phase, idx = phase_names_mapping[phase]
+
+            if intensity > 0:
+                peak_list.append([d_inv, intensity, b1, b2, h, k, l, phase, idx])
+
+    # from d_inv to two theta
+    two_theta = (
+        np.arcsin(wavelength * np.array([p[0] for p in peak_list]) / 2)
+        * 180
+        / np.pi
+        * 2
+    )
+
+    # apply eps1 and eps2
+    two_theta += angular_correction(two_theta, eps1, eps2)
+    peak_list = [
+        [two_theta[i]] + peak_list[i][1:] for i in range(len(peak_list))  # noqa: RUF005
+    ]
+
+    return _make_dataframe(peak_list)

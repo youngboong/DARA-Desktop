@@ -1,0 +1,381 @@
+"""Perform refinements with BGMN."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any, Literal
+
+import numpy as np
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from dara.analysis_range import analysis_mask
+from dara.bgmn_worker import BGMNWorker
+from dara.cif2str import cif2str
+from dara.generate_control_file import generate_control_file
+from dara.result import RefinementMetrics, RefinementResult, get_result
+from dara.xrd import convert_pattern_to_xy
+
+
+def single_refinement_threads() -> int:
+    """BGMN threads for a refinement that runs on its own (final candidates, quick re-refinement).
+
+    Screening runs many single-thread refinements in parallel; a lone refinement can use the
+    whole machine instead. BGMN's results do not depend on the thread count (identical y_calc
+    and Rwp for 1, 4, 8 and 12 threads), only the run time does. ``DARA_SINGLE_BGMN_THREADS``
+    overrides the default of all cores but one.
+    """
+    value = os.environ.get("DARA_SINGLE_BGMN_THREADS", "").strip()
+    if value.isdigit() and int(value) > 0:
+        return int(value)
+    return max(1, (os.cpu_count() or 2) - 1)
+
+
+def with_single_refinement_threads(refinement_kwargs: dict) -> dict:
+    """Copy of ``do_refinement`` keyword arguments that runs BGMN with all available threads."""
+    params = dict(refinement_kwargs.get("refinement_params") or {})
+    params["n_threads"] = single_refinement_threads()
+    return {**refinement_kwargs, "refinement_params": params}
+
+
+class RefinementPhase(BaseModel, frozen=True):
+    """
+    Input phase for refinement.
+
+    Contains the path to the phase file and the specific parameters for the phase.
+    """
+
+    model_config = ConfigDict(arbitrary_types_allowed=True, populate_by_name=True)
+
+    path: Path = Field(..., description="The path to the phase file.")
+    params: dict[str, Any] = Field(
+        default_factory=dict,
+        kw_only=True,
+        description="The specific parameters for the phase.",
+    )
+
+    @field_validator("path", mode="before")
+    @classmethod
+    def _validate_path(cls, v):
+        return Path(v)
+
+    def __hash__(self):
+        return hash(self.path)
+
+    def __eq__(self, other: RefinementPhase):
+        return self.path == other.path
+
+    @classmethod
+    def make(cls, path_obj: RefinementPhase | Path | str) -> RefinementPhase:
+        """
+        Make an RefinementPhase object from a path object. If the path object is already an
+        RefinementPhase object, return it.
+        If the path object is a string or Path object, create an RefinementPhase object
+        with the path object with no specific parameters (the default parameters will be used).
+
+        Args:
+            path_obj: the path object, can be a string, Path object, or RefinementPhase object.
+
+        Returns
+        -------
+            RefinementPhase object
+        """
+        return (
+            path_obj
+            if isinstance(path_obj, RefinementPhase)
+            else RefinementPhase(path=Path(path_obj))
+        )
+
+
+def _attach_peak_markers(
+    result: RefinementResult,
+    pattern_path: Path,
+    wavelength: Literal["Cu", "Co", "Cr", "Fe", "Mo"] | float,
+    instrument_profile: str | Path,
+    use_residual: bool = True,
+    residual_integral_fraction: float = 0.010,
+    residual_calc_coverage_ratio: float = 0.35,
+    residual_window_detect_fraction: float = 0.003,
+    missing_intensity_ratio: float = 0.005,
+    extra_intensity_ratio: float = 0.03,
+    intensity_mismatch_height_tolerance: float = 0.40,
+    intensity_mismatch_area_tolerance: float = 0.60,
+    refinement_params: dict | None = None,
+    observed_peaks: Any = None,
+) -> None:
+    """Run the full peak-matching pipeline and store results on *result* in-place.
+
+    Detects observed peaks, matches them against the refined calc pattern, and
+    stores the resulting missing/extra/intensity-mismatch markers (plus rwp) on
+    ``result.refinement_metrics``.
+
+    Args:
+        use_residual: whether to additionally flag broad unfit regions via the
+            integrated-residual scan (see ``find_residual_regions``).
+        residual_integral_fraction: passed through to ``find_residual_regions``
+            as ``integral_fraction``.
+        residual_calc_coverage_ratio: passed through to ``find_residual_regions``
+            as ``calc_coverage_ratio``.
+        residual_window_detect_fraction: passed through to
+            ``find_residual_regions`` as ``window_detect_fraction``.
+        missing_intensity_ratio: minimum intensity ratio for isolated missing
+            peaks (see ``PeakMatcher.get_isolated_peaks``).
+        extra_intensity_ratio: minimum intensity ratio for isolated extra peaks
+            (see ``PeakMatcher.get_isolated_peaks``).
+        intensity_mismatch_height_tolerance: passed through to
+            ``find_intensity_mismatch_peaks`` as ``height_tolerance``.
+        intensity_mismatch_area_tolerance: passed through to
+            ``find_intensity_mismatch_peaks`` as ``area_tolerance``.
+        observed_peaks: optional pre-computed observed peaks (DataFrame with
+            ``2theta``/``intensity`` columns, an array whose first two columns are those,
+            or a zero-argument callable returning either). When given, ``detect_peaks``
+            is skipped; the result must be what ``detect_peaks`` would return for the
+            same pattern/range settings.
+    """
+    from dara.peak_detection import detect_peaks
+    from dara.search.peak_matcher import (
+        PeakMatcher,
+        find_intensity_mismatch_peaks,
+        find_residual_regions,
+        suppress_coincident_marker_pairs,
+    )
+
+    range_params = {key: value for key, value in (refinement_params or {}).items()
+                    if key in {"wmin", "wmax", "excluded_ranges"}}
+    if observed_peaks is not None:
+        observed = observed_peaks() if callable(observed_peaks) else observed_peaks
+        if hasattr(observed, "columns"):
+            obs_raw = observed[["2theta", "intensity"]].values
+        else:
+            obs_raw = np.asarray(observed, dtype=float)[:, :2]
+    else:
+        edf      = detect_peaks(str(pattern_path), wavelength=wavelength,
+                                instrument_profile=str(instrument_profile), **range_params)
+        obs_raw  = edf[["2theta", "intensity"]].values
+    calc_raw = result.peak_data[["2theta", "intensity"]].values
+
+    px    = np.asarray(result.plot_data.x)
+    yobs  = np.asarray(result.plot_data.y_obs)
+    ycalc = np.asarray(result.plot_data.y_calc)
+    ybkg  = np.asarray(result.plot_data.y_bkg)
+
+    if range_params:
+        obs_raw = obs_raw[analysis_mask(obs_raw[:, 0], **range_params)]
+        calc_raw = calc_raw[analysis_mask(calc_raw[:, 0], **range_params)]
+        keep = analysis_mask(px, **range_params)
+        # Mask contributions only in diagnostic working arrays. The measured
+        # profile and the native BGMN fit/Rwp remain untouched in saved results.
+        yobs = np.where(keep, yobs, 0.0)
+        ycalc = np.where(keep, ycalc, 0.0)
+        ybkg = np.where(keep, ybkg, 0.0)
+
+    pm = PeakMatcher(calc_raw, obs_raw, intensity_resolution=0.005,
+                     profile_x=px, profile_y_calc=ycalc,
+                     profile_y_obs=yobs, profile_y_bkg=ybkg)
+    miss_f, extra_f = suppress_coincident_marker_pairs(
+        pm.get_isolated_peaks("missing", min_intensity_ratio=missing_intensity_ratio),
+        pm.get_isolated_peaks("extra",   min_intensity_ratio=extra_intensity_ratio),
+    )
+
+    parts = [a[:, 0] for a in (miss_f, extra_f) if len(a)]
+    known = np.concatenate(parts) if parts else None
+
+    residual = find_residual_regions(
+        px, yobs, ycalc,
+        profile_y_bkg=ybkg,
+        matched_peak_positions=known,
+        enabled=use_residual,
+        window_detect_fraction=residual_window_detect_fraction,
+        integral_fraction=residual_integral_fraction,
+        calc_coverage_ratio=residual_calc_coverage_ratio,
+    )
+
+    miss_combined = np.vstack([miss_f, residual]) if len(residual) and len(miss_f) else (
+        residual if len(residual) else miss_f
+    )
+
+    mismatch = find_intensity_mismatch_peaks(
+        pm, px, yobs, ycalc, profile_y_bkg=ybkg,
+        height_tolerance=intensity_mismatch_height_tolerance,
+        area_tolerance=intensity_mismatch_area_tolerance,
+    )
+
+    miss_combined = miss_combined[analysis_mask(miss_combined[:, 0], **range_params)]
+    extra_f = extra_f[analysis_mask(extra_f[:, 0], **range_params)]
+    mismatch = mismatch[analysis_mask(mismatch[:, 0], **range_params)]
+
+    result.refinement_metrics = RefinementMetrics(
+        missing_peaks=miss_combined if len(miss_combined) else None,
+        extra_peaks=extra_f if len(extra_f) else None,
+        intensity_mismatch_peaks=mismatch if len(mismatch) else None,
+        rwp=result.lst_data.rwp,
+    )
+
+
+def do_refinement(
+    pattern_path: Path | str,
+    phases: list[RefinementPhase | Path | str],
+    wavelength: Literal["Cu", "Co", "Cr", "Fe", "Mo"] | float = "Cu",
+    instrument_profile: str | Path = "Aeris-fds-Pixcel1d-Medipix3",
+    working_dir: Path | str | None = None,
+    phase_params: dict | None = None,
+    refinement_params: dict | None = None,
+    show_progress: bool = False,
+    use_residual: bool = True,
+    residual_integral_fraction: float = 0.010,
+    residual_calc_coverage_ratio: float = 0.35,
+    residual_window_detect_fraction: float = 0.003,
+    missing_intensity_ratio: float = 0.005,
+    extra_intensity_ratio: float = 0.03,
+    intensity_mismatch_height_tolerance: float = 0.40,
+    intensity_mismatch_area_tolerance: float = 0.60,
+    bgmn_timeout: float | None = None,
+    observed_peaks: Any = None,
+    cancel_event: Any = None,
+) -> RefinementResult:
+    """Refine the structure using BGMN.
+
+    Args:
+        use_residual: see ``_attach_peak_markers``.
+        residual_integral_fraction: see ``_attach_peak_markers``.
+        residual_calc_coverage_ratio: see ``_attach_peak_markers``.
+        residual_window_detect_fraction: see ``_attach_peak_markers``.
+        missing_intensity_ratio: see ``_attach_peak_markers``.
+        extra_intensity_ratio: see ``_attach_peak_markers``.
+        intensity_mismatch_height_tolerance: see ``_attach_peak_markers``.
+        intensity_mismatch_area_tolerance: see ``_attach_peak_markers``.
+        bgmn_timeout: seconds before the BGMN subprocess is killed (``None``: legacy 1200 s).
+        observed_peaks: optional pre-computed observed peaks (see ``_attach_peak_markers``).
+        cancel_event: optional ``threading.Event``; when set the BGMN process is killed.
+    """
+    pattern_path = Path(pattern_path)
+    working_dir = (
+        Path(working_dir)
+        if working_dir is not None
+        else pattern_path.parent / f"refinement_{pattern_path.stem}"
+    )
+
+    if not working_dir.exists():
+        working_dir.mkdir(exist_ok=True, parents=True)
+
+    if phase_params is None:
+        phase_params = {}
+
+    if refinement_params is None:
+        refinement_params = {}
+
+    if pattern_path.suffix.lower() not in (".xy",):
+        pattern_path = convert_pattern_to_xy(pattern_path, working_dir)
+
+    str_paths = []
+    for phase_path in phases:
+        phase = RefinementPhase.make(phase_path)
+        phase_path_ = phase.path
+        phase_params_ = phase_params.copy()
+        phase_params_.update(phase.params)
+        if phase_path_.suffix == ".cif":
+            str_path = cif2str(phase_path_, "", working_dir, **phase_params_)
+        else:
+            if phase_path_.parent != working_dir:
+                shutil.copy(phase_path_, working_dir)
+            str_path = working_dir / phase_path_.name
+        str_paths.append(str_path)
+
+    control_file_path = generate_control_file(
+        pattern_path=pattern_path,
+        str_paths=str_paths,
+        instrument_profile=instrument_profile,
+        working_dir=working_dir,
+        wavelength=wavelength,
+        **refinement_params,
+    )
+
+    bgmn_worker = BGMNWorker()
+    if cancel_event is None:
+        bgmn_worker.run_refinement_cmd(
+            control_file_path, show_progress=show_progress, timeout=bgmn_timeout
+        )
+    else:
+        bgmn_worker.run_refinement_cmd(
+            control_file_path,
+            show_progress=show_progress,
+            timeout=bgmn_timeout,
+            cancel_event=cancel_event,
+        )
+    result = get_result(control_file_path)
+    range_params = {key: value for key, value in refinement_params.items()
+                    if key in {"wmin", "wmax", "excluded_ranges"}}
+    if range_params:
+        result.peak_data = result.peak_data.loc[
+            analysis_mask(result.peak_data["2theta"], **range_params)
+        ].reset_index(drop=True)
+    marker_extra = {} if observed_peaks is None else {"observed_peaks": observed_peaks}
+    _attach_peak_markers(
+        result, pattern_path, wavelength, instrument_profile,
+        use_residual=use_residual,
+        residual_integral_fraction=residual_integral_fraction,
+        residual_calc_coverage_ratio=residual_calc_coverage_ratio,
+        residual_window_detect_fraction=residual_window_detect_fraction,
+        missing_intensity_ratio=missing_intensity_ratio,
+        extra_intensity_ratio=extra_intensity_ratio,
+        intensity_mismatch_height_tolerance=intensity_mismatch_height_tolerance,
+        intensity_mismatch_area_tolerance=intensity_mismatch_area_tolerance,
+        refinement_params=refinement_params,
+        **marker_extra,
+    )
+    return result
+
+
+def do_refinement_no_saving(
+    pattern_path: Path,
+    phases: list[RefinementPhase | Path | str],
+    wavelength: Literal["Cu", "Co", "Cr", "Fe", "Mo"] | float = "Cu",
+    instrument_profile: str | Path = "Aeris-fds-Pixcel1d-Medipix3",
+    phase_params: dict | None = None,
+    refinement_params: dict | None = None,
+    show_progress: bool = False,
+    use_residual: bool = True,
+    residual_integral_fraction: float = 0.010,
+    residual_calc_coverage_ratio: float = 0.35,
+    residual_window_detect_fraction: float = 0.003,
+    missing_intensity_ratio: float = 0.005,
+    extra_intensity_ratio: float = 0.03,
+    intensity_mismatch_height_tolerance: float = 0.40,
+    intensity_mismatch_area_tolerance: float = 0.60,
+    bgmn_timeout: float | None = None,
+) -> RefinementResult:
+    """Refine the structure using BGMN in a temporary directory without saving.
+
+    Args:
+        use_residual: see ``_attach_peak_markers``.
+        residual_integral_fraction: see ``_attach_peak_markers``.
+        residual_calc_coverage_ratio: see ``_attach_peak_markers``.
+        residual_window_detect_fraction: see ``_attach_peak_markers``.
+        missing_intensity_ratio: see ``_attach_peak_markers``.
+        extra_intensity_ratio: see ``_attach_peak_markers``.
+        intensity_mismatch_height_tolerance: see ``_attach_peak_markers``.
+        intensity_mismatch_area_tolerance: see ``_attach_peak_markers``.
+        bgmn_timeout: seconds before the BGMN subprocess is killed (``None``: legacy 1200 s).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        return do_refinement(
+            pattern_path=pattern_path,
+            phases=phases,
+            wavelength=wavelength,
+            instrument_profile=instrument_profile,
+            working_dir=Path(tmpdir),
+            phase_params=phase_params,
+            refinement_params=refinement_params,
+            show_progress=show_progress,
+            use_residual=use_residual,
+            residual_integral_fraction=residual_integral_fraction,
+            residual_calc_coverage_ratio=residual_calc_coverage_ratio,
+            residual_window_detect_fraction=residual_window_detect_fraction,
+            missing_intensity_ratio=missing_intensity_ratio,
+            extra_intensity_ratio=extra_intensity_ratio,
+            intensity_mismatch_height_tolerance=intensity_mismatch_height_tolerance,
+            intensity_mismatch_area_tolerance=intensity_mismatch_area_tolerance,
+            bgmn_timeout=bgmn_timeout,
+        )
