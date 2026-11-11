@@ -1,0 +1,55 @@
+import React from 'react';
+import { actionForKey } from './keyboardShortcuts.mjs';
+
+export const FIT_MODAL_CLASS = 'dara-fit-modal';
+export const HELP_MODAL_CLASS = 'dara-help-modal';
+
+/** True when focus sits inside an antd modal other than the fit view (or its help overlay). */
+export function foreignModalHasFocus(doc = document) {
+  const active = doc.activeElement;
+  const wrap = active && typeof active.closest === 'function' ? active.closest('.ant-modal-wrap') : null;
+  if (!wrap) return false;
+  return !wrap.classList.contains(FIT_MODAL_CLASS) && !wrap.classList.contains(HELP_MODAL_CLASS);
+}
+
+/** True when another antd modal (Background, Select phases, a confirm) is open over the fit view. */
+export function foreignModalOpen(doc = document) {
+  return [...doc.querySelectorAll('.ant-modal-wrap')].some(wrap => wrap.style.display !== 'none'
+    && !wrap.classList.contains(FIT_MODAL_CLASS) && !wrap.classList.contains(HELP_MODAL_CLASS));
+}
+
+/** True while an antd dropdown menu or select list is shown. */
+export function popupOpen(doc = document) {
+  return Boolean(doc.querySelector('.ant-dropdown:not(.ant-dropdown-hidden), .ant-select-dropdown:not(.ant-select-dropdown-hidden)'));
+}
+
+/**
+ * One window `keydown` listener while `enabled`. `contextRef.current` is the context of
+ * `actionForKey`; `handlers` maps action types to functions (always the latest closures).
+ * `preventDefault` is called only when an action is returned.
+ */
+export default function useKeyboardShortcuts(enabled, contextRef, handlers) {
+  const latest = React.useRef(handlers);
+  latest.current = handlers;
+  React.useEffect(() => {
+    if (!enabled) return undefined;
+    const onKeyDown = event => {
+      if (event.defaultPrevented) return;
+      if (foreignModalHasFocus() || foreignModalOpen()) return;
+      // Escape with a menu or select list open closes only that list, not the fit view
+      // (antd menus close on an outside mousedown, not on Escape).
+      if (event.key === 'Escape' && popupOpen()) {
+        document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        return;
+      }
+      const action = actionForKey(event, contextRef.current || {});
+      if (!action) return;
+      const handler = latest.current?.[action.type];
+      if (!handler) return;
+      event.preventDefault();
+      handler(action);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [enabled, contextRef]);
+}

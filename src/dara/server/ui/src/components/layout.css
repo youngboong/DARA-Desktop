@@ -1,0 +1,235 @@
+/* 14px matches the antd body size, so rem and px sizes agree (1rem = 14px). */
+html {
+  font-size: 14px;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+.zh-cn {
+  font-weight: 600;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+    monospace;
+}
+
+
+/* Coloured note boxes (antd Alert) take the width of their text, up to one readable line
+   length, instead of stretching across the wide content area. Tables and plots stay wide. */
+.ant-alert {
+  width: fit-content;
+  max-width: min(100%, 1100px);
+}
+
+/* Notes listed together share one width: that of the widest note. */
+.dara-note-group {
+  width: fit-content;
+  max-width: min(100%, 1100px);
+}
+
+.dara-note-group > .ant-alert {
+  width: auto;
+  max-width: none;
+}
+
+/* Bordered panels with text and controls (review notes, progress) keep the same limit. */
+.dara-panel {
+  max-width: min(100%, 1100px);
+}
+
+/* Confidence banner and review panel side by side: each fills the width of its column. */
+.dara-summary-row > .ant-col > .ant-alert,
+.dara-summary-row > .ant-col > .dara-panel {
+  width: 100%;
+  max-width: none;
+}
+
+/* Cautions: one bordered list instead of a stack of alerts. */
+.dara-caution-list {
+  width: fit-content;
+  max-width: min(100%, 1100px);
+  padding: 6px 12px;
+  border: 1px solid var(--dara-border-strong);
+  border-radius: var(--dara-radius);
+  background: var(--dara-surface);
+}
+
+.dara-caution-list ul {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dara-caution-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+}
+
+/* Fit plot drawn on the task page, above the details. */
+.dara-inline-fit {
+  margin-bottom: 12px;
+  padding: 8px 12px 4px;
+  border: 1px solid var(--dara-border);
+  border-radius: var(--dara-radius);
+  background: var(--dara-surface);
+}
+
+.dara-inline-fit-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+/* The candidate or version whose fit the page plot shows. */
+.dara-row-shown > td {
+  background: var(--dara-accent-bg) !important;
+}
+
+.dara-row-shown:hover > td.dara-tray-code {
+  background: var(--dara-shell) !important;
+}
+
+/* Results name cell: one line of name, one muted line of date and user; long names end in an ellipsis. */
+.dara-name-cell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.dara-name-cell > a {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dara-name-meta {
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+  white-space: nowrap;
+}
+
+/* Candidate tray: phases as compartments sized by wt%, always filling 100 % of the bar. */
+.dara-tray {
+  min-width: 420px;
+  max-width: 760px;
+}
+
+.dara-tray-bar {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--dara-border-strong);
+  border-radius: var(--dara-radius);
+  overflow: hidden;
+  background: var(--dara-surface);
+}
+
+.dara-tray-cell {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 2px 8px;
+  color: var(--dara-text);
+  white-space: nowrap;
+}
+
+.dara-tray-cell + .dara-tray-cell {
+  border-left: 1px solid var(--dara-surface);
+}
+
+.dara-tray-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A narrow compartment drops the space group before the formula is cut. */
+.dara-tray-cell {
+  container-type: inline-size;
+}
+
+@container (max-width: 140px) {
+  .dara-tray-cell .phase-identity-sg {
+    display: none;
+  }
+}
+
+.dara-tray-rest {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 16px;
+  margin-top: 4px;
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
+.dara-tray-rest > span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.dara-tray-rest i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--dara-border-strong);
+}
+
+/* Stable short codes (C1, C2 …) for candidates. */
+.dara-code {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dara-code-sub {
+  margin-left: 4px;
+  font-size: var(--dara-font-12);
+  font-weight: 400;
+  color: var(--dara-text-secondary);
+}
+
+/* The tray shown in the plot: its code cell turns felt green. */
+.dara-row-shown > td.dara-tray-code {
+  background: var(--dara-shell) !important;
+  color: var(--dara-shell-text);
+}
+
+.dara-row-shown > td.dara-tray-code .dara-code-sub {
+  color: var(--dara-shell-text-dim);
+}
+
+/* Live cursor readout over the fit plot. */
+.dara-readout {
+  display: flex;
+  gap: 16px;
+  min-height: 20px;
+  font-size: var(--dara-font-12);
+  font-variant-numeric: tabular-nums;
+  color: var(--dara-text-secondary);
+}
+
+.dara-readout-live .dara-readout-hint, .dara-readout:not(.dara-readout-live) .dara-readout-value {
+  display: none;
+}
+
+.dara-readout b {
+  font-weight: 600;
+  color: var(--dara-text);
+}

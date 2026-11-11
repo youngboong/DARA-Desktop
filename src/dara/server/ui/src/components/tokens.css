@@ -1,0 +1,165 @@
+/* Specimen Drawer: flat felt-green shell, white label stock on a pale ground, ink text,
+   hairline rules; catalogue red marks only the adopted fit. */
+:root {
+  --dara-shell: #24382e;
+  --dara-shell-text: #f7f8f5;
+  --dara-shell-text-dim: rgba(247, 248, 245, 0.78);
+  --dara-shell-mark: #c99a2e;
+  --dara-ground: #f7f8f5;
+  --dara-mark: #b5482a;
+  --dara-text: #1c1f1d;
+  --dara-text-secondary: #4a504c;
+  --dara-text-hint: #5a605c;
+  --dara-border: #e4e7e1;
+  --dara-border-strong: #c9cdc6;
+  --dara-surface: #ffffff;
+  --dara-surface-sunken: #f2f4f0;
+  /* Data blue for links, primary buttons and focus (5.6:1 on white). */
+  --dara-accent: #3f6c8f;
+  --dara-accent-hover: #2d5170;
+  --dara-accent-bg: #e9f0f5;
+  /* Status roles, each text >= 4.5:1 on its own background. */
+  --dara-ok: #237804;           --dara-ok-bg: #f6ffed;      --dara-ok-border: #b7eb8f;
+  --dara-review: #874d00;       --dara-review-bg: #fffbe6;  --dara-review-border: #ffe58f;
+  --dara-fail: #a8071a;         --dara-fail-bg: #fff1f0;    --dara-fail-border: #ffa39e;
+  --dara-info: #3f6c8f;         --dara-info-bg: #eef3f7;    --dara-info-border: #c3d4e1;
+  --dara-neutral: rgba(0, 0, 0, 0.65); --dara-neutral-bg: #fafafa; --dara-neutral-border: #d9d9d9;
+  --dara-limited: var(--dara-review);
+  --dara-failed: var(--dara-fail);
+  --dara-space-1: 4px; --dara-space-2: 8px; --dara-space-3: 12px;
+  --dara-space-4: 16px; --dara-space-5: 24px; --dara-space-6: 32px;
+  --dara-font-12: 12px; --dara-font-13: 13px; --dara-font-14: 14px;
+  --dara-font-16: 16px; --dara-font-20: 20px; --dara-font-24: 24px;
+  --dara-radius: 2px;
+}
+.dara-num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+/* Browser surfaces in the palette. */
+body { background: var(--dara-ground); color: var(--dara-text); }
+::selection { background: rgba(63, 108, 143, 0.22); }
+/* antd removes outlines on :focus; keyboard focus gets a ring again (ochre on the green bar). */
+:root :focus-visible { outline: 2px solid var(--dara-accent) !important; outline-offset: 1px; }
+:root .ant-layout-header :focus-visible { outline-color: var(--dara-shell-mark) !important; }
+.ant-table-tbody > tr.ant-table-row:focus-visible { outline-offset: -2px; }
+* { scrollbar-color: var(--dara-border-strong) transparent; }
+.ant-typography, .ant-table, .ant-descriptions, h1, h2, h3, h4, h5 { color: var(--dara-text); }
+.ant-table, .ant-descriptions-item-content, .ant-tag { font-variant-numeric: tabular-nums; }
+
+/* Hairline tables: no grey header block, one rule under the head and between rows. */
+.ant-table { background: var(--dara-surface); }
+.ant-table-thead > tr > th {
+  background: var(--dara-surface);
+  color: var(--dara-text-secondary);
+  font-size: var(--dara-font-12);
+  font-weight: 600;
+  border-bottom: 1px solid var(--dara-border-strong);
+}
+.ant-table-thead > tr > th::before { display: none; }
+.ant-table-tbody > tr > td { border-bottom: 1px solid var(--dara-border); }
+.ant-table-tbody > tr.ant-table-row:hover > td { background: var(--dara-surface-sunken); }
+.ant-table-thead th.ant-table-column-has-sorters:hover, td.ant-table-column-sort { background: transparent; }
+.ant-descriptions-bordered .ant-descriptions-item-label { background: var(--dara-surface-sunken); color: var(--dara-text-secondary); }
+.ant-descriptions-bordered .ant-descriptions-view, .ant-descriptions-bordered .ant-descriptions-row,
+.ant-descriptions-bordered .ant-descriptions-item-label, .ant-descriptions-bordered .ant-descriptions-item-content { border-color: var(--dara-border); }
+
+/* Flat surfaces: no drop shadows on menus and popups beyond a hairline. */
+.ant-dropdown-menu, .ant-select-dropdown, .ant-popover-inner, .ant-modal-content {
+  box-shadow: 0 2px 8px rgba(28, 31, 29, 0.12);
+  border-radius: var(--dara-radius);
+}
+.ant-btn, .ant-input, .ant-select-selector, .ant-input-number, .ant-tag, .ant-alert, .ant-radio-button-wrapper:first-child, .ant-radio-button-wrapper:last-child { border-radius: var(--dara-radius) !important; }
+.ant-btn { box-shadow: none; }
+
+/* The adopted fit carries the red catalogue mark. */
+.dara-adopted-mark {
+  display: inline-block;
+  padding: 0 6px;
+  font-size: var(--dara-font-12);
+  font-weight: 600;
+  line-height: 18px;
+  color: #ffffff;
+  background: var(--dara-mark);
+  border-radius: var(--dara-radius);
+  white-space: nowrap;
+}
+
+/* Status tags: the app picks a role (statusTone.mjs) and antd renders it as a preset colour class.
+   These rules replace the preset palette so every tag meets 4.5:1 and the words stay on the tag. */
+.ant-tag-green { color: var(--dara-ok); background: var(--dara-ok-bg); border-color: var(--dara-ok-border); }
+.ant-tag-gold, .ant-tag-orange, .ant-tag-volcano { color: var(--dara-review); background: var(--dara-review-bg); border-color: var(--dara-review-border); }
+.ant-tag-red { color: var(--dara-fail); background: var(--dara-fail-bg); border-color: var(--dara-fail-border); }
+.ant-tag-blue, .ant-tag-geekblue, .ant-tag-processing { color: var(--dara-info); background: var(--dara-info-bg); border-color: var(--dara-info-border); }
+.ant-tag-purple, .ant-tag-magenta, .ant-tag-grey { color: var(--dara-neutral); background: var(--dara-neutral-bg); border-color: var(--dara-neutral-border); }
+.ant-tag:not([class*="ant-tag-"]), .ant-tag-default { color: var(--dara-neutral); }
+
+/* Accent: darker blue for links and primary buttons (contrast), scoped to what the app uses. */
+a, .ant-btn-link, .ant-typography a { color: var(--dara-accent); }
+a:hover, .ant-btn-link:hover, .ant-typography a:hover { color: var(--dara-accent-hover); }
+.ant-btn-primary { background: var(--dara-accent); border-color: var(--dara-accent); }
+.ant-btn-primary:hover, .ant-btn-primary:focus { background: var(--dara-accent-hover); border-color: var(--dara-accent-hover); }
+.ant-btn-primary[disabled], .ant-btn-primary[disabled]:hover { color: rgba(0, 0, 0, 0.25); background: #f5f5f5; border-color: #d9d9d9; }
+.ant-btn-link { background: transparent; }
+.ant-menu-horizontal > .ant-menu-item-selected, .ant-menu-horizontal > .ant-menu-item-selected a, .ant-menu-horizontal > .ant-menu-item:hover a { color: var(--dara-accent); }
+.ant-menu-horizontal > .ant-menu-item-selected::after { border-bottom-color: var(--dara-accent); }
+.ant-radio-group-solid .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled) { background: var(--dara-accent); border-color: var(--dara-accent); }
+.ant-radio-group-solid .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled):hover { background: var(--dara-accent-hover); border-color: var(--dara-accent-hover); }
+.ant-radio-group-solid .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled)::before { background-color: var(--dara-accent); }
+
+/* Other antd controls still on #1890ff (3.2:1): tabs, pagination, checked switch/checkbox/radio, focus borders. */
+.ant-tabs-tab:hover, .ant-tabs-tab-btn:focus, .ant-tabs-tab-btn:active { color: var(--dara-accent-hover); }
+.ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn { color: var(--dara-accent); }
+.ant-tabs-ink-bar { background: var(--dara-accent); }
+.ant-pagination-item-active { border-color: var(--dara-accent); }
+.ant-pagination-item-active a { color: var(--dara-accent); }
+.ant-pagination-item:hover { border-color: var(--dara-accent); }
+.ant-pagination-item:hover a { color: var(--dara-accent); }
+.ant-switch-checked { background: var(--dara-accent); }
+.ant-checkbox-checked .ant-checkbox-inner { background-color: var(--dara-accent); border-color: var(--dara-accent); }
+.ant-checkbox-indeterminate .ant-checkbox-inner::after { background-color: var(--dara-accent); }
+.ant-radio-checked .ant-radio-inner { border-color: var(--dara-accent); }
+.ant-radio-inner::after { background-color: var(--dara-accent); }
+.ant-radio-wrapper:hover .ant-radio, .ant-radio:hover .ant-radio-inner, .ant-radio-input:focus + .ant-radio-inner { border-color: var(--dara-accent); }
+.ant-select:not(.ant-select-disabled):hover .ant-select-selector, .ant-select-focused:not(.ant-select-disabled).ant-select:not(.ant-select-customize-input) .ant-select-selector,
+.ant-input:hover, .ant-input:focus, .ant-input-focused, .ant-input-affix-wrapper:hover, .ant-input-affix-wrapper:focus, .ant-input-affix-wrapper-focused,
+.ant-input-number:hover, .ant-input-number:focus, .ant-input-number-focused { border-color: var(--dara-accent); }
+.ant-upload-hint, .ant-upload.ant-upload-drag p.ant-upload-hint { color: var(--dara-text-secondary); }
+
+/* Hint text: antd placeholder (#bfbfbf, 1.8:1) and secondary text (.45) are below 4.5:1. */
+::placeholder, .ant-input::placeholder, .ant-input-number-input::placeholder,
+.ant-select-selection-placeholder, .ant-picker-input > input::placeholder { color: rgba(0, 0, 0, 0.55); opacity: 1; }
+.ant-typography.ant-typography-secondary, .ant-form-item-extra { color: var(--dara-text-hint); }
+
+/* Metric cells of rows that produced no result are dimmed instead of filled with dashes. */
+.dara-dim { color: var(--dara-text-hint); }
+
+/* Failure and empty states */
+.dara-empty { padding: 32px 0; max-width: 560px; }
+.dara-empty h3 { margin: 0 0 4px; font-size: var(--dara-font-16); font-weight: 600; }
+.dara-empty p { margin: 0 0 16px; color: var(--dara-text-secondary); }
+.dara-failure { width: 100%; max-width: none; margin-bottom: 16px; padding: 16px; border: 1px solid var(--dara-fail-border); background: var(--dara-fail-bg); border-radius: var(--dara-radius); }
+.dara-failure h3 { margin: 0 0 4px; font-size: var(--dara-font-16); font-weight: 600; color: var(--dara-fail); }
+.dara-failure p { margin: 0 0 8px; color: var(--dara-text); }
+.dara-failure details { margin: 8px 0 12px; color: var(--dara-text-secondary); }
+.dara-failure pre { margin: 8px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--dara-font-12); }
+
+.ant-spin-dot-item { background-color: var(--dara-accent); }
+/* Remaining antd default blue: default-button hover, sort carets, upload and info icons. */
+.ant-btn-default:hover, .ant-btn-default:focus, .ant-btn:not(.ant-btn-primary):not(.ant-btn-dangerous):not(.ant-btn-link):hover,
+.ant-btn:not(.ant-btn-primary):not(.ant-btn-dangerous):not(.ant-btn-link):focus { color: var(--dara-accent-hover); border-color: var(--dara-accent); }
+.ant-table-column-sorter-up.active, .ant-table-column-sorter-down.active, .ant-table-filter-trigger.active { color: var(--dara-accent); }
+.ant-upload.ant-upload-drag p.ant-upload-drag-icon .anticon, .ant-alert-info .ant-alert-icon { color: var(--dara-accent); }
+.ant-alert-info { background: var(--dara-info-bg); border-color: var(--dara-info-border); }
+.ant-upload.ant-upload-drag:not(.ant-upload-disabled):hover { border-color: var(--dara-accent); }
+.ant-form-item-label > label.ant-form-item-required:not(.ant-form-item-required-mark-optional)::before { color: var(--dara-text-secondary); }
+.ant-layout-content h2 { font-size: var(--dara-font-20); }
+/* Wide key-value tables scroll inside themselves on narrow screens. */
+.ant-descriptions-view { overflow-x: auto; }
+.ant-spin { color: var(--dara-accent); }
+/* Numeric columns: header aligned with the right-aligned figures. */
+.ant-table-thead > tr > th.dara-num, .ant-table-thead > tr > th.dara-num .ant-table-column-title { text-align: right; }
+.ant-table-thead > tr > th.dara-num .ant-table-column-sorters { justify-content: flex-end; gap: 4px; }
+.ant-table-thead > tr > th.dara-num .ant-table-column-title { flex: 0 1 auto; }
+/* Table rows read from the top line; a text column after a right-aligned number gets a gutter. */
+.ant-table-tbody > tr > td { vertical-align: top; }
+.ant-table-tbody > tr > td.dara-num + td:not(.dara-num), .ant-table-thead > tr > th.dara-num + th:not(.dara-num) { padding-left: 24px; }
+.dara-sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
