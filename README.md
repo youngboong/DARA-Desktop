@@ -68,7 +68,9 @@ the same references throughout.
 **Instrument profile.** Pick the profile that matches your diffractometer. If none does, use
 **Register profile… → Instrument setup** and enter the datasheet values: goniometer radius, slits,
 Soller angles and detector. DARA computes the profile from them in a few minutes. A profile is not
-a calibration: check it against a standard (Si, LaB₆) before you trust sizes or strain.
+a calibration: check it against a standard (Si, LaB₆) before you trust sizes or strain. **Calibrate with a
+standard…** fits the detector width (DetW) of such a profile to a measured Si, LaB₆ or Al₂O₃
+pattern and saves the result as a new profile.
 
 **Series.** Turn on **Submit as a series** to send 2 to 50 patterns with the same settings. The
 Series page plots phase fractions, lattice parameters and fit quality against the variable in the

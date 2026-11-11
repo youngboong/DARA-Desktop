@@ -307,6 +307,14 @@ def _methods_paragraph(
         f"{escape('BGMN ' + bgmn_version if bgmn_version else 'BGMN')} {citations.cite('bgmn')} "
         f"with the fundamental-parameters profile “{escape(str(profile))}”{radius}. "
     )
+    details = ((task.get("job") or {}).get("metadata") or {}).get("instrument_profile_details") or {}
+    calibration = details.get("calibration") if isinstance(details, dict) else None
+    if isinstance(calibration, dict) and calibration.get("standard"):
+        parts.append(
+            f"The instrument function was calibrated with a {escape(str(calibration['standard']))} standard "
+            f"(detector width DetW fitted to {calibration.get('detw')} mm"
+            + (f" on {escape(str(calibration['date']))}" if calibration.get("date") else "") + "). "
+        )
     sources, user_cifs, e_hull = _database_sources(document, task, _phase_sources(phase_names))
     items = []
     if "cod" in sources:
