@@ -1,0 +1,416 @@
+"""Human review and self-contained, printable result summaries.
+
+Review metadata belongs to the task record, not the immutable fit output: adopting
+a chemically plausible candidate never changes the minimum-Rwp result.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import re
+from datetime import datetime, timezone
+from html import escape
+from typing import Annotated, Literal
+
+import numpy as np
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import Response
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StringConstraints
+
+from dara.server import quick_refine, versions
+from dara.server.utils import download_name, get_worker_store, not_completed_detail
+
+router = APIRouter(prefix="/api")
+
+
+class ReviewUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    selection: (
+        Literal["best"]
+        | StrictInt
+        | Annotated[str, StringConstraints(pattern=r"^version:[1-9]\d{0,5}$")]
+        | None
+    ) = None
+    notes: str = Field(default="", max_length=10000)
+
+
+async def _load_completed_task(task_id: int):
+    """``(task, document)`` of a COMPLETED task; the decoded document is cached."""
+    try:
+        return await quick_refine.load_completed(task_id)
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        with get_worker_store() as store:
+            record = store.query_one({"index": task_id})
+        if record is None:
+            raise
+        raise HTTPException(409, not_completed_detail(record.get("status"))) from error
+
+
+def _review_metadata(task: dict) -> dict:
+    review = task.get("review") or {}
+    return {
+        "selection": review.get("selection"),
+        "notes": review.get("notes", ""),
+        "updated_at": review.get("updated_at"),
+    }
+
+
+def _select_refinement(document, selection, task=None):
+    return _resolve(document, selection, task)[0]
+
+
+def _resolve(document, selection, task=None):
+    """``versions.resolve_refinement`` with the legacy 422 for non-selection values."""
+    if selection is not None and (
+        isinstance(selection, bool) or not isinstance(selection, (int, str))
+    ):
+        raise HTTPException(422, "Selection must be 'best' or a candidate source index")
+    if isinstance(selection, int) and selection < 0:
+        raise HTTPException(404, "Search result index out of range")
+    return versions.resolve_refinement(document, task, selection)
+
+
+@router.get("/task/{task_id}/review")
+async def get_review(task_id: int):
+    return _review_metadata(quick_refine.completed_task(task_id))
+
+
+QUICK_CHECK_MESSAGE = (
+    "This version is a quick check with the base phases fixed. "
+    "Use \"Refine all phases\" and adopt or report that version instead."
+)
+
+
+def _refuse_quick_check(task: dict, selection) -> None:
+    """409 for a fast Add-phase version: it is not a final fit (adopt or report the full one)."""
+    if not _is_version_selection(selection):
+        return
+    record = versions.load_version(task["uuid"], versions.parse_selection(selection)[1], light=True)
+    if versions.is_quick_check(record):
+        raise HTTPException(409, QUICK_CHECK_MESSAGE)
+
+
+@router.put("/task/{task_id}/review")
+async def save_review(task_id: int, update: ReviewUpdate):
+    task, document = await _load_completed_task(task_id)
+    selection = update.selection
+    if isinstance(selection, str) and selection.startswith("version:"):
+        parsed = versions.parse_selection(selection)
+        selection = "best" if parsed == "best" else versions.format_selection(parsed)
+        _refuse_quick_check(task, selection)
+    if selection is not None:
+        _select_refinement(document, selection, task)
+    review = {
+        "selection": selection,
+        "notes": update.notes,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    # Reload immediately before writing, preserving any unrelated task metadata.
+    with get_worker_store() as store:
+        current = store.query_one({"index": task_id})
+        if current is None or current.get("uuid") != task.get("uuid"):
+            raise HTTPException(404, "Task no longer exists")
+        if (current.get("review") or {}).get("selection") != selection:
+            current["summary"] = None  # the results list shows the adopted fit: summarize again
+        current["review"] = review
+        store.update(current)
+    return review
+
+
+def _number(value, digits=5) -> str:
+    if value is None:
+        return "—"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{numeric:.{digits}g}" if math.isfinite(numeric) else "—"
+
+
+def _parameter(value: dict) -> str:
+    raw = value.get("value")
+    uncertainty = value.get("esd")
+    text = _number(raw, 8)
+    if uncertainty is not None and math.isfinite(float(uncertainty)):
+        text += f" ± {_number(abs(float(uncertainty)), 2)}"
+    return text + ("°" if value.get("unit") == "deg" else f" {value.get('unit', '')}")
+
+
+def _table(headers: list[str], rows: list[list[str]]) -> str:
+    return (
+        "<table><thead><tr>"
+        + "".join(f"<th>{escape(header)}</th>" for header in headers)
+        + "</tr></thead><tbody>"
+        + "".join("<tr>" + "".join(f"<td>{cell}</td>" for cell in row) + "</tr>" for row in rows)
+        + "</tbody></table>"
+    )
+
+
+def _provenance(phase_name: str) -> str:
+    from dara.server.table_export import provenance
+
+    label, url = provenance(phase_name)
+    if url:
+        return f'<a href="{escape(url, quote=True)}">{escape(label)}</a>'
+    return escape(label)
+
+
+def _fit_svg(refinement, excluded_ranges=None) -> str:
+    """Render full-resolution vectors, retaining narrow peaks and residuals."""
+    data = refinement.plot_data
+    x = np.asarray(data.x, dtype=float)
+    observed = np.asarray(data.y_obs, dtype=float)
+    calculated = np.asarray(data.y_calc, dtype=float)
+    background = np.asarray(data.y_bkg, dtype=float)
+    finite_x = x[np.isfinite(x)]
+    if finite_x.size < 2:
+        return "<p>Fit plot unavailable.</p>"
+    low, high = float(finite_x.min()), float(finite_x.max())
+    if high <= low:
+        return "<p>Fit plot unavailable.</p>"
+    values = np.concatenate((observed, calculated, background))
+    values = values[np.isfinite(values)]
+    y_low = min(0.0, float(values.min())) if values.size else 0.0
+    y_high = max(float(values.max()), y_low + 1) if values.size else 1.0
+    residual = observed - calculated
+    finite_residual = residual[np.isfinite(residual)]
+    r_max = max(float(np.max(np.abs(finite_residual))), 1.0) if finite_residual.size else 1.0
+    left, right, top, bottom, r_top, r_bottom = 82, 1060, 50, 345, 410, 510
+    scale_x = lambda value: left + (value - low) / (high - low) * (right - left)
+    scale_y = lambda value: bottom - (value - y_low) / (y_high - y_low) * (bottom - top)
+    scale_r = lambda value: (r_top + r_bottom) / 2 - value / r_max * (r_bottom - r_top) / 2
+    steps = np.diff(finite_x)
+    positive_steps = steps[steps > 0]
+    gap_limit = float(np.median(positive_steps)) * 3 if positive_steps.size else float("inf")
+
+    def path(values, scale):
+        points, connected, previous_x = [], False, None
+        for angle, value in zip(x, values):
+            if not np.isfinite(angle) or not np.isfinite(value):
+                connected = False
+                continue
+            if previous_x is not None and angle - previous_x > gap_limit:
+                connected = False
+            points.append(f"{'L' if connected else 'M'}{scale_x(angle):.2f},{scale(value):.2f}")
+            connected, previous_x = True, angle
+        return " ".join(points)
+
+    out = ['<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 565" role="img" aria-label="Observed and calculated diffraction patterns with separate difference panel">', '<rect width="1100" height="565" fill="white"/>']
+    for label, color, label_x in (("Observed", "#111827", 82), ("Calculated", "#dc2626", 250), ("Background", "#94a3b8", 430), ("Difference (Obs − calc)", "#2563eb", 625)):
+        out.append(f'<line x1="{label_x}" x2="{label_x + 25}" y1="20" y2="20" stroke="{color}" stroke-width="2"/><text x="{label_x + 32}" y="25" font-size="14">{label}</text>')
+    for y0, y1 in ((top, bottom), (r_top, r_bottom)):
+        out.append(f'<rect x="{left}" y="{y0}" width="{right-left}" height="{y1-y0}" fill="none" stroke="#64748b"/>')
+        for interval in excluded_ranges or []:
+            try:
+                start, end = map(float, interval)
+            except (TypeError, ValueError):
+                continue
+            if not np.isfinite([start, end]).all() or end <= low or start >= high:
+                continue
+            x0, x1 = scale_x(max(low, start)), scale_x(min(high, end))
+            if x1 > x0:
+                out.append(f'<rect x="{x0:.2f}" y="{y0}" width="{x1-x0:.2f}" height="{y1-y0}" fill="#e2e8f0"><title>Excluded from refinement</title></rect>')
+    for y_values, scale, color in ((observed, scale_y, "#111827"), (calculated, scale_y, "#dc2626"), (background, scale_y, "#94a3b8"), (residual, scale_r, "#2563eb")):
+        out.append(f'<path d="{path(y_values, scale)}" fill="none" stroke="{color}" stroke-width="1"/>')
+    for value in np.linspace(low, high, 7):
+        px = scale_x(value)
+        for y_end in (bottom, r_bottom):
+            out.append(f'<path d="M{px:.2f},{y_end}v6" stroke="#64748b"/><text x="{px:.2f}" y="{y_end+23}" text-anchor="middle" font-size="12">{value:.2f}</text>')
+    for value in np.linspace(y_low, y_high, 5):
+        out.append(f'<text x="{left-8}" y="{scale_y(value)+4:.2f}" text-anchor="end" font-size="12">{value:.4g}</text>')
+    for value in (-r_max, 0, r_max):
+        out.append(f'<text x="{left-8}" y="{scale_r(value)+4:.2f}" text-anchor="end" font-size="12">{value:.4g}</text>')
+    out.extend((f'<line x1="{left}" x2="{right}" y1="{scale_r(0)}" y2="{scale_r(0)}" stroke="#94a3b8" stroke-dasharray="3 3"/>', '<text x="570" y="390" text-anchor="middle" font-size="14">2θ (°)</text>', '<text x="570" y="553" text-anchor="middle" font-size="14">2θ (°)</text>', '<text x="18" y="200" text-anchor="middle" transform="rotate(-90 18 200)" font-size="14">Intensity</text>', '<text x="18" y="460" text-anchor="middle" transform="rotate(-90 18 460)" font-size="14">Obs − calc</text>', '</svg>'))
+    return "".join(out)
+
+
+def _public_settings(value):
+    """Never put API credentials into a portable report."""
+    if isinstance(value, dict):
+        return {
+            key: "[redacted]" if re.search(r"api.?key|token|password|secret", str(key), re.I) else _public_settings(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_public_settings(item) for item in value]
+    return value
+
+
+def _render_report(task_id: int, task: dict, document, selection, review: dict, hkl: bool = False) -> str:
+    # Local import lets the application register this router without import cycles.
+    from dara.server.report.builder import build_report_html
+
+    if _is_version_selection(selection):
+        number = versions.parse_selection(selection)[1]
+        record = versions.load_version(task["uuid"], number)
+        view = versions.document_view(document, task, record)
+        label = f"Version {number} \u2014 {record.get('label') or 'Re-refinement'}"
+        job_view = versions.version_job_view(task, f"v{number}", record.get("overrides"))
+        return build_report_html(
+            task_id, job_view, view, "best", review,
+            selection_label=label, selection_key=f"version:{number}", hkl_labels=hkl,
+        )
+    return build_report_html(task_id, task, document, selection, review, hkl_labels=hkl)
+
+
+def _report_selection(idx, best: bool, review: dict, sel: str | None = None):
+    """Precedence: ``idx`` > ``best`` > ``sel`` > the adopted review selection."""
+    sel = sel if isinstance(sel, str) else None  # direct calls leave the Query default object
+    if idx is not None and best:
+        raise HTTPException(422, "Choose either idx or best, not both")
+    if idx is not None:
+        return idx
+    if best:
+        return "best"
+    if sel is not None:
+        return versions.format_selection(versions.parse_selection(sel))
+    return review["selection"] if review["selection"] is not None else "best"
+
+
+def _is_version_selection(selection) -> bool:
+    return isinstance(selection, str) and selection.startswith("version:")
+
+
+def _download_selection(selection):
+    """Selection argument of ``download_name`` (``None`` for the final fit)."""
+    return None if selection == "best" else selection
+
+
+@router.get("/task/{task_id}/report")
+async def download_report(
+    task_id: int,
+    idx: int | None = Query(None, ge=0),
+    best: bool = False,
+    sel: str | None = Query(None),
+    hkl: bool = False,
+):
+    if idx is not None and best:
+        raise HTTPException(422, "Choose either idx or best, not both")
+    task, document = await _load_completed_task(task_id)
+    review = _review_metadata(task)
+    selection = _report_selection(idx, best, review, sel)
+    _refuse_quick_check(task, selection)
+    html = _render_report(task_id, task, document, selection, review, hkl is True)
+    filename = download_name(
+        task_id, task["job"]["name"], "report", _download_selection(selection), "html"
+    )
+    return Response(
+        html,
+        media_type="text/html",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+@router.get("/task/{task_id}/report.zip")
+async def download_report_bundle(
+    task_id: int,
+    idx: int | None = Query(None, ge=0),
+    best: bool = False,
+    sel: str | None = Query(None),
+    hkl: bool = False,
+):
+    """The report as PDF (printed by a local Edge/Chrome) and as an editable Word file, in one ZIP.
+
+    Without a browser to print with, the HTML report takes the PDF's place.
+    """
+    import io
+    import zipfile
+
+    from starlette.concurrency import run_in_threadpool
+
+    from dara.server.api_router import _counts_like
+    from dara.server.report.export import html_to_docx, html_to_pdf
+    from dara.server.report.figures import fit_figure
+
+    if idx is not None and best:
+        raise HTTPException(422, "Choose either idx or best, not both")
+    task, document = await _load_completed_task(task_id)
+    review = _review_metadata(task)
+    selection = _report_selection(idx, best, review, sel)
+    _refuse_quick_check(task, selection)
+    html = _render_report(task_id, task, document, selection, review, hkl is True)
+    try:
+        refinement, meta = _resolve(document, selection, task)
+        figure_png = fit_figure(
+            refinement, fmt="png", dpi=300, width_mm=170,
+            excluded_ranges=(meta.get("refinement_params") or {}).get("excluded_ranges"),
+            counts_like=_counts_like(document), hkl_labels=hkl is True,
+        )
+    except Exception:  # noqa: BLE001 - the Word file is written without the figure
+        figure_png = None
+    pdf = await run_in_threadpool(html_to_pdf, html)
+    docx = await run_in_threadpool(html_to_docx, html, figure_png)
+
+    def name(ext: str) -> str:
+        return download_name(task_id, task["job"]["name"], "report", _download_selection(selection), ext)
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        if pdf:
+            archive.writestr(name("pdf"), pdf)
+        else:
+            archive.writestr(name("html"), html)
+        archive.writestr(name("docx"), docx)
+    return Response(
+        buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{name("zip")}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+_FIGURE_MEDIA = {"png": "image/png", "svg": "image/svg+xml"}
+
+
+@router.get("/task/{task_id}/figure.{fmt}")
+async def download_figure(
+    task_id: int,
+    fmt: str,
+    idx: int | None = Query(None, ge=0),
+    best: bool = False,
+    dpi: int = 600,
+    width_mm: float = 170,
+    sel: str | None = Query(None),
+    hkl: bool = False,
+):
+    """Publication-style fit figure (PNG or SVG) of the selected refinement."""
+    if fmt not in _FIGURE_MEDIA:
+        raise HTTPException(404, "Unsupported figure format; use png or svg")
+    if idx is not None and best:
+        raise HTTPException(422, "Choose either idx or best, not both")
+    task, document = await _load_completed_task(task_id)
+    review = _review_metadata(task)
+    selection = _report_selection(idx, best, review, sel)
+    refinement, meta = _resolve(document, selection, task)
+    from dara.server.api_router import _counts_like
+    from dara.server.report.figures import fit_figure
+
+    excluded = (meta.get("refinement_params") or {}).get("excluded_ranges")
+    try:
+        content = fit_figure(
+            refinement, fmt=fmt, dpi=dpi, width_mm=width_mm, excluded_ranges=excluded,
+            counts_like=_counts_like(document), hkl_labels=hkl is True,
+        )
+    except Exception as exc:
+        raise HTTPException(500, f"Figure rendering failed: {exc}") from exc
+    filename = download_name(
+        task_id, task["job"]["name"], "figure", _download_selection(selection), fmt
+    )
+    return Response(
+        content,
+        media_type=_FIGURE_MEDIA[fmt],
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
