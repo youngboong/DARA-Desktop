@@ -7,3 +7,6 @@
   to room temperature is kept. Energies above hull are determined by looking for matches
   with the same spacegroup and formula on Materials Project; hence they are only rough
   estimates for prioritization.
+
+**standards/**: line-profile standards for instrument-profile calibration, from COD:
+  Si 9013102 (Fd-3m, a = 5.4304 A), LaB6 1000057 (Pm-3m, a = 4.1570 A), Al2O3 corundum 1000032 (R-3c).

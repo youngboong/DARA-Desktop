@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from copy import deepcopy
 from types import SimpleNamespace
 from uuid import uuid4
@@ -160,6 +161,59 @@ def test_profile_built_from_instrument_setup(tmp_path, monkeypatch):
     for bad in ({'divergence': 'fixed'}, {'divergence_distance': 300}, {'detector_length': None}):
         with pytest.raises(HTTPException):
             asyncio.run(instrument_router.build_profile(instrument_router.InstrumentSetup(**{**setup, **bad})))
+
+
+def test_detw_scan_picks_minimum_of_rwp_curve():
+    calls = []
+    def rwp_at(detw):
+        calls.append(detw)
+        return 5 + np.log(detw / 0.11) ** 2
+    best, curve = instrument_profiles.scan_detw(rwp_at, 0.075)
+    assert len(calls) <= instrument_profiles.SCAN_COMPILES
+    assert abs(best - 0.11) < 1e-6 and min(curve.values()) == curve[best]
+    edge, _ = instrument_profiles.scan_detw(lambda d: d, 0.075)  # monotonic: lowest bound wins
+    assert edge == min(_) and edge >= instrument_profiles.DETW_BOUNDS[0]
+
+
+def test_calibration_needs_device_file_and_keeps_original(tmp_path, monkeypatch):
+    profiles = tmp_path / 'profiles'
+    monkeypatch.setattr(instrument_profiles, 'registry_directory', lambda: profiles)
+    monkeypatch.setattr(instrument_router, 'registry_directory', lambda: profiles)
+    def upload(name='lab.geq', content=b'geq fixture'):
+        return UploadFile(file=io.BytesIO(content), filename=name)
+    uploaded = asyncio.run(instrument_router.register_profile(label='Lab Cu', geometry='BB', radiation='Cu', notes='',
+        verified=False, verified_by='', geq=upload(), ger=None))
+    pattern = lambda: upload('si.xy', b'\n'.join(f'{20 + i * 0.02:.2f} {100 + i % 7}'.encode() for i in range(500)))
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(instrument_router.calibrate_profile(profile=uploaded['id'], standard='LaB6', wavelength='Cu', pattern_file=pattern()))
+    assert error.value.status_code == 400 and 'no device file (.sav)' in error.value.detail
+
+    monkeypatch.setattr(instrument_profiles, 'compile_device_file', lambda text: (text.encode(), b'ger'))
+    def fit(folder, pattern_path, standard, wavelength, broadening):
+        detw = instrument_profiles.device_detw((folder / 'instrument.geq').read_text())
+        return 5 + np.log(detw / 0.11) ** 2, (900.0 if broadening else None)
+    monkeypatch.setattr(instrument_profiles, 'fit_standard', fit)
+    built = asyncio.run(instrument_router.build_profile(instrument_router.InstrumentSetup(
+        label='Lab D8', radiation='Cu', radius=280, divergence='fixed', divergence_angle=0.5, divergence_distance=180,
+        detector='linear', detector_length=14.4, strip_width=0.075)))
+    original = {path.name: path.read_bytes() for path in (profiles / built['id'].removeprefix('user-')).iterdir()}
+    job = asyncio.run(instrument_router.calibrate_profile(profile=built['id'], standard='LaB6', wavelength='Cu', pattern_file=pattern()))
+    for _ in range(200):
+        if instrument_router._CALIBRATIONS[job['id']]['status'] != 'running':
+            break
+        threading.Event().wait(0.05)
+    done = asyncio.run(instrument_router.calibration_status(job['id']))
+    assert done['status'] == 'done', done
+    stored = done['result']
+    calibration = stored['calibration']
+    assert stored['label'].startswith('Lab D8 · calibrated (LaB6, ') and stored['id'] != built['id']
+    assert abs(calibration['detw'] - 0.11) < 1e-4 and calibration['detw_start'] == 0.075
+    assert calibration['rwp'] < calibration['rwp_start'] and calibration['apparent_size_nm'] == 900.0
+    assert calibration['pattern'] == 'si.xy' and done['completed'] == done['total']
+    folder = profiles / stored['id'].removeprefix('user-')
+    assert 'DetW=0.11' in (folder / 'instrument.sav').read_text() and (folder / 'instrument.geq').is_file()
+    assert instrument_profiles.registered_profiles()[stored['id']]['calibration']['standard'] == 'LaB6'
+    assert {path.name: path.read_bytes() for path in (profiles / built['id'].removeprefix('user-')).iterdir()} == original
 
 
 def test_candidate_comparison_grid_exclusions_and_identity(monkeypatch, references):

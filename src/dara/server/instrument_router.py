@@ -1,6 +1,10 @@
 import hashlib
 import json
+import shutil
 import subprocess
+import tempfile
+import threading
+from pathlib import Path
 from typing import Literal
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -43,16 +47,19 @@ async def register_profile(
     return _store(label, geometry, radiation, notes, verified, verified_by, files)
 
 
-def _store(label, geometry, radiation, notes, verified, verified_by, files):
+def _store(label, geometry, radiation, notes, verified, verified_by, files, extra=None):
     identity = str(uuid4())
-    metadata = {"id": f"user-{identity}", "label": label.strip(), "geometry": geometry.strip(),
+    metadata = {**(extra or {}), "id": f"user-{identity}", "label": label.strip(), "geometry": geometry.strip(),
                 "radiation": radiation.strip(), "notes": notes, "verified": verified,
                 "verified_by": verified_by if verified else "", "verification": "operator-declared" if verified else "unverified",
-                "created_at": datetime.now(timezone.utc).isoformat(), "has_ger": ".ger" in files,
-                "sha256": {key: hashlib.sha256(value).hexdigest() for key, value in files.items()}}
+                "created_at": datetime.now(timezone.utc).isoformat(), "has_ger": ".ger" in files, "has_sav": ".sav" in files,
+                "sha256": {key: hashlib.sha256(value).hexdigest() for key, value in files.items() if key != ".sav"}}
     directory = registry_directory() / identity
     directory.mkdir(parents=True)
-    for extension, content in files.items():
+    for extension, content in files.items():  # .sav is stored but not hashed: it is not used in fits
+        if extension == ".sav":
+            (directory / "instrument.sav").write_text(content, encoding="utf-8")
+            continue
         (directory / f"instrument{extension}").write_bytes(content)
     # Publish metadata last. Existing registrations are never overwritten.
     (directory / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
@@ -110,7 +117,85 @@ async def build_profile(setup: InstrumentSetup):
     geometry = (f"Bragg-Brentano R {setup.radius:g} mm, divergence {slit}, Soller {setup.soller_primary:g}/"
                 f"{setup.soller_secondary:g}°, {setup.detector} detector"
                 + (", graphite monochromator" if setup.monochromator == "graphite" else ""))
-    files = {".geq": geq, **({".ger": ger} if ger else {})}
-    stored = _store(setup.label, geometry, setup.radiation, setup.notes, False, "", files)
-    (registry_directory() / stored["id"].removeprefix("user-") / "instrument.sav").write_text(device, encoding="utf-8")
-    return stored
+    files = {".geq": geq, **({".ger": ger} if ger else {}), ".sav": device}
+    return _store(setup.label, geometry, setup.radiation, setup.notes, False, "", files)
+
+
+# Calibration jobs live in memory like quick-refine jobs; a server restart forgets them.
+_CALIBRATIONS = {}
+_CALIBRATION_LOCK = threading.Lock()
+
+
+@router.post("/instrument-profiles/calibrate")
+async def calibrate_profile(
+    profile: str = Form(..., min_length=1, max_length=200),
+    standard: Literal["Si", "LaB6", "Al2O3"] = Form(...),
+    wavelength: Literal["Cu", "Co", "Cr", "Fe", "Mo"] = Form("Cu"),
+    pattern_file: UploadFile = File(...),
+):
+    """Start fitting DetW of a profile to a measured standard; poll the returned job."""
+    from dara.xrd import load_pattern
+
+    try:
+        device = instrument_profiles.device_file_text(profile)
+    except (ValueError, FileNotFoundError) as error:
+        raise HTTPException(404, "Instrument profile not found.") from error
+    if device is None:
+        raise HTTPException(400, "This profile has no device file (.sav); calibration needs one.")
+    if instrument_profiles.device_detw(device) is None:
+        raise HTTPException(400, "DetW in this device file is not a plain number; calibration needs one.")
+    folder = Path(tempfile.mkdtemp(prefix="dara-standard-"))
+    pattern_path = folder / Path(pattern_file.filename or "standard.xy").name
+    pattern_path.write_bytes(await pattern_file.read(64 * 1024 * 1024))
+    try:
+        load_pattern(pattern_path)
+    except Exception as error:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise HTTPException(400, f"Could not read pattern: {error}") from error
+    base = instrument_profiles.registered_profiles().get(profile) or {
+        "label": profile, "geometry": f"BGMN template {profile}", "radiation": wavelength}
+    job_id = uuid4().hex[:12]
+    job = {"id": job_id, "status": "running", "completed": 0, "total": instrument_profiles.SCAN_COMPILES,
+           "profile": profile, "standard": standard, "wavelength": wavelength}
+    with _CALIBRATION_LOCK:  # one at a time: each compile already uses all cores
+        if any(other["status"] == "running" for other in _CALIBRATIONS.values()):
+            shutil.rmtree(folder, ignore_errors=True)
+            raise HTTPException(409, "Another calibration is running; wait for it to finish.")
+        _CALIBRATIONS[job_id] = job
+    threading.Thread(target=_run_calibration, args=(job, device, pattern_path, base), daemon=True,
+                     name=f"dara-calibrate-{job_id}").start()
+    return dict(job)
+
+
+def _run_calibration(job, device, pattern_path, base):
+    def progress(done, total):
+        job.update(completed=done, total=total)
+
+    try:
+        fit = instrument_profiles.calibrate_detw(device, pattern_path, job["standard"], job["wavelength"], progress)
+        day = datetime.now(timezone.utc).date().isoformat()
+        suffix = f" · calibrated ({job['standard']}, {day})"
+        calibration = {"standard": job["standard"], "pattern": pattern_path.name, "source_profile": job["profile"],
+                       "detw": round(fit["detw"], 5), "detw_start": fit["detw_start"], "rwp_start": fit["rwp_start"],
+                       "rwp": fit["rwp"], "apparent_size_nm": fit["apparent_size_nm"],
+                       "curve": [[round(d, 5), r] for d, r in fit["curve"]], "date": day}
+        files = {".geq": fit["geq"], **({".ger": fit["ger"]} if fit["ger"] else {}), ".sav": fit["sav"]}
+        notes = (f"DetW fitted to {job['standard']} ({pattern_path.name}): {fit['detw_start']:g} -> {fit['detw']:.4g} mm, "
+                 f"Rwp {fit['rwp_start']:.2f} -> {fit['rwp']:.2f} %"
+                 + (f", apparent size {fit['apparent_size_nm']:.0f} nm." if fit["apparent_size_nm"] else "."))
+        label = base["label"].split(" · calibrated (")[0]  # recalibration replaces the old suffix
+        stored = _store(label[:120 - len(suffix)] + suffix, base["geometry"], base["radiation"], notes,
+                        False, "", files, {"calibration": calibration})
+        job.update(status="done", result=stored)
+    except Exception as error:  # noqa: BLE001 - reported to the user through the job
+        job.update(status="failed", error=str(error)[-500:])
+    finally:
+        shutil.rmtree(pattern_path.parent, ignore_errors=True)
+
+
+@router.get("/instrument-profiles/calibrate/{job_id}")
+async def calibration_status(job_id: str):
+    job = _CALIBRATIONS.get(job_id)
+    if job is None:
+        raise HTTPException(404, "Calibration job not found (the server may have restarted).")
+    return dict(job)
