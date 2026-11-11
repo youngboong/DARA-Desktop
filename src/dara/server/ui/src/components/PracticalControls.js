@@ -178,7 +178,7 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
     <Modal title="Calibrate the profile with a standard" open={open} width={560} onCancel={() => setOpen(false)}
       onOk={result || job?.status === 'failed' ? () => { setJob(null); setOpen(false); } : start}
       okText={result || job?.status === 'failed' ? 'Close' : 'Start calibration'} okButtonProps={{ disabled: running }} cancelButtonProps={{ style: running || result ? { display: 'none' } : undefined }}>
-      <p>DARA fits the detector width (DetW) of “{profile}” to a measured line-profile standard: up to six profile compiles, each followed by a refinement without sample broadening. The best DetW is saved as a new profile; the original stays unchanged. This takes tens of minutes and continues on the server when you close this window.</p>
+      <p>DARA fits the detector width (DetW) of “{profile}” to a measured line-profile standard: up to six profile compiles, each followed by a refinement without sample broadening. The best DetW is saved as a new profile; the original stays unchanged. This takes about 40 minutes and continues on the server when you close this window.</p>
       {!job ? <Space wrap align="start">
         <label>Standard<br /><Select aria-label="Standard material" value={standard} onChange={setStandard} style={{ width: 160 }}
           options={[{ value: 'LaB6', label: 'LaB6 (Pm-3m)' }, { value: 'Si', label: 'Si (Fd-3m)' }, { value: 'Al2O3', label: 'Al2O3 corundum' }]} /></label>
@@ -187,7 +187,7 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
         <label>Measured standard pattern<br /><input aria-label="Standard pattern file" type="file" onChange={e => setFile(e.target.files[0])} /></label>
       </Space> : null}
       {running ? <><Progress percent={Math.round(100 * job.completed / job.total)} status="active" />
-        <p>{job.completed} / {job.total} profile compiles finished (each takes a few minutes).</p></> : null}
+        <p>{job.completed} / {job.total} profile compiles finished (3–15 min each; smaller DetW takes longer).</p></> : null}
       {job?.status === 'failed' ? <Alert type="error" showIcon message="Calibration failed" description={job.error} /> : null}
       {fit ? <Alert type="success" showIcon message={`Saved and selected: ${result.label}`}
         description={<>DetW {fit.detw_start} → {fit.detw} mm · Rwp {fit.rwp_start.toFixed(2)} → {fit.rwp.toFixed(2)} %<br />
