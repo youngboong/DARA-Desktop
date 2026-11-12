@@ -95,7 +95,7 @@ def reflections_from_cell(
     return max(1, round(count / _group_divisor(sg_number, bool(primitive))))
 
 
-def _stem_spacegroup(stem: str) -> int | None:
+def stem_spacegroup(stem: str) -> int | None:
     parts = stem.split("_")
     if len(parts) >= 2 and parts[1].isdigit():
         number = int(parts[1])
@@ -114,7 +114,7 @@ def estimate_reflections(path_or_structure, wavelength, two_theta_max: float) ->
 
             path = Path(getattr(path_or_structure, "path", path_or_structure))
             structure = Cif.from_file(path).to_structure()
-            sg_number = _stem_spacegroup(path.stem)
+            sg_number = stem_spacegroup(path.stem)
         if sg_number is None:
             from pymatgen.symmetry.analyzer import SpacegroupAnalyzer
 

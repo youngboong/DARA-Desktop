@@ -531,7 +531,7 @@ function FitQualitySummary({ quality, dwOnly = false }) {
 
 const STOP_STAGE_LABEL = { screening: 'reference screening', search: 'phase search', final_refinement: 'final refinement' };
 
-const PRUNE_REASON = { failed: 'refinement failed', negligible: 'below 0.5 wt%', duplicate: 'same phase as a heavier one' };
+const PRUNE_REASON = { failed: 'refinement failed', negligible: 'below 0.5 wt%', duplicate: 'same phase as a heavier one', removed_no_peak_evidence: 'removing it left no peak unexplained' };
 
 function SearchSummary({ summary = {} }) {
   if (!Object.keys(summary).length) return <Text type="secondary">Detailed search counts were not stored for this older result.</Text>;
@@ -546,7 +546,7 @@ function SearchSummary({ summary = {} }) {
     {summary.final_refinement_skipped ? <Tag color="orange">{`${summary.final_refinement_skipped} final refinement(s) skipped (time limit)`}</Tag> : null}
     {/* Phases that collapsed or repeated another one were dropped and the fit refined again. */}
     {summary.pruned_phases?.length ? <Tooltip title={<div>{summary.pruned_phases.map(item =>
-      <div key={`${item.candidate}-${item.phase}`}>{`${item.phase} (${PRUNE_REASON[item.reason] || item.reason})`}</div>)}</div>}>
+      <div key={`${item.candidate}-${item.phase}`}>{`${item.phase} (${PRUNE_REASON[item.reason] || item.reason}${item.weight_percent == null ? '' : `, ${item.weight_percent} wt%`})`}</div>)}</div>}>
       <Tag>{`${summary.pruned_phases.length} phase(s) dropped after final refinement`}</Tag>
     </Tooltip> : null}
   </Space>;

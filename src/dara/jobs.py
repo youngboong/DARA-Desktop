@@ -318,9 +318,12 @@ LEAVE_ONE_OUT_BELOW = 0.05
 
 
 def _one_structure_per_formula(results, screening_rwps, groups, rwp_by_reference):
-    """Known-phase mode: each hypothesis keeps one structure per listed formula (the ``pick_stem`` one).
+    """Known-phase mode: each hypothesis keeps one structure per listed formula and space group.
 
-    Hypotheses that become identical are merged (the first, best ranked, stays).
+    Of several structures with the same formula and space group (the same structure type) the
+    ``pick_stem`` one stays; structures of one formula with different space-group numbers are
+    polymorphs and stay together. Hypotheses that become identical are merged (the first, best
+    ranked, stays).
     """
     group_of = {stem: group for group in groups for stem in group.stems}
     kept, seen = [], set()
@@ -328,8 +331,12 @@ def _one_structure_per_formula(results, screening_rwps, groups, rwp_by_reference
         stems = [phases[0].path.stem for phases in result.phases]
         drop = set()
         for group in {group_of[stem] for stem in stems if stem in group_of}:
-            here = tuple(stem for stem in stems if stem in group.stems)
-            drop.update(set(here) - {known_phases.pick_stem(known_phases.Group(group.label, here), rwp_by_reference)})
+            by_space_group: dict[int | None, list[str]] = {}
+            for stem in stems:
+                if stem in group.stems:
+                    by_space_group.setdefault(candidate_cost.stem_spacegroup(stem), []).append(stem)
+            for here in by_space_group.values():
+                drop.update(set(here) - {known_phases.pick_stem(known_phases.Group(group.label, tuple(here)), rwp_by_reference)})
         if drop:
             result = _without_phases(result, drop)
         key = frozenset(phases[0].path.stem for phases in result.phases)
@@ -361,8 +368,8 @@ def _check_listed_phases(
     2. Additive: for each listed formula still without a phase, the best single structure of the
        formula (``pick_stem``) is added in a trial refit; it is kept, and later trials build on it,
        only when the count falls. A formula dropped in step 1 is not tried again.
-    A dropped or rejected formula is recorded in ``removed`` as ``no_peak_evidence`` with the weight
-    it had (``failed`` when its trial did not refine). After ``out_of_time()`` no more refits are
+    A phase dropped in step 1 is recorded in ``removed`` as ``removed_no_peak_evidence``, a rejected trial of
+    step 2 as ``no_peak_evidence``, each with the weight it had (``failed`` when the trial did not refine). After ``out_of_time()`` no more refits are
     run: remaining formulas of step 2 are recorded as ``not_checked``, remaining phases of step 1 stay.
     The files of ``best_dir`` are replaced by every kept refit.
 
@@ -420,7 +427,7 @@ def _check_listed_phases(
         shutil.rmtree(best_dir)
         trial_dir.rename(best_dir)
         result, phases, changed, before = _with_refinement(trial_result, trial), trial_phases, True, after
-        removed[stem] = ("no_peak_evidence", float(weight))
+        removed[stem] = ("removed_no_peak_evidence", float(weight))
 
     for done, group in enumerate(todo, start=len(light)):
         report_progress("Checking listed phases", done, total)
@@ -977,6 +984,11 @@ class PhaseSearchMaker(Maker):
                     removed_by_dir.setdefault(best_dir, {}), prepare=prepare, refit=refit,
                     count=lambda fit: _unexplained_peaks(fit, xrd_data, search_kwargs),
                     out_of_time=lambda: final_deadline is not None and time.monotonic() >= final_deadline,
+                )
+                pruned_phases.extend(  # a phase removed by leave-one-out is shown like a pruned one, with its weight
+                    {"candidate": best_index, "phase": stem, "reason": reason, "weight_percent": round(100 * weight, 2)}
+                    for stem, (reason, weight) in removed_by_dir[best_dir].items()
+                    if reason == "removed_no_peak_evidence"
                 )
                 if changed:  # the checked fit stays the first candidate, whatever its Rwp
                     best, refined, _ = prune(best, best.refinement_result, trial_phases, best_dir, best_index)

@@ -71,6 +71,11 @@ def test_report_has_one_outcome_per_listed_formula():
     )
     assert na["status"] == "no_structure" and na["weight_percent"] is None
     assert kp.not_detected_text(la) == "La(OH)3: not detected (refined to 0.2 wt%, removed)"
+    loo = kp.known_phase_report([kp.Group("ZrO2", (ZR1,))], {}, {ZR1: ("removed_no_peak_evidence", 0.003)})[0]
+    assert loo["reason"] == "removed_no_peak_evidence"
+    assert kp.not_detected_text(loo) == (  # left the best fit by leave-one-out: not a trial fit
+        "ZrO2: not detected (refined to 0.3 wt%, but removing it left no additional peak unexplained)"
+    )
     assert kp.not_detected_text(na).startswith("NaCl: no reference structure found")
     assert kp.not_detected_text(zr) is None
 
@@ -191,12 +196,14 @@ def test_report_states_missing_phases_and_the_mp_fallback():
             {"formula": "Li2CO3", "status": "refined"},
             {"formula": "ZrO2", "status": "not_detected", "removed_weight_percent": 0.2},
             {"formula": "NaCl", "status": "no_structure"},
+            {"formula": "KCl", "status": "not_detected", "removed_weight_percent": 0.3, "reason": "removed_no_peak_evidence"},
         ]},
         candidate_summary={"mp_fallback_formulas": ["La(OH)3"]},
     )
     text = " ".join(_known_phase_notes(document, True))
     assert "ZrO2: not detected (refined to 0.2 wt%, removed)." in text
     assert "NaCl: no reference structure found" in text and "Li2CO3" not in text
+    assert "KCl: not detected (refined to 0.3 wt%, but removing it left no additional peak unexplained)." in text
     assert "La(OH)3: structure taken from Materials Project (no COD structure)." in text
     # an adopted re-refinement is not the automatic fit the summary describes
     assert "ZrO2" not in " ".join(_known_phase_notes(document, False))
@@ -323,6 +330,7 @@ def test_job_does_not_query_mp_when_every_formula_has_a_cod_structure(monkeypatc
 
 # ---- the job: probation of listed formulas the search did not pick ------------------------------
 NACL, KCL, KCL2, RBCL = "NaCl_225_(cod_5)-0", "KCl_225_(cod_6)-0", "KCl_225_(cod_8)-0", "RbCl_225_(cod_7)-0"
+KCL_P = "KCl_221_(cod_9)-0"  # another space group: a polymorph of KCl
 
 
 def _slot_result(phases):
@@ -371,7 +379,7 @@ def _known_job(monkeypatch, tmp_path, table, *, fail=(), screening=None, files=N
             missing_peaks=np.array(rows) if rows else None, extra_peaks=None, intensity_mismatch_peaks=None
         )
         fit.lst_data.phases_results = {
-            name: SimpleNamespace(gewicht=weights[name], a=5.0, spacegroup_no=225) for name in names
+            name: SimpleNamespace(gewicht=weights[name], a=5.0, spacegroup_no=int(name.split("_")[1])) for name in names
         }
         total = sum(weights.values())
         fit.get_phase_weights = lambda: {name: weight / total for name, weight in weights.items()}
@@ -487,6 +495,63 @@ def test_one_structure_per_formula_in_each_hypothesis_and_identical_hypotheses_m
     assert rwps == [3.0, 5.0]
 
 
+def test_polymorphs_of_one_formula_stay_together_and_the_same_space_group_collapses():
+    from dara import jobs
+
+    anatase, rutile, rutile2 = "TiO2_141_(cod_1)-0", "TiO2_136_(cod_2)-0", "TiO2_136_(cod_3)-0"
+    phase = {stem: RefinementPhase.make(Path(f"{stem}.cif")) for stem in (anatase, rutile, rutile2, LI)}
+    groups = kp.build_groups(["TiO2", "Li2CO3"], list(phase))
+    results = [_slot_result([phase[LI], phase[anatase], phase[rutile], phase[rutile2]]),
+               _slot_result([phase[LI], phase[anatase], phase[rutile]])]
+    kept, rwps = jobs._one_structure_per_formula(results, [3.0, 4.0], groups, {rutile: 9.0, rutile2: 4.0})
+    # anatase and one rutile (the lower screening Rwp) stay; the second hypothesis is then a different one
+    assert [sorted(p[0].path.stem for p in result.phases) for result in kept] == [
+        sorted([LI, anatase, rutile2]), sorted([LI, anatase, rutile]),
+    ]
+    assert rwps == [3.0, 4.0]
+
+
+def test_two_polymorphs_in_the_best_fit_are_listed_under_one_formula(monkeypatch, tmp_path):
+    from test_runtime_budget import THREE, salt
+
+    files = {**THREE, KCL_P: salt("K", 3.1)}
+    table = {
+        frozenset({NACL, KCL, KCL_P}): (3, {NACL: 0.95, KCL: 0.03, KCL_P: 0.02}),
+        frozenset({NACL, KCL}): (5, {NACL: 0.97, KCL: 0.03}),  # each one explains peaks: both stay
+        frozenset({NACL, KCL_P}): (5, {NACL: 0.98, KCL_P: 0.02}),
+        frozenset({NACL, KCL, KCL_P, RBCL}): (3, {NACL: 0.94, KCL: 0.03, KCL_P: 0.02, RBCL: 0.01}),
+    }
+    document, report, tried = _known_job(
+        monkeypatch, tmp_path, table, files=files, picked=((NACL, KCL, KCL_P),), precursors=("NaCl", "KCl", "RbCl")
+    )
+    assert tried[0] == frozenset({NACL, KCL, KCL_P})  # not collapsed to one KCl structure
+    assert (report["KCl"]["status"], report["KCl"]["phases"], report["KCl"]["weight_percent"]) == (
+        "refined", [KCL_P, KCL], 5.0,  # both structures, the weights added
+    )
+    assert document.search_summary["pruned_phases"] == []
+
+
+def test_leave_one_out_removes_one_polymorph_and_records_it(monkeypatch, tmp_path):
+    from test_runtime_budget import THREE, salt
+
+    files = {**THREE, KCL_P: salt("K", 3.1)}
+    table = {
+        frozenset({NACL, KCL, KCL_P}): (3, {NACL: 0.95, KCL: 0.03, KCL_P: 0.02}),
+        frozenset({NACL, KCL}): (3, {NACL: 0.97, KCL: 0.03}),  # the polymorph explains no peak: removed
+        frozenset({NACL}): (5, {NACL: 1.0}),  # KCl does: it stays
+        frozenset({NACL, KCL, RBCL}): (3, {NACL: 0.96, KCL: 0.03, RBCL: 0.01}),
+    }
+    document, report, tried = _known_job(
+        monkeypatch, tmp_path, table, files=files, picked=((NACL, KCL, KCL_P),), precursors=("NaCl", "KCl", "RbCl")
+    )
+    assert tried[:3] == [frozenset({NACL, KCL, KCL_P}), frozenset({NACL, KCL}), frozenset({NACL})]
+    assert (report["KCl"]["status"], report["KCl"]["phases"], report["KCl"]["weight_percent"]) == ("refined", [KCL], 3.0)
+    assert document.search_summary["pruned_phases"] == [
+        {"candidate": 1, "phase": KCL_P, "reason": "removed_no_peak_evidence", "weight_percent": 2.0}
+    ]
+    assert sorted(cifs[0].filename for cifs in document.results[0][0]) == sorted([NACL, KCL])
+
+
 def test_a_search_hypothesis_never_refines_two_structures_of_one_formula(monkeypatch, tmp_path):
     from test_runtime_budget import THREE, salt
 
@@ -509,10 +574,14 @@ def test_a_minor_phase_without_unexplained_peaks_to_explain_is_dropped(monkeypat
     document, report, tried = _known_job(monkeypatch, tmp_path, table, picked=((NACL, KCL),))
     assert tried == [frozenset({NACL, KCL}), frozenset({NACL}), frozenset({NACL, RBCL})]  # KCl is not tried again
     assert (report["KCl"]["status"], report["KCl"]["reason"], report["KCl"]["removed_weight_percent"]) == (
-        "not_detected", "no_peak_evidence", 3.0,
+        "not_detected", "removed_no_peak_evidence", 3.0,
     )
+    assert report["RbCl"]["reason"] == "no_peak_evidence"  # a trial fit, not a removal
     assert [cifs[0].filename for cifs in document.results[0][0]] == [NACL]
     assert document.final_result.lst_data.rwp == pytest.approx(4.9)
+    assert document.search_summary["pruned_phases"] == [
+        {"candidate": 1, "phase": KCL, "reason": "removed_no_peak_evidence", "weight_percent": 3.0}
+    ]
     assert sorted(path.name for path in tmp_path.glob("0_best_rwp_*")) == ["0_best_rwp_4.9"]
     assert not list(tmp_path.glob("_final_candidate_*"))
 
@@ -622,7 +691,7 @@ def test_the_checked_candidate_stays_the_best_one_whatever_its_rwp(monkeypatch, 
     rwp = lambda names: 4.85 if names == {RBCL} else 5.0 - 0.1 * len(names)  # noqa: E731
     document, report, _ = _known_job(monkeypatch, tmp_path, table, picked=((NACL, KCL), (RBCL,)), rwp=rwp)
     assert [[cifs[0].filename for cifs in result[0]] for result in document.results] == [[NACL], [RBCL]]
-    assert report["KCl"]["reason"] == "no_peak_evidence" and report["NaCl"]["status"] == "refined"
+    assert report["KCl"]["reason"] == "removed_no_peak_evidence" and report["NaCl"]["status"] == "refined"
     assert [round(result[1].lst_data.rwp, 2) for result in document.results] == [4.9, 4.85]
     assert sorted(path.name for path in tmp_path.glob("*_rwp_*") if path.name[0] in "0f") == [
         "0_best_rwp_4.9", "final_candidate_2_rwp_4.85",

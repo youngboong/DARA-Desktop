@@ -36,6 +36,7 @@ export function knownPhaseNotes(entries) {
       let detail = weight == null ? '' : ` (refined to ${Number(weight)} wt%, removed)`;
       if (entry.reason === 'no_fit') detail = ' (no phase combination fitted the pattern)';
       else if (entry.reason === 'no_peak_evidence') detail = ` (a trial fit gave ${Number(weight ?? 0)} wt% but explained no additional peak)`;
+      else if (entry.reason === 'removed_no_peak_evidence') detail = ` (refined to ${Number(weight ?? 0)} wt%, but removing it left no additional peak unexplained)`;
       else if (entry.reason === 'failed' && weight == null) detail = ' (a trial fit with it failed)';
       notes.push(`${entry.formula}: not detected${detail}`);
     } else if (entry?.status === 'no_structure') {
