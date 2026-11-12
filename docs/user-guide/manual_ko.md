@@ -603,13 +603,14 @@ Add로 넣은 상은 빠른 확인(Quick check)으로 계산하는데 기존 상
 적은 화학식(최대 12개, 같은 화학식은 한 번만 셉니다)마다 결과가 하나씩 정해지고 피팅에 넣는 구조는 화학식과 공간군마다 하나입니다. 공간군이 다른 같은 화학식의 구조(다형체, 예: 아나타제와 루틸 TiO2)는 함께 들어갈 수 있고 결과에서는 한 화학식 아래 중량이 합산됩니다. 공간군까지 같은 기록은 가장 나은 하나만 남깁니다. 상이 피팅에 남으려면 significant 또는 minor 미설명 피크를 설명해야 합니다. 판정은 다음 두 단계를 거칩니다.
 
 1. 빼 보기: 5 wt% 미만인 상을 가벼운 것부터 하나씩 빼고 다시 피팅해서 미설명 피크가 늘지 않으면 그 상을 뺍니다. 업로드한 CIF 구조와 마지막 남은 상은 빼지 않습니다.
-2. 더해 보기: 검색 결과에 없는 화학식은 그 화학식의 가장 나은 구조를 더해 시험 피팅하고 미설명 피크가 줄 때만 남깁니다. 1단계에서 뺀 화학식은 다시 시도하지 않습니다.
+2. 더해 보기: 검색 결과에 없는 화학식은 그 화학식의 가장 나은 구조를 더해 시험 피팅하고 미설명 피크가 줄 때만 남깁니다. 1단계에서 뺀 화학식은 다시 시도하지 않습니다. 현재 피팅에 significant 또는 minor 미설명 피크가 하나도 없으면 줄어들 피크가 없으므로 시험 피팅을 하지 않고 남은 화학식을 바로 not detected로 처리합니다.
 
 <!-- widths: 190,297 -->
 | 결과 줄 | 뜻 |
 | --- | --- |
 | not detected (a trial fit gave X wt% but explained no additional peak) | 더해 본 시험 피팅에서 새로 설명되는 피크가 없어 넣지 않았습니다 |
 | not detected (refined to X wt%, but removing it left no additional peak unexplained) | 피팅에 들어 있었지만 빼도 미설명 피크가 늘지 않아 뺐습니다 |
+| not detected (the fit leaves no unexplained peak for it to explain) | 현재 피팅에 significant 또는 minor 미설명 피크가 없어 시험 피팅을 하지 않았습니다 |
 | not detected (a trial fit with it failed) | 시험 피팅이 수렴하지 않았습니다 |
 | not detected (refined to X wt%, removed) | 정밀화했지만 최종 피팅에서 빠졌습니다 |
 | not detected (no phase combination fitted the pattern) | 패턴에 맞는 상 조합을 검색에서 하나도 찾지 못했습니다 |

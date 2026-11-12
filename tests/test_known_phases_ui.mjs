@@ -27,6 +27,7 @@ assert.deepEqual(knownPhaseNotes([
   { formula: 'LiCl', status: 'not_detected', removed_weight_percent: null, reason: 'no_fit' },
   { formula: 'MgO', status: 'not_detected', removed_weight_percent: null, reason: 'not_checked' },
   { formula: 'ZrO2', status: 'not_detected', removed_weight_percent: 0.3, reason: 'removed_no_peak_evidence' },
+  { formula: 'ZnO', status: 'not_detected', removed_weight_percent: null, reason: 'no_unexplained_peaks' },
 ]), [
   'ZrO2: not detected (refined to 0.2 wt%, removed)',
   'La(OH)3: no reference structure found (enable Materials Project or add a CIF)',
@@ -36,6 +37,7 @@ assert.deepEqual(knownPhaseNotes([
   'LiCl: not detected (no phase combination fitted the pattern)',
   'MgO: not checked (the time limit was reached)',
   'ZrO2: not detected (refined to 0.3 wt%, but removing it left no additional peak unexplained)',
+  'ZnO: not detected (the fit leaves no unexplained peak for it to explain)',
 ]);
 assert.deepEqual(knownPhaseNotes(undefined), []);
 assert.deepEqual(mpFallbackNotes(['La(OH)3']), ['La(OH)3: structure taken from Materials Project (no COD structure)']);

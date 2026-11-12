@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import time
@@ -217,13 +218,24 @@ def _without_phases(result: SearchResult, names: set[str]) -> SearchResult:
     )
 
 
-def _prune_final_fit(refined, phases, pattern_path, working_dir: Path, phase_params, refinement_kwargs, protected):
+def _phases_key(phases) -> tuple:
+    """Identity of the inputs of a refinement: the phase files and their parameters, in order."""
+    return tuple((str(phase.path), json.dumps(phase.params, sort_keys=True, default=str)) for phase in phases)
+
+
+def _prune_final_fit(
+    refined, phases, pattern_path, working_dir: Path, phase_params, refinement_kwargs, protected, finished=None
+):
     """Refit one final hypothesis without failed, negligible or duplicate phases (``final_pruning``).
 
     The phases are removed one at a time (failed first, then the lightest); a removal is kept
     only when the refit still fits as well as the original fit, so a minor phase that explains
     peaks stays. Returns ``(refined, phases, dropped)``; an accepted refit replaces the files in
     ``working_dir``.
+
+    ``finished`` maps ``_phases_key`` of an already finished fit (same pattern, same settings) to
+    ``(refinement, directory)``. A refit of such a phase set would reproduce that fit, so its
+    result and files are reused instead of refined again.
     """
     from dara.final_pruning import phases_to_prune, refit_is_acceptable
 
@@ -238,27 +250,35 @@ def _prune_final_fit(refined, phases, pattern_path, working_dir: Path, phase_par
         trial = [phase for phase in phases if phase.path.stem != name]
         if not trial or len(trial) == len(phases):
             continue
-        shutil.rmtree(refit_dir, ignore_errors=True)
-        refit_dir.mkdir()
-        dumpfn(phase_params, refit_dir / "phase_params.json")
-        try:
-            refit = do_refinement(
-                pattern_path=pattern_path,
-                phases=trial,
-                working_dir=refit_dir,
-                phase_params=phase_params,
-                show_progress=True,
-                **refinement_kwargs,
-            )
-        except Exception:
-            logger.exception("Refit without %s failed; keeping it.", name)
-            continue
+        reused = (finished or {}).get(_phases_key(trial))
+        if reused:
+            refit = reused[0]
+            logger.info("Refit without %s skipped: the phase set was already refined.", name)
+        else:
+            shutil.rmtree(refit_dir, ignore_errors=True)
+            refit_dir.mkdir()
+            dumpfn(phase_params, refit_dir / "phase_params.json")
+            try:
+                refit = do_refinement(
+                    pattern_path=pattern_path,
+                    phases=trial,
+                    working_dir=refit_dir,
+                    phase_params=phase_params,
+                    show_progress=True,
+                    **refinement_kwargs,
+                )
+            except Exception:
+                logger.exception("Refit without %s failed; keeping it.", name)
+                continue
         if not refit_is_acceptable(original_rwp, refit.lst_data.rwp):
             logger.info("Refit without %s: Rwp %.3f -> %.3f; keeping it.", name, original_rwp, refit.lst_data.rwp)
             continue
         logger.info("Dropped %s (%s) from the final fit: Rwp %.3f -> %.3f.", name, reason, original_rwp, refit.lst_data.rwp)
         shutil.rmtree(working_dir)
-        refit_dir.rename(working_dir)
+        if reused:
+            shutil.copytree(reused[1], working_dir)
+        else:
+            refit_dir.rename(working_dir)
         refined, phases, dropped[name] = refit, trial, reason
     shutil.rmtree(refit_dir, ignore_errors=True)
     return refined, phases, dropped
@@ -375,7 +395,9 @@ def _check_listed_phases(
        formula (``pick_stem``) is added in a trial refit; it is kept, and later trials build on it,
        only when the count falls. A formula dropped in step 1 is not tried again.
     A phase dropped in step 1 is recorded in ``removed`` as ``removed_no_peak_evidence``, a rejected trial of
-    step 2 as ``no_peak_evidence``, each with the weight it had (``failed`` when the trial did not refine). After ``out_of_time()`` no more refits are
+    step 2 as ``no_peak_evidence``, each with the weight it had (``failed`` when the trial did not refine).
+    When the current fit has no unexplained peak (count 0) no trial can be kept, so the formula is recorded as
+    ``no_unexplained_peaks`` without a refit. After ``out_of_time()`` no more refits are
     run: remaining formulas of step 2 are recorded as ``not_checked``, remaining phases of step 1 stay.
     The files of ``best_dir`` are replaced by every kept refit.
 
@@ -438,6 +460,11 @@ def _check_listed_phases(
     for done, group in enumerate(todo, start=len(light)):
         report_progress("Checking listed phases", done, total)
         stem = known_phases.pick_stem(group, rwp_by_reference)
+        if before == 0 and getattr(result.refinement_result, "refinement_metrics", None) is not None:
+            # A trial is kept only if the count falls, and it cannot fall below 0. Without metrics the 0 is
+            # only the fallback of ``count``, so the trial still runs.
+            removed[stem] = ("no_unexplained_peaks", None)
+            continue
         if out_of_time():
             removed[stem] = ("not_checked", None)
             continue
@@ -910,13 +937,15 @@ class PhaseSearchMaker(Maker):
                     **with_single_refinement_threads(refinement_kwargs),
                 )
 
-            def prune(result, refined, phases, working_dir, candidate_index):
+            finished: dict[tuple, tuple] = {}  # final phase set of a finished candidate -> (fit, directory)
+
+            def prune(result, refined, phases, working_dir, candidate_index, finished=None):
                 # A phase that collapsed (zero weight, undefined lattice) or repeats a heavier
                 # phase of the fit is dropped and the fit refined again, if it fits as well.
                 weights_before = _fit_weights(refined) if known_groups else {}
                 refined, phases, dropped = _prune_final_fit(
                     refined, phases, pattern_path, working_dir, final_refinement_params,
-                    with_single_refinement_threads(refinement_kwargs), additional_cifs_name_set,
+                    with_single_refinement_threads(refinement_kwargs), additional_cifs_name_set, finished,
                 )
                 removed_by_dir.setdefault(working_dir, {}).update(
                     {name: (reason, float(weights_before.get(name, 0.0))) for name, reason in dropped.items()}
@@ -966,8 +995,9 @@ class PhaseSearchMaker(Maker):
                     continue
 
                 result, refined, selected_phases = prune(
-                    result, refined, selected_phases, candidate_dir, candidate_index
+                    result, refined, selected_phases, candidate_dir, candidate_index, finished
                 )
+                finished[_phases_key(selected_phases)] = (refined, candidate_dir)
                 checkpoint_candidate(candidate_index, refined, candidate_dir)
                 report_progress("Final candidate refinement", candidate_index, len(results))
                 refined_candidates.append((_with_refinement(result, refined), screening_rwp, candidate_dir))

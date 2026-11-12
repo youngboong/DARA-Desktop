@@ -658,9 +658,15 @@ def test_additive_trial_is_rejected_when_only_a_noise_peak_disappears(monkeypatc
         frozenset({NACL, RBCL}): ((0, 0), {NACL: 0.99, RBCL: 0.01}),
     }
     document, report, tried = _known_job(monkeypatch, tmp_path, table, classify=True)
-    assert (report["KCl"]["reason"], report["KCl"]["removed_weight_percent"]) == ("no_peak_evidence", 1.0)
+    assert tried == [frozenset({NACL})]  # the classified count is 0: no trial can lower it
+    assert (report["KCl"]["reason"], report["KCl"]["removed_weight_percent"]) == ("no_unexplained_peaks", None)
     assert report["RbCl"]["status"] == "not_detected"
     assert [cifs[0].filename for cifs in document.results[0][0]] == [NACL]
+    # a noise peak is not counted, but with one significant peak the trials run again
+    table[frozenset({NACL})] = ((1, 1), {NACL: 1.0})
+    _, report, tried = _known_job(monkeypatch, tmp_path, table, classify=True)
+    assert len(tried) == 2 and report["KCl"]["status"] == "refined"  # 1 -> 0 accepted
+    assert report["RbCl"]["reason"] == "no_unexplained_peaks"  # nothing left for it to explain
 
 
 def test_additive_trial_is_accepted_when_the_significant_or_minor_count_drops(monkeypatch, tmp_path):
@@ -672,6 +678,77 @@ def test_additive_trial_is_accepted_when_the_significant_or_minor_count_drops(mo
     document, report, tried = _known_job(monkeypatch, tmp_path, table, classify=True)
     assert report["KCl"]["status"] == "refined"
     assert (report["RbCl"]["status"], report["RbCl"]["reason"]) == ("not_detected", "no_peak_evidence")
+
+
+def test_no_trial_runs_when_the_fit_has_no_unexplained_peak(monkeypatch, tmp_path):
+    table = {frozenset({NACL}): (0, {NACL: 1.0})}  # a missing entry would raise: no other fit is refined
+    document, report, tried = _known_job(monkeypatch, tmp_path, table)
+    assert tried == [frozenset({NACL})]
+    for formula in ("KCl", "RbCl"):
+        entry = report[formula]
+        assert (entry["status"], entry["reason"], entry["removed_weight_percent"]) == ("not_detected", "no_unexplained_peaks", None)
+        assert kp.not_detected_text(entry) == f"{formula}: not detected (the fit leaves no unexplained peak for it to explain)"
+    assert report["LiCl"]["status"] == "no_structure" and report["NaCl"]["status"] == "refined"
+    assert document.final_result.lst_data.rwp == pytest.approx(4.9)  # the fit as it was
+    assert [cifs[0].filename for cifs in document.results[0][0]] == [NACL]
+    assert document.search_summary["pruned_phases"] == []
+
+
+def test_the_trials_stop_once_an_accepted_trial_leaves_no_unexplained_peak(monkeypatch, tmp_path):
+    table = {
+        frozenset({NACL}): (2, {NACL: 1.0}),
+        frozenset({NACL, KCL}): (0, {NACL: 0.7, KCL: 0.3}),  # 2 -> 0: accepted; RbCl has nothing left to explain
+    }
+    _, report, tried = _known_job(monkeypatch, tmp_path, table)
+    assert tried == [frozenset({NACL}), frozenset({NACL, KCL})]
+    assert report["KCl"]["status"] == "refined"
+    assert (report["RbCl"]["reason"], report["RbCl"]["removed_weight_percent"]) == ("no_unexplained_peaks", None)
+
+
+def test_a_zero_count_without_peak_metrics_is_not_taken_as_no_unexplained_peaks(tmp_path):
+    from dara import jobs
+
+    phases = [RefinementPhase.make(Path(f"{NACL}.cif"))]
+    fit = SimpleNamespace(
+        lst_data=SimpleNamespace(phases_results={NACL: 1}), refinement_metrics=None, get_phase_weights=lambda: {NACL: 1.0}
+    )
+    result = _slot_result(phases)
+    result.refinement_result = fit
+    calls = []
+
+    def refit(trial_phases, directory):
+        calls.append([phase.path.stem for phase in trial_phases])
+        return SimpleNamespace(lst_data=SimpleNamespace(phases_results={}), refinement_metrics=None)
+
+    best_dir = tmp_path / "best"
+    best_dir.mkdir()
+    removed = {}
+    jobs._check_listed_phases(
+        result, best_dir, [kp.Group("KCl", (KCL,))], {}, {KCL: RefinementPhase.make(Path(f"{KCL}.cif"))}, removed,
+        prepare=lambda r: [phase[0] for phase in r.phases], refit=refit, count=lambda refinement: 0,
+        out_of_time=lambda: False,
+    )
+    assert calls == [[NACL, KCL]] and removed[KCL][0] == "no_peak_evidence"
+
+
+def test_progress_advances_for_the_formulas_that_are_skipped(monkeypatch, tmp_path):
+    from dara import jobs, task_progress
+
+    steps = []
+    monkeypatch.setattr(task_progress, "report_progress", lambda stage, done=None, total=None: steps.append((done, total)))
+    fit = SimpleNamespace(
+        lst_data=SimpleNamespace(phases_results={NACL: 1}), refinement_metrics=SimpleNamespace(missing_peaks=None),
+        get_phase_weights=lambda: {NACL: 1.0},
+    )
+    result = _slot_result([RefinementPhase.make(Path(f"{NACL}.cif"))])
+    result.refinement_result = fit
+    removed = {}
+    jobs._check_listed_phases(
+        result, tmp_path, [kp.Group("KCl", (KCL,)), kp.Group("RbCl", (RBCL,))], {}, {}, removed,
+        prepare=lambda r: [], refit=lambda *args: pytest.fail("no refit expected"), count=lambda refinement: 0,
+        out_of_time=lambda: False,
+    )
+    assert steps == [(0, 2), (1, 2), (2, 2)] and set(removed) == {KCL, RBCL}
 
 
 def test_the_time_limit_stops_the_trials_and_leaves_the_rest_not_checked(monkeypatch, tmp_path):
@@ -720,6 +797,68 @@ def test_the_checked_candidate_stays_the_best_one_whatever_its_rwp(monkeypatch, 
     assert sorted(path.name for path in tmp_path.glob("*_rwp_*") if path.name[0] in "0f") == [
         "0_best_rwp_4.9", "final_candidate_2_rwp_4.85",
     ]
+
+
+def test_a_candidate_pruned_to_a_phase_set_that_is_already_refined_is_not_refined_again(monkeypatch, tmp_path):
+    table = {
+        frozenset({NACL, KCL}): (2, {NACL: 0.8, KCL: 0.2}),
+        frozenset({NACL, KCL, RBCL}): (2, {NACL: 0.797, KCL: 0.2, RBCL: 0.003}),  # RbCl is negligible
+    }
+    rwp = lambda names: 4.8  # noqa: E731
+    document, report, tried = _known_job(
+        monkeypatch, tmp_path, table, picked=((NACL, KCL), (NACL, KCL, RBCL)), rwp=rwp
+    )
+    # {NaCl, KCl} is refined once: the prune refit of candidate 2 would reproduce candidate 1
+    # (the last refinement is the trial of RbCl on the best fit)
+    assert tried == [frozenset({NACL, KCL}), frozenset({NACL, KCL, RBCL}), frozenset({NACL, KCL, RBCL})]
+    assert [sorted(cifs[0].filename for cifs in result[0]) for result in document.results] == [sorted([NACL, KCL])] * 2
+    assert document.search_summary["pruned_phases"] == [{"candidate": 2, "phase": RBCL, "reason": "negligible"}]
+    assert sorted(path.name for path in tmp_path.glob("*_rwp_*") if path.name[0] in "0f") == [
+        "0_best_rwp_4.8", "final_candidate_2_rwp_4.8",
+    ]
+    assert all((path / "phase_params.json").exists() for path in tmp_path.glob("*_rwp_*") if path.name[0] in "0f")  # files came along
+    assert not list(tmp_path.glob("_final_candidate_*"))
+
+
+def _pruning_case(tmp_path, monkeypatch, finished_phases):
+    from dara import jobs
+
+    weights = {NACL: 0.797, KCL: 0.2, RBCL: 0.003}
+    refined = SimpleNamespace(
+        lst_data=SimpleNamespace(rwp=4.7, phases_results={n: SimpleNamespace(gewicht=1.0, a=5.0, spacegroup_no=225) for n in weights}),
+        get_phase_weights=lambda: weights,
+    )
+    earlier = SimpleNamespace(lst_data=SimpleNamespace(rwp=4.7))
+    earlier_dir, working_dir = tmp_path / "first", tmp_path / "second"
+    earlier_dir.mkdir()
+    (earlier_dir / "marker.txt").write_text("first")
+    working_dir.mkdir()
+    refits = []
+
+    def do_refinement(phases, working_dir, **kwargs):
+        refits.append([phase.path.stem for phase in phases])
+        return SimpleNamespace(lst_data=SimpleNamespace(rwp=4.7))
+
+    monkeypatch.setattr(jobs, "do_refinement", do_refinement)
+    phase = lambda stem, **params: RefinementPhase(path=Path(f"{stem}.cif"), params=params)  # noqa: E731
+    phases = [phase(NACL), phase(KCL), phase(RBCL)]
+    finished = {jobs._phases_key(finished_phases(phase)): (earlier, earlier_dir)}
+    out = jobs._prune_final_fit(refined, phases, tmp_path / "p.xy", working_dir, {}, {}, set(), finished)
+    return out, earlier, refits, working_dir
+
+
+def test_a_pruned_phase_set_is_reused_only_for_the_same_phases_and_parameters(tmp_path, monkeypatch):
+    (tmp_path / "same").mkdir()
+    (fit, phases, dropped), earlier, refits, working_dir = _pruning_case(
+        tmp_path / "same", monkeypatch, lambda phase: [phase(NACL), phase(KCL)]
+    )
+    assert fit is earlier and refits == [] and dropped == {RBCL: "negligible"}
+    assert [p.path.stem for p in phases] == [NACL, KCL] and (working_dir / "marker.txt").read_text() == "first"
+    for i, other in enumerate((lambda phase: [phase(NACL), phase(KCL, k1=1.0)], lambda phase: [phase(KCL), phase(NACL)])):
+        tmp = tmp_path / f"other{i}"
+        tmp.mkdir()
+        (fit, phases, dropped), earlier, refits, working_dir = _pruning_case(tmp, monkeypatch, other)
+        assert refits == [[NACL, KCL]] and fit is not earlier  # other parameters or order: refined as before
 
 
 def test_the_formula_of_a_user_cif_comes_from_its_structure_not_its_file_name():

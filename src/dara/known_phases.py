@@ -172,6 +172,8 @@ def not_detected_text(entry: dict) -> str | None:
             detail = " (no phase combination fitted the pattern)"
         elif why == "no_peak_evidence":
             detail = f" (a trial fit gave {weight or 0:g} wt% but explained no additional peak)"
+        elif why == "no_unexplained_peaks":
+            detail = " (the fit leaves no unexplained peak for it to explain)"
         elif why == "removed_no_peak_evidence":
             detail = f" (refined to {weight or 0:g} wt%, but removing it left no additional peak unexplained)"
         elif why == "failed" and weight is None:
