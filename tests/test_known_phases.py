@@ -842,7 +842,7 @@ def _pruning_case(tmp_path, monkeypatch, finished_phases):
     monkeypatch.setattr(jobs, "do_refinement", do_refinement)
     phase = lambda stem, **params: RefinementPhase(path=Path(f"{stem}.cif"), params=params)  # noqa: E731
     phases = [phase(NACL), phase(KCL), phase(RBCL)]
-    finished = {jobs._phases_key(finished_phases(phase)): (earlier, earlier_dir)}
+    finished = {jobs._phases_key(finished_phases(phase)): (earlier, earlier_dir, finished_phases(phase))}
     out = jobs._prune_final_fit(refined, phases, tmp_path / "p.xy", working_dir, {}, {}, set(), finished)
     return out, earlier, refits, working_dir
 
@@ -854,11 +854,17 @@ def test_a_pruned_phase_set_is_reused_only_for_the_same_phases_and_parameters(tm
     )
     assert fit is earlier and refits == [] and dropped == {RBCL: "negligible"}
     assert [p.path.stem for p in phases] == [NACL, KCL] and (working_dir / "marker.txt").read_text() == "first"
-    for i, other in enumerate((lambda phase: [phase(NACL), phase(KCL, k1=1.0)], lambda phase: [phase(KCL), phase(NACL)])):
-        tmp = tmp_path / f"other{i}"
-        tmp.mkdir()
-        (fit, phases, dropped), earlier, refits, working_dir = _pruning_case(tmp, monkeypatch, other)
-        assert refits == [[NACL, KCL]] and fit is not earlier  # other parameters or order: refined as before
+    # The same set in another order is reused too, with the phase order of the reused fit.
+    (tmp_path / "order").mkdir()
+    (fit, phases, dropped), earlier, refits, working_dir = _pruning_case(
+        tmp_path / "order", monkeypatch, lambda phase: [phase(KCL), phase(NACL)]
+    )
+    assert fit is earlier and refits == [] and [p.path.stem for p in phases] == [KCL, NACL]
+    (tmp_path / "other").mkdir()
+    (fit, phases, dropped), earlier, refits, working_dir = _pruning_case(
+        tmp_path / "other", monkeypatch, lambda phase: [phase(NACL), phase(KCL, k1=1.0)]
+    )
+    assert refits == [[NACL, KCL]] and fit is not earlier  # other parameters: refined as before
 
 
 def test_the_formula_of_a_user_cif_comes_from_its_structure_not_its_file_name():

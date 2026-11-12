@@ -219,8 +219,12 @@ def _without_phases(result: SearchResult, names: set[str]) -> SearchResult:
 
 
 def _phases_key(phases) -> tuple:
-    """Identity of the inputs of a refinement: the phase files and their parameters, in order."""
-    return tuple((str(phase.path), json.dumps(phase.params, sort_keys=True, default=str)) for phase in phases)
+    """Identity of a refined phase set: the phase files and their parameters, whatever their order.
+
+    BGMN results depend on the phase order only at the 0.01 wt% level, and a candidate with the
+    same set is removed as a duplicate anyway.
+    """
+    return tuple(sorted((str(phase.path), json.dumps(phase.params, sort_keys=True, default=str)) for phase in phases))
 
 
 def _prune_final_fit(
@@ -234,8 +238,8 @@ def _prune_final_fit(
     ``working_dir``.
 
     ``finished`` maps ``_phases_key`` of an already finished fit (same pattern, same settings) to
-    ``(refinement, directory)``. A refit of such a phase set would reproduce that fit, so its
-    result and files are reused instead of refined again.
+    ``(refinement, directory, phases)``. A refit of such a phase set would reproduce that fit, so
+    its result, files and phase order are reused instead of refined again.
     """
     from dara.final_pruning import phases_to_prune, refit_is_acceptable
 
@@ -252,7 +256,7 @@ def _prune_final_fit(
             continue
         reused = (finished or {}).get(_phases_key(trial))
         if reused:
-            refit = reused[0]
+            refit, trial = reused[0], reused[2]  # the phase order of the reused fit
             logger.info("Refit without %s skipped: the phase set was already refined.", name)
         else:
             shutil.rmtree(refit_dir, ignore_errors=True)
@@ -937,7 +941,7 @@ class PhaseSearchMaker(Maker):
                     **with_single_refinement_threads(refinement_kwargs),
                 )
 
-            finished: dict[tuple, tuple] = {}  # final phase set of a finished candidate -> (fit, directory)
+            finished: dict[tuple, tuple] = {}  # final phase set of a finished candidate -> (fit, directory, phases)
 
             def prune(result, refined, phases, working_dir, candidate_index, finished=None):
                 # A phase that collapsed (zero weight, undefined lattice) or repeats a heavier
@@ -997,7 +1001,7 @@ class PhaseSearchMaker(Maker):
                 result, refined, selected_phases = prune(
                     result, refined, selected_phases, candidate_dir, candidate_index, finished
                 )
-                finished[_phases_key(selected_phases)] = (refined, candidate_dir)
+                finished[_phases_key(selected_phases)] = (refined, candidate_dir, selected_phases)
                 checkpoint_candidate(candidate_index, refined, candidate_dir)
                 report_progress("Final candidate refinement", candidate_index, len(results))
                 refined_candidates.append((_with_refinement(result, refined), screening_rwp, candidate_dir))

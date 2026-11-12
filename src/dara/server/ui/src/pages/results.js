@@ -99,7 +99,8 @@ function ResultsPage({ location }) {
       title: 'Name',
       dataIndex: 'name',
       key: 'name',
-      // No width: Name takes whatever the fixed columns leave.
+      // A share of the table, so a wide window gives its extra room to Final phases.
+      width: '28%',
       // One line of name (sample, else file), one muted line of date · user (· series).
       render: (text, entry) => (
         <div className="dara-name-cell">
@@ -148,8 +149,7 @@ function ResultsPage({ location }) {
     {
       title: 'Final phases',
       key: 'final_phases',
-      // Three phases fit in 360 px; the remaining width goes to Name, which is usually longer.
-      width: 360,
+      // No width: Final phases takes whatever the other columns leave.
       onCell: metricCell,
       render: (_, entry) => {
         const label = phasesLabel(entry.summary)
