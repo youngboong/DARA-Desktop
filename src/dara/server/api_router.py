@@ -2260,6 +2260,7 @@ def _mass_balance_amounts(job: dict, document) -> tuple[list[dict] | None, str |
             saved.get("precursor_amounts"),
             getattr(document, "precursors", None) or [],
             saved.get("filename") or raw_job.get("name"),
+            partial=saved.get("analysis_mode") == "known_mixture",
         )
     except Exception:
         logger.debug("Precursor amounts could not be resolved", exc_info=True)

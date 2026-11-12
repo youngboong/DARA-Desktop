@@ -127,7 +127,7 @@ _FILENAME_MASS = re.compile(r"^\d+(?:p|\.)\d+$")
 _FILENAME_COEFF = re.compile(r"^(\d+(?:p\d+)?)(?=[A-Z(])")
 
 
-def amounts_from_filename(filename: str | None, precursors) -> dict | None:
+def amounts_from_filename(filename: str | None, precursors, *, partial: bool = False) -> dict | None:
     """Read precursor amounts from a benchmark-style file name, only when unambiguous.
 
     Supported: ``2Fe3O4-3Y2O3_1000C_60min`` (molar coefficients, missing = 1) and
@@ -135,6 +135,10 @@ def amounts_from_filename(filename: str | None, precursors) -> dict | None:
     Every precursor must match exactly one '-'-separated chunk, every formula chunk must
     be a precursor, and masses must be given for all or none. Returns
     ``{"amounts": [...], "basis": "molar"|"mass"}`` or ``None``.
+
+    ``partial`` (known-phase mode, where the listed formulas also include phases that were not
+    weighed): precursors missing from the name are not part of the sample and get no amount;
+    at least two must be named.
     """
     precursors = [str(p).strip() for p in precursors or [] if str(p).strip()]
     if not filename or len(precursors) < 2:
@@ -166,14 +170,17 @@ def amounts_from_filename(filename: str | None, precursors) -> dict | None:
         if len(parts) > 1 and _FILENAME_MASS.match(parts[1]):
             mass = float(parts[1].replace("p", "."))
         chunks.append({"key": key, "formula": head, "coefficient": coeff, "mass": mass})
-    if len(chunks) != len(precursors):
-        return None
     by_key = {}
     for chunk in chunks:
         if chunk["key"] in by_key:
             return None
         by_key[chunk["key"]] = chunk
-    if set(by_key) != set(keys):
+    if partial:
+        if len(by_key) < 2 or not set(by_key) <= set(keys):
+            return None
+        named = [(p, k) for p, k in zip(precursors, keys) if k in by_key]
+        precursors, keys = [p for p, _ in named], [k for _, k in named]
+    elif len(chunks) != len(precursors) or set(by_key) != set(keys):
         return None
     masses = [by_key[key]["mass"] for key in keys]
     if any(m is not None for m in masses):
@@ -347,12 +354,12 @@ def mass_balance_message(block: dict | None) -> str | None:
 
 
 def resolve_amounts(
-    metadata_amounts: list[dict] | None, precursors, filename: str | None
+    metadata_amounts: list[dict] | None, precursors, filename: str | None, *, partial: bool = False
 ) -> tuple[list[dict] | None, str | None]:
     """Explicit amounts from the submission win; otherwise try the file name."""
     if metadata_amounts:
         return metadata_amounts, "input"
-    inferred = amounts_from_filename(filename, precursors)
+    inferred = amounts_from_filename(filename, precursors, partial=partial)
     if inferred:
         return inferred["amounts"], "filename"
     return None, None

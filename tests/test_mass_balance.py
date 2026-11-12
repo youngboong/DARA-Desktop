@@ -84,6 +84,16 @@ def test_filename_ambiguous_is_skipped(filename, precursors):
     assert mb.amounts_from_filename(filename, precursors) is None
 
 
+def test_filename_amounts_of_the_weighed_precursors_when_the_list_has_more_formulas():
+    listed = ["Fe2O3", "TiO2", "ZnO", "MgO"]  # known-phase mode: ZnO and MgO were not weighed
+    assert mb.amounts_from_filename("Fe2O3-2TiO2_1000C", listed) is None
+    inferred = mb.amounts_from_filename("Fe2O3-2TiO2_1000C", listed, partial=True)
+    assert [(a["formula"], a["moles"]) for a in inferred["amounts"]] == [("Fe2O3", 1.0), ("TiO2", 2.0)]
+    assert mb.amounts_from_filename("Fe2O3-2TiO2-CaO_1000C", listed, partial=True) is None  # a formula that is not listed
+    assert mb.amounts_from_filename("Fe2O3_1000C", listed, partial=True) is None  # one named precursor
+    assert mb.resolve_amounts(None, listed, "Fe2O3-2TiO2", partial=True)[1] == "filename"
+
+
 def test_explicit_amounts_win_over_filename():
     explicit = [{"formula": "Fe2O3", "moles": 1.0}, {"formula": "TiO2", "moles": 1.0}]
     assert mb.resolve_amounts(explicit, ["Fe2O3", "TiO2"], "Fe2O3-2TiO2_1000C") == (explicit, "input")
@@ -237,7 +247,7 @@ def _refinement(weights: dict[str, float]):
     )
 
 
-def _summarize(name: str, metadata: dict, weights: dict[str, float]):
+def _summarize(name: str, metadata: dict, weights: dict[str, float], precursors=("Fe2O3", "TiO2")):
     from dara.server import api_router
     from dara.server import fit_cautions as fc
 
@@ -251,7 +261,7 @@ def _summarize(name: str, metadata: dict, weights: dict[str, float]):
     document = SimpleNamespace(
         results=[([[SimpleNamespace(filename=n) for n in weights]], _refinement(weights))],
         grouped_phases=None, missing_peaks=None, extra_peaks=None, screening_rwps=None,
-        final_result=_refinement(weights), best_rwp=4.0, precursors=["Fe2O3", "TiO2"],
+        final_result=_refinement(weights), best_rwp=4.0, precursors=list(precursors),
         phase_predictor=None, predict_kwargs=None, search_kwargs={},
         final_refinement_params=None, input_cifs=[],
         xrd_data=SimpleNamespace(intensities=np.array([1.5, 2.5, 3.5]), intensity_unit="cps"),
@@ -276,6 +286,17 @@ def test_summarize_document_flags_impossible_fractions_from_filename():
     candidate = payload["all_results"][0]
     assert candidate["mass_balance"]["level"] == "warning"
     assert any(c["code"] == "mass_balance" for c in candidate["cautions"])
+
+
+def test_known_phase_mass_balance_runs_when_listed_formulas_were_not_detected():
+    listed = ("Fe2O3", "TiO2", "ZnO", "MgO")  # ZnO and MgO are listed but neither weighed nor refined
+    weights = {FE2TIO5: 0.268, TIO2: 0.732}
+    known = {"submission_settings": {"analysis_mode": "known_mixture"}}
+    block = _summarize("Fe2O3-2TiO2_1000C_60min.xrdml", known, weights, listed)["final_result"]["mass_balance"]
+    assert block["status"] == "evaluated" and block["source"] == "filename" and block["level"] == "warning"
+    assert block["expected_ratio"] == "Fe:Ti = 0.50:0.50"
+    other = _summarize("Fe2O3-2TiO2_1000C_60min.xrdml", {}, weights, listed)  # other modes still need every formula named
+    assert other["final_result"]["mass_balance"]["status"] == "skipped"
 
 
 def test_summarize_document_uses_submitted_amounts_and_stays_quiet_when_ok():
