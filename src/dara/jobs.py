@@ -322,11 +322,13 @@ def _one_structure_per_formula(results, screening_rwps, groups, rwp_by_reference
 
     Of several structures with the same formula and space group (the same structure type) the
     ``pick_stem`` one stays; structures of one formula with different space-group numbers are
-    polymorphs and stay together. Hypotheses that become identical are merged (the first, best
-    ranked, stays).
+    polymorphs and stay together. Then the hypotheses are grouped by the set of listed formulas
+    they carry (and their unlisted phases); of each group only the one with the lowest search Rwp
+    (``screening_rwps``, the Rwp of the search fit; the first on a tie) stays, so there is one final
+    refinement per formula set. The leave-one-out later tests any polymorph of a kept fit.
     """
     group_of = {stem: group for group in groups for stem in group.stems}
-    kept, seen = [], set()
+    collapsed, best = [], {}
     for result, rwp in zip(results, screening_rwps):
         stems = [phases[0].path.stem for phases in result.phases]
         drop = set()
@@ -339,10 +341,14 @@ def _one_structure_per_formula(results, screening_rwps, groups, rwp_by_reference
                 drop.update(set(here) - {known_phases.pick_stem(known_phases.Group(group.label, tuple(here)), rwp_by_reference)})
         if drop:
             result = _without_phases(result, drop)
-        key = frozenset(phases[0].path.stem for phases in result.phases)
-        if key not in seen:
-            seen.add(key)
-            kept.append((result, rwp))
+        key = (
+            frozenset(group_of[stem].label for stem in stems if stem in group_of),
+            frozenset(stem for stem in stems if stem not in group_of),
+        )
+        collapsed.append((result, rwp))
+        if key not in best or rwp < collapsed[best[key]][1]:
+            best[key] = len(collapsed) - 1
+    kept = [collapsed[i] for i in sorted(best.values())]
     return [item[0] for item in kept], [item[1] for item in kept]
 
 

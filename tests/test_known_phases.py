@@ -482,7 +482,7 @@ def test_the_trial_uses_the_structure_with_the_lowest_screening_rwp(monkeypatch,
     assert frozenset({NACL, KCL}) in tried and frozenset({NACL, KCL2}) not in tried
 
 
-def test_one_structure_per_formula_in_each_hypothesis_and_identical_hypotheses_merge():
+def test_one_structure_per_formula_in_each_hypothesis_and_one_hypothesis_per_formula_set():
     from dara import jobs
 
     phase = {stem: RefinementPhase.make(Path(f"{stem}.cif")) for stem in (ZR1, ZR2, LI)}
@@ -490,25 +490,49 @@ def test_one_structure_per_formula_in_each_hypothesis_and_identical_hypotheses_m
     results = [_slot_result([phase[LI], phase[ZR1], phase[ZR2]]), _slot_result([phase[LI], phase[ZR2]]),
                _slot_result([phase[LI], phase[ZR1]])]
     kept, rwps = jobs._one_structure_per_formula(results, [3.0, 4.0, 5.0], groups, {ZR1: 9.0, ZR2: 4.0})
-    # the lowest screening Rwp of the structures of a hypothesis stays; the second hypothesis is then the first
-    assert [[p[0].path.stem for p in result.phases] for result in kept] == [[LI, ZR2], [LI, ZR1]]
-    assert rwps == [3.0, 5.0]
+    # the lowest screening Rwp of the structures of a hypothesis stays; one formula set, one hypothesis
+    assert [[p[0].path.stem for p in result.phases] for result in kept] == [[LI, ZR2]]
+    assert rwps == [3.0]
 
 
-def test_polymorphs_of_one_formula_stay_together_and_the_same_space_group_collapses():
+ANATASE, RUTILE, RUTILE2, BROOKITE = "TiO2_141_(cod_1)-0", "TiO2_136_(cod_2)-0", "TiO2_136_(cod_3)-0", "TiO2_61_(cod_4)-0"
+
+
+def _tio2(*stems_per_hypothesis, formulas=("TiO2", "Li2CO3")):
+    stems = {LI, *(stem for stems in stems_per_hypothesis for stem in stems)}
+    phase = {stem: RefinementPhase.make(Path(f"{stem}.cif")) for stem in stems}
+    groups = kp.build_groups(list(formulas), list(phase))
+    return groups, [_slot_result([phase[stem] for stem in stems]) for stems in stems_per_hypothesis]
+
+
+def _stems(results):
+    return [sorted(p[0].path.stem for p in result.phases) for result in results]
+
+
+def test_hypotheses_with_one_formula_set_and_other_extra_polymorphs_give_one_final_refinement():
     from dara import jobs
 
-    anatase, rutile, rutile2 = "TiO2_141_(cod_1)-0", "TiO2_136_(cod_2)-0", "TiO2_136_(cod_3)-0"
-    phase = {stem: RefinementPhase.make(Path(f"{stem}.cif")) for stem in (anatase, rutile, rutile2, LI)}
-    groups = kp.build_groups(["TiO2", "Li2CO3"], list(phase))
-    results = [_slot_result([phase[LI], phase[anatase], phase[rutile], phase[rutile2]]),
-               _slot_result([phase[LI], phase[anatase], phase[rutile]])]
-    kept, rwps = jobs._one_structure_per_formula(results, [3.0, 4.0], groups, {rutile: 9.0, rutile2: 4.0})
-    # anatase and one rutile (the lower screening Rwp) stay; the second hypothesis is then a different one
-    assert [sorted(p[0].path.stem for p in result.phases) for result in kept] == [
-        sorted([LI, anatase, rutile2]), sorted([LI, anatase, rutile]),
-    ]
-    assert rwps == [3.0, 4.0]
+    groups, results = _tio2([LI, ANATASE], [LI, ANATASE, RUTILE], [LI, ANATASE, BROOKITE], [LI, RUTILE])
+    kept, rwps = jobs._one_structure_per_formula(results, [4.84, 4.81, 4.9, 4.95], groups, {})
+    assert _stems(kept) == [sorted([LI, ANATASE, RUTILE])] and rwps == [4.81]  # the best-rated one
+    kept, rwps = jobs._one_structure_per_formula(results, [4.0, 4.1, 4.2, 4.3], groups, {})
+    assert _stems(kept) == [sorted([LI, ANATASE])] and rwps == [4.0]
+
+
+def test_the_best_rated_hypothesis_with_two_polymorphs_keeps_both_structures():
+    from dara import jobs
+
+    groups, results = _tio2([LI, ANATASE, RUTILE2, RUTILE], [LI, ANATASE, RUTILE])
+    kept, rwps = jobs._one_structure_per_formula(results, [3.0, 4.0], groups, {RUTILE: 9.0, RUTILE2: 4.0})
+    assert _stems(kept) == [sorted([LI, ANATASE, RUTILE2])] and rwps == [3.0]  # same space group collapsed only
+
+
+def test_hypotheses_with_different_formula_sets_are_all_kept():
+    from dara import jobs
+
+    groups, results = _tio2([LI], [LI, ANATASE], [ANATASE, RUTILE])
+    kept, rwps = jobs._one_structure_per_formula(results, [5.0, 4.0, 6.0], groups, {})
+    assert _stems(kept) == _stems(results) and rwps == [5.0, 4.0, 6.0]
 
 
 def test_two_polymorphs_in_the_best_fit_are_listed_under_one_formula(monkeypatch, tmp_path):
