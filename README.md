@@ -57,8 +57,9 @@ Choose the analysis mode by what you already know:
 | **Known-phase refinement** | You know the phases and want their amounts: synthesis yield, residual precursor, batch checks, a firing series. | The phase formulas |
 | **Reaction check** | You fired precursors and want to see which products appeared. | Precursors, temperature, atmosphere |
 
-In Known-phase refinement the phases you list are refined together, one structure per formula. A phase
-stays in the fit only if it explains significant or minor unexplained peaks: a minor phase (below 5 wt%)
+In Known-phase refinement the phases you list are refined together, one structure per formula and space
+group: polymorphs of one formula (anatase and rutile TiO2) can both be in the fit, while several records
+of the same structure type collapse to the best one. A phase stays in the fit only if it explains significant or minor unexplained peaks: a minor phase (below 5 wt%)
 is refit without it, and a listed phase the search did not pick is tried by adding it. Otherwise it is
 reported as not detected, never dropped silently. A formula with no COD
 structure is taken from Materials Project for that run. A finished result's exact structures can be
