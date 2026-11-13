@@ -72,6 +72,17 @@ def is_valid_cif_file(path: Path | str) -> bool:
     return bool(re.search(r"^data_\S*", text, re.M)) and "_cell_length_a" in text
 
 
+def is_theoretical_cif(path: Path | str) -> bool:
+    """True if a COD file says its structure was predicted, not measured."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read(262144)
+    except OSError:
+        return False
+    return bool(re.search(
+        r"^_cod_struct(?:ure)?_determination_method\s+'?theoretical", text, re.M | re.I))
+
+
 def atomic_write_text(path: Path | str, text: str) -> None:
     """Write ``text`` to ``path`` via a temporary file and an atomic rename.
 
@@ -251,6 +262,10 @@ class StructureDatabase(MSONable, metaclass=ABCMeta):
             fp = self.get_file_path(code) if folder is None else folder / f"{code}.cif"
             if folder is not None and not Path(fp).is_file():
                 continue  # download failed; skip instead of mapping a missing file
+            if is_theoretical_cif(fp):
+                # COD also holds predicted nets (e.g. "C3O" MOF topologies) that fit noise.
+                logger.info("Skipping theoretical structure: %s (%s)", code, formula)
+                continue
             suffix = "" if e_hull_value is None else f"-{e_hull_value}"  # no "-None" in new names
             file_map[str(fp)] = f"{formula}_{sg}_({self.name}_{code}){suffix}.cif"
 

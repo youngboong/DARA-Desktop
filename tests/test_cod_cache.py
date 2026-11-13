@@ -89,6 +89,20 @@ def test_cached_files_are_reused_without_download(db, monkeypatch):
     assert "FeO_225_(cod_1000001)-0.cif" in file_map.values()
 
 
+def test_theoretical_structures_are_left_out(db, monkeypatch):
+    for _, code, _, _ in ROWS:
+        write_valid(cod_cache_dir(), code)
+    fake_downloader(monkeypatch)
+    for code, tag in (("1000001", "_cod_structure_determination_method   theoretical"),
+                      ("1000002", "_cod_struct_determination_method 'theoretical'")):
+        with open(cod_cache_dir() / f"{code}.cif", "a", encoding="utf-8") as handle:
+            handle.write(f"\n{tag}\n")
+
+    file_map = db._generate_file_map(ROWS, 0.1, True)
+
+    assert [name for name in file_map.values() if "1000003" in name] == list(file_map.values())
+
+
 def test_only_missing_files_are_downloaded(db, monkeypatch):
     write_valid(cod_cache_dir(), "1000001")
     calls = fake_downloader(monkeypatch)

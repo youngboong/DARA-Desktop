@@ -972,7 +972,7 @@ def _simulate_cod_pool(elements, precursors, wavelength_a, two_theta_range) -> l
     from dara.cif import Cif
     from dara.search.prefilter import simulate_structure_reflections
     from dara.server.confidence import _reduced_formula
-    from dara.structure_db import cod_candidate_rows, cod_cache_dir
+    from dara.structure_db import cod_candidate_rows, cod_cache_dir, is_theoretical_cif
 
     rows = cod_candidate_rows(list(elements), list(precursors), 0.1)
     cache_dir = cod_cache_dir()
@@ -982,7 +982,7 @@ def _simulate_cod_pool(elements, precursors, wavelength_a, two_theta_range) -> l
         if is_molecular_organic(formula):
             continue
         path = cache_dir / f"{code}.cif"
-        if not path.is_file():
+        if not path.is_file() or is_theoretical_cif(path):
             continue
         try:
             reduced = _reduced_formula(str(formula)) or str(formula)
