@@ -116,6 +116,57 @@ def _pick(raw, tree: dict, codec_options) -> dict:
     return picked
 
 
+_BSON_FIXED_SIZE = {0x01: 8, 0x06: 0, 0x07: 12, 0x08: 1, 0x09: 8, 0x0A: 0, 0x10: 4, 0x11: 8,
+                    0x12: 8, 0x13: 16, 0x7F: 0, 0xFF: 0}
+_BSON_SIZED = {0x02: 4, 0x03: 0, 0x04: 0, 0x05: 5, 0x0D: 4, 0x0E: 4, 0x0F: 0}  # int32 + this = size
+_BSON_SCALAR = {0x01, 0x02, 0x10, 0x12}  # double, string, int32, int64: what _is_scalar accepts
+
+
+def _stored_key(conn, rowid: int, field: str):
+    """``field`` of a stored document as the key index keeps it (value, ``_ANY`` or ``_MISSING``).
+
+    Reads only the top-level element headers, seeking past the values, so a record that
+    carries a pattern or a whole result costs a few small reads instead of a full decode.
+    """
+    wanted = field.encode()
+    try:
+        blob = conn.blobopen("documents", "v", rowid, readonly=True)
+    except sqlite3.Error:
+        return None  # deleted since the row list was read
+    with blob:
+        size, pos = len(blob), 4
+        while pos < size - 1:
+            blob.seek(pos)
+            head = blob.read(len(wanted) + 2)
+            if head[0] == 0:
+                break
+            kind, name_end = head[0], head.find(b"\0", 1)
+            name = head[1:name_end]
+            if name_end < 0:  # a name longer than the wanted one: only its end is needed
+                blob.seek(pos + 1)
+                name, name_end = None, blob.read(4096).find(b"\0") + 1
+                if name_end <= 0:
+                    raise _Unsupported("key name")
+            start = pos + name_end + 1
+            if kind in _BSON_FIXED_SIZE:
+                length = _BSON_FIXED_SIZE[kind]
+            elif kind in _BSON_SIZED:
+                blob.seek(start)
+                length = int.from_bytes(blob.read(4), "little", signed=True) + _BSON_SIZED[kind]
+            else:
+                raise _Unsupported("BSON element type")
+            if length < 0 or start + length > size:
+                raise _Unsupported("BSON element size")
+            if name == wanted:  # stored from a dict, so a key never repeats
+                if kind not in _BSON_SCALAR:
+                    return _ANY
+                blob.seek(start)
+                element = bytes([kind]) + b"k\0" + blob.read(length)
+                return bson.decode((len(element) + 5).to_bytes(4, "little") + element + b"\0")["k"]
+            pos = start + length
+    return _MISSING
+
+
 def _matching_keys(conn, path: str, field: str, value) -> list:
     """Row keys whose ``field`` may equal ``value``, in storage (rowid) order.
 
@@ -129,10 +180,15 @@ def _matching_keys(conn, path: str, field: str, value) -> list:
         for rowid, key in conn.execute("SELECT rowid, k FROM documents").fetchall():
             seen = known.get(key)
             if seen is None or seen[0] != rowid:
-                row = conn.execute("SELECT v FROM documents WHERE k = ?", (key,)).fetchone()
-                if row is None:
-                    continue
-                stored = RawBSONDocument(row[0]).get(field, _MISSING)
+                try:
+                    stored = _stored_key(conn, rowid, field)
+                    if stored is None:  # deleted since the row list was read
+                        continue
+                except _Unsupported:  # unusual BSON: decode the whole document
+                    row = conn.execute("SELECT v FROM documents WHERE k = ?", (key,)).fetchone()
+                    if row is None:
+                        continue
+                    stored = RawBSONDocument(row[0]).get(field, _MISSING)
                 seen = (rowid, stored if stored is _MISSING or _is_scalar(stored) else _ANY)
             current[key] = seen
         _KEY_INDEX[(path, field)] = current
@@ -267,6 +323,24 @@ def get_store(collection_name):
         raise ValueError(f"Unsupported database backend: {setting.database_backend}")
 
     return store
+
+
+def warm_key_indexes() -> None:
+    """Build the per-process ``index``/``uuid`` key indexes before the first task page needs them."""
+    from montydb.configure import provide_repository
+
+    for name in ("jobs", "results", "versions"):
+        store = get_store(name)
+        if not (isinstance(store, DaraMontyStore) and store.storage == "sqlite"
+                and store.storage_kwargs.get("use_bson") and store.database_path != ":memory:"):
+            return
+        # The same path string _fast_query builds, so its lookups find these indexes.
+        path = os.path.join(provide_repository(store.database_path), store.database_name,
+                            name + ".collection")
+        if os.path.isfile(path):
+            with closing(sqlite3.connect(path, timeout=5)) as conn:
+                for field in _KEYED_FIELDS:
+                    _matching_keys(conn, path, field, None)
 
 
 def get_worker_store() -> MontyStore:

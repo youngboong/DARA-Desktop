@@ -77,3 +77,27 @@ def test_key_index_follows_inserts_updates_and_deletes(tmp_path):
         for criteria in ({"index": 4}, {"index": 2}, {"uuid": "u1"}, {"uuid": "new"}):
             assert list(store.query(criteria)) == list(_MontyStoreClass.query(store, criteria))
         assert store.query_one({"index": 4})["status"] == "COMPLETED"
+
+
+def test_stored_key_reads_one_top_level_field(tmp_path):
+    import sqlite3
+
+    import bson
+    from bson.int64 import Int64
+
+    from dara.server.utils import _ANY, _MISSING, _stored_key
+
+    conn = sqlite3.connect(tmp_path / "c.sqlite")
+    conn.execute("CREATE TABLE documents (k text NOT NULL, v text NOT NULL, PRIMARY KEY(k))")
+    doc = {"_id": bson.ObjectId(), "a_much_longer_name_than_index": "x" * 5000,
+           "job": {"pattern": list(range(1000))}, "flag": True, "none": None,
+           "when": datetime(2026, 1, 1), "big": Int64(2**40), "rwp": 1.5, "uuid": "u-1", "index": 7}
+    conn.execute("INSERT INTO documents VALUES (?, ?)", ("k1", bson.encode(doc)))
+    rowid = conn.execute("SELECT rowid FROM documents").fetchone()[0]
+    for field in ("uuid", "index", "big", "rwp"):
+        assert _stored_key(conn, rowid, field) == doc[field]
+    for field in ("job", "flag", "none", "when", "_id"):
+        assert _stored_key(conn, rowid, field) is _ANY
+    assert _stored_key(conn, rowid, "missing") is _MISSING
+    assert _stored_key(conn, rowid, "ind") is _MISSING
+    assert _stored_key(conn, rowid + 1, "index") is None  # deleted row

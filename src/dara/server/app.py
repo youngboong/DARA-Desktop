@@ -64,6 +64,16 @@ class FrontendStaticFiles(StaticFiles):
         return response
 
 
+def _warm_key_indexes():
+    """Read the record keys in the background, so the first opened task does not wait for it."""
+    try:
+        from dara.server.utils import warm_key_indexes
+
+        warm_key_indexes()
+    except Exception:
+        logging.getLogger("dara.server.app").debug("Key index warm-up failed", exc_info=True)
+
+
 @asynccontextmanager
 async def launch_worker_process(app: FastAPI):
     """Context manager to launch the worker process."""
@@ -80,6 +90,7 @@ async def launch_worker_process(app: FastAPI):
     _worker_process = multiprocessing.Process(target=worker_process, daemon=True,
         args=(stop_event, get_dara_server_settings().model_dump()))
     _worker_process.start()
+    threading.Thread(target=_warm_key_indexes, name="dara-key-index", daemon=True).start()
     idle_watch = None
     if presence.idle_shutdown_enabled():
         idle_watch = asyncio.create_task(presence.watchdog(_request_exit))

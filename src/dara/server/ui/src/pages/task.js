@@ -295,12 +295,45 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task_id, plot_id]);
-  if (error) return <Alert type="error" showIcon message={error} />;
-  if (!plot) return <Spin />;
+  // react-plotly redraws (a full Plotly.react, 100-500 ms) whenever data, layout or config is a
+  // new object, so they are rebuilt only when what they show changes, not on every page render.
   // Legend formulas from the CIFs (NH4H2PO4, not the file stem's PH6NO4); trace order is unchanged.
-  const view = buildRefinementView({ ...plot, data: (phaseLegend || (d => d))(colorPhaseTraces(relabelPhaseTraces(plot.data), phaseColor)) }, {
+  const labeled = plot ? (phaseLegend || (d => d))(colorPhaseTraces(relabelPhaseTraces(plot.data), phaseColor)) : null;
+  // The label and colour functions only rename and recolour phase traces: this key describes their
+  // output. It reads the colours from phaseColor, because Plotly normalizes the colours of drawn traces in place.
+  const labelKey = (labeled || []).map((trace, index) => [trace?.name, phaseColor && ['phase-profile', 'reflection'].includes(plot.data[index]?.meta)
+    ? phaseColor(plot.data[index].legendgroup) : ''].join('\u0000')).join('\u0001');
+  const view = React.useMemo(() => (plot ? buildRefinementView({ ...plot, data: labeled }, {
     selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title,
-  });
+  }) : null),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [plot, labelKey, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title]);
+  const data = React.useMemo(() => (view && previewSticks?.length
+    ? [...view.data, previewTrace(previewSticks, observedPeak(plot) * 0.8, { floor: scale === 'log' ? 1 : 0 })]
+    : view?.data), [view, previewSticks, plot, scale]);
+  const excludedKey = JSON.stringify(excludedRanges);
+  const peaksKey = JSON.stringify(peaks);
+  const layout = React.useMemo(() => (view ? { ...view.layout, autosize: true,
+    shapes: [...(view.layout.shapes || []), ...excludedRanges.flatMap(([x0, x1]) => [
+      { type: 'rect', xref: 'x', yref: 'y domain', x0, x1, y0: 0, y1: 1, fillcolor: 'rgba(130,130,130,0.15)', line: { width: 0 }, layer: 'below' },
+      { type: 'rect', xref: 'x2', yref: 'y2 domain', x0, x1, y0: 0, y1: 1, fillcolor: 'rgba(130,130,130,0.15)', line: { width: 0 }, layer: 'below' },
+    ]), ...peakShapes(peaks)],
+    dragmode: NAVIGATION_DRAGMODE,
+    uirevision: `${task_id}-${plot_id}-${resetKey}` } : null),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [view, excludedKey, peaksKey, task_id, plot_id, resetKey]);
+  // Ranges are React state: Plotly's own reset/autoscale buttons would only
+  // restore the state they were last given, so Reset zoom replaces them.
+  const config = React.useMemo(() => ({ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG,
+    toImageButtonOptions: { format: 'svg', filename: `dara_${task_id}_${String(plot_id ?? 'best').replace(':', '_')}`, width: 1600, height: 900 } }),
+  [task_id, plot_id]);
+  // Plotly keeps the handlers of its last redraw; these stable ones always call the current render's.
+  const handlers = React.useRef({});
+  const plotHandlers = React.useMemo(() => Object.fromEntries(['onLegendClick', 'onLegendDoubleClick', 'onDoubleClick', 'onClick', 'onHover', 'onRelayout']
+    .map(name => [name, event => handlers.current[name](event)])), []);
+  if (error) return <Alert type="error" showIcon message={error} />;
+  // The container is measured while loading too, so the first draw already has the final width.
+  if (!plot) return <div ref={containerRef} style={{ width: '100%' }}><Spin /></div>;
   const toggleLegend = event => {
     const index = event.curveNumber;
     const trace = plot.data[index];
@@ -341,9 +374,19 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     set('n', point.data?.name ? `${point.data.name}` : 'I');
     set('i', Number.isFinite(Number(point.y)) ? Math.round(Number(point.y)).toLocaleString('en-US') : '–');
   };
-  const data = previewSticks?.length
-    ? [...view.data, previewTrace(previewSticks, observedPeak(plot) * 0.8, { floor: scale === 'log' ? 1 : 0 })]
-    : view.data;
+  handlers.current = {
+    onLegendClick: toggleLegend,
+    onLegendDoubleClick: isolateLegend,
+    onDoubleClick: resetView,
+    onClick: handleClick,
+    onHover: showReadout,
+    onRelayout: event => {
+      const change = viewChangeFromRelayout(event, { full: view.fullXRange });
+      if ('xRange' in change) setXRange(change.xRange);
+      // A y box (Auto-Y off) becomes the data window; the bands are drawn below it.
+      if ('yRange' in change) setYRange(change.yRange);
+    },
+  };
   return <>
     {/* The page preview draws the fit only; the workspace has the controls. */}
     {compact ? null : <Space wrap style={{ marginBottom: 8 }}>
@@ -366,30 +409,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       <span className="dara-readout-value"><span data-k="n">I</span> <b data-k="i">–</b></span>
     </div>
     <div ref={containerRef} style={{ width: '100%' }}>
-    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange}
-      layout={{ ...view.layout, autosize: true,
-        shapes: [...(view.layout.shapes || []), ...excludedRanges.flatMap(([x0, x1]) => [
-          { type: 'rect', xref: 'x', yref: 'y domain', x0, x1, y0: 0, y1: 1, fillcolor: 'rgba(130,130,130,0.15)', line: { width: 0 }, layer: 'below' },
-          { type: 'rect', xref: 'x2', yref: 'y2 domain', x0, x1, y0: 0, y1: 1, fillcolor: 'rgba(130,130,130,0.15)', line: { width: 0 }, layer: 'below' },
-        ]), ...peakShapes(peaks)],
-        dragmode: NAVIGATION_DRAGMODE,
-        uirevision: `${task_id}-${plot_id}-${resetKey}` }}
-      onLegendClick={toggleLegend}
-      onLegendDoubleClick={isolateLegend}
-      onDoubleClick={resetView}
-      onClick={handleClick}
-      onHover={showReadout}
-      onRelayout={event => {
-        const change = viewChangeFromRelayout(event, { full: view.fullXRange });
-        if ('xRange' in change) setXRange(change.xRange);
-        // A y box (Auto-Y off) becomes the data window; the bands are drawn below it.
-        if ('yRange' in change) setYRange(change.yRange);
-      }}
-      // Ranges are React state: Plotly's own reset/autoscale buttons would only
-      // restore the state they were last given, so Reset zoom replaces them.
-      config={{ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG,
-        toImageButtonOptions: { format: 'svg', filename: `dara_${task_id}_${String(plot_id ?? 'best').replace(':', '_')}`, width: 1600, height: 900 } }}
-      useResizeHandler style={{ height, width: '100%' }} />
+    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config}
+      {...plotHandlers} useResizeHandler style={{ height, width: '100%' }} />
     </div>
   </>;
 });
@@ -809,16 +830,10 @@ function TaskDetail({ data, task_id, onDelete }) {
     });
   }, [store.versions, store.loading, plot_id, setPlotId]);
 
-  const firstPlotId = data.all_results[0]?.source_index ?? (data.all_results.length ? 0 : null);
-  React.useEffect(() => {
-    const warm = () => preloadPlot(task_id, firstPlotId);
-    if (window.requestIdleCallback) {
-      const handle = window.requestIdleCallback(warm, { timeout: 1500 });
-      return () => window.cancelIdleCallback(handle);
-    }
-    const handle = window.setTimeout(warm, 250);
-    return () => window.clearTimeout(handle);
-  }, [task_id, firstPlotId]);
+  // Candidate 1 is usually the best fit, which the page draws already: then only Plotly is warmed.
+  const firstResult = data.all_results[0];
+  const firstPlotId = firstResult && firstResult.rwp === data.final_result?.rwp ? undefined
+    : firstResult?.source_index ?? (data.all_results.length ? 0 : null);
   const referenceMetadata = Object.assign({}, data.final_result.phase_metadata,
     ...data.all_results.map(result => result.phase_metadata));
   const renderReference = reference => <PhaseIdentity reference={reference} metadata={referenceMetadata[reference]} />;
@@ -849,6 +864,27 @@ function TaskDetail({ data, task_id, onDelete }) {
   const previewParsed = typeof previewSel === 'string' ? parseSelection(previewSel) : null;
   const previewVersionNumber = previewParsed && typeof previewParsed === 'object' && !versionGone(store.versions, previewSel)
     ? previewParsed.version : null;
+  // Until the adopted fit is known and loaded, the summary would show the best fit and then jump.
+  const summaryPending = !summaryShown.current
+    && (savedReview.loading || (adoptedVersionNumber && !(adoptedVersionNumber in versionDetails)));
+  React.useEffect(() => {
+    // The warm-up waits for the plot shown on the page: the server builds one plot at a time.
+    if (summaryPending) return undefined;
+    let active = true;
+    let cancel = () => {};
+    Promise.allSettled([...plotRequests.values()]).then(() => {
+      if (!active) return;
+      const warm = () => preloadPlot(task_id, firstPlotId);
+      if (window.requestIdleCallback) {
+        const handle = window.requestIdleCallback(warm, { timeout: 1500 });
+        cancel = () => window.cancelIdleCallback(handle);
+      } else {
+        const handle = window.setTimeout(warm, 250);
+        cancel = () => window.clearTimeout(handle);
+      }
+    });
+    return () => { active = false; cancel(); };
+  }, [task_id, firstPlotId, summaryPending]);
   React.useEffect(() => {
     if (versionPending) return undefined;
     // A failed load is stored as null, so it is not requested again in a loop.
@@ -1063,9 +1099,6 @@ function TaskDetail({ data, task_id, onDelete }) {
   const addPhaseTip = quickCheck ? REFINE_ALL_FIRST
     : suggestionCount ? `${suggestionCount} possible or strong match${suggestionCount === 1 ? '' : 'es'} for the significant unexplained peaks` : null;
 
-  // Until the adopted fit is known and loaded, the summary would show the best fit and then jump.
-  const summaryPending = !summaryShown.current
-    && (savedReview.loading || (adoptedVersionNumber && !(adoptedVersionNumber in versionDetails)));
   if (!summaryPending) summaryShown.current = true;
   else return <SpinContainer><Spin size='large' tip='Loading results…' /></SpinContainer>;
 
