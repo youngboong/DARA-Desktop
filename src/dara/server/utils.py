@@ -1,9 +1,14 @@
 import os
 import re
+import sqlite3
+import threading
 import zoneinfo
 from configparser import ConfigParser
+from contextlib import closing
 from datetime import datetime
 
+import bson
+from bson.raw_bson import RawBSONDocument
 from jobflow import JobStore
 from maggma.core import Store
 from maggma.stores import MongoStore, MontyStore
@@ -40,6 +45,122 @@ def _storage_configured(repository: str, storage: str, storage_kwargs: dict) -> 
 # maggma wraps MontyStore in a ``requires`` function; subclass the class underneath.
 _MontyStoreClass = getattr(MontyStore, "__wrapped__", MontyStore)
 
+# Fast read path of DaraMontyStore. montydb decodes every whole document of a collection
+# on each query (a task record carries its pattern, a result several MB), so a lookup of
+# one task cost a full scan. The fast path reads the same sqlite rows, decodes only the
+# fields a query needs (or only the rows an ``index``/``uuid`` equality can match) and then
+# runs montydb's own filter, sort, skip/limit and projection on them.
+_KEYED_FIELDS = ("index", "uuid")
+_KEY_INDEX: dict = {}  # (collection file, field) -> {row key: (rowid, field value)}
+_KEY_INDEX_LOCK = threading.Lock()
+_MISSING = object()  # the record has no such field
+_ANY = object()  # a value equality cannot rule out (array, document, bool, ...)
+
+
+class _Unsupported(Exception):
+    """The fast path cannot reproduce this query exactly; montydb runs it."""
+
+
+def _is_scalar(value) -> bool:
+    return isinstance(value, (int, float, str)) and not isinstance(value, bool)
+
+
+def _criteria_paths(spec):
+    """Field paths a filter reads (logical operators followed, other top-level ``$`` refused)."""
+    for key, value in spec.items():
+        if key in ("$and", "$or", "$nor"):
+            if not isinstance(value, list) or not all(isinstance(clause, dict) for clause in value):
+                raise _Unsupported(key)
+            for clause in value:
+                yield from _criteria_paths(clause)
+        elif key.startswith("$"):
+            raise _Unsupported(key)
+        else:
+            yield key
+
+
+def _path_tree(paths) -> dict:
+    """Nested dict of field paths; ``None`` marks a subtree that is copied whole."""
+    tree: dict = {}
+    for path in sorted(paths, key=lambda item: item.count(".")):
+        node, parts = tree, path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if node is None:  # an ancestor is already copied whole
+                break
+        else:
+            node[parts[-1]] = None
+    return tree
+
+
+def _plain(value, codec_options):
+    if isinstance(value, RawBSONDocument):
+        return bson.decode(value.raw, codec_options=codec_options)
+    if isinstance(value, list):
+        return [_plain(item, codec_options) for item in value]
+    return value
+
+
+def _pick(raw, tree: dict, codec_options) -> dict:
+    """The ``tree`` paths of a raw document, decoded, in document order.
+
+    A path stops at the first value that is not a sub-document and copies it whole, so
+    montydb's array traversal sees exactly what it would see in the full document.
+    """
+    picked = {}
+    for key in raw:
+        if key in tree:
+            value, sub = raw[key], tree[key]
+            nested = sub is not None and isinstance(value, RawBSONDocument)
+            picked[key] = _pick(value, sub, codec_options) if nested else _plain(value, codec_options)
+    return picked
+
+
+def _matching_keys(conn, path: str, field: str, value) -> list:
+    """Row keys whose ``field`` may equal ``value``, in storage (rowid) order.
+
+    shortcut: a row's ``index``/``uuid`` is read once per (key, rowid); maggma replaces
+    records matched on those fields, so they never change in place. Re-read every row
+    instead if a writer ever edits them.
+    """
+    with _KEY_INDEX_LOCK:
+        known = _KEY_INDEX.get((path, field), {})
+        current = {}
+        for rowid, key in conn.execute("SELECT rowid, k FROM documents").fetchall():
+            seen = known.get(key)
+            if seen is None or seen[0] != rowid:
+                row = conn.execute("SELECT v FROM documents WHERE k = ?", (key,)).fetchone()
+                if row is None:
+                    continue
+                stored = RawBSONDocument(row[0]).get(field, _MISSING)
+                seen = (rowid, stored if stored is _MISSING or _is_scalar(stored) else _ANY)
+            current[key] = seen
+        _KEY_INDEX[(path, field)] = current
+    ordered = sorted(current.items(), key=lambda item: item[1][0])
+    return [key for key, (_, stored) in ordered
+            if stored is _ANY or (stored is not _MISSING and stored == value)]
+
+
+def _run_monty_query(docs, criteria, projection, sort_list, skip, limit) -> list:
+    """montydb's filter, sort, skip/limit and projection (``MontyCursor.__query``)."""
+    from montydb.base import _index_document
+    from montydb.engine.project import Projector
+    from montydb.engine.queries import QueryFilter, ordering
+
+    queryfilter = QueryFilter(criteria)
+    projector = Projector(projection, queryfilter) if projection else None
+    walkers = [queryfilter.fieldwalker for doc in docs if queryfilter(doc)]
+    if sort_list:
+        walkers = ordering(walkers, _index_document(sort_list))
+    if skip and not limit:
+        walkers = walkers[skip:]
+    elif limit:
+        walkers = walkers[skip: skip + abs(limit)]
+    if projector:
+        for walker in walkers:
+            projector(walker)
+    return [walker.doc for walker in walkers]
+
 
 class DaraMontyStore(_MontyStoreClass):
     """MontyStore that leaves an existing, identical storage configuration alone.
@@ -59,6 +180,67 @@ class DaraMontyStore(_MontyStoreClass):
                 set_storage(self.database_path, storage=self.storage, **self.storage_kwargs)
             client = MontyClient(self.database_path, **self.client_kwargs)
             self._coll = client[self.database_name][self.collection_name]
+
+    def _fast_query(self, criteria, properties, sort, skip, limit) -> list:
+        """The documents montydb would return, read without decoding whole collections."""
+        criteria = criteria or {}
+        projection = {p: 1 for p in properties} if isinstance(properties, list) else properties
+        if (self.storage != "sqlite" or not self.storage_kwargs.get("use_bson")
+                or self.database_path == ":memory:" or self.default_sort is not None
+                or not isinstance(criteria, dict) or skip < 0):
+            raise _Unsupported("store")
+        if projection is not None and (not projection or not all(
+                value is True or (type(value) is int and value == 1) for value in projection.values())):
+            raise _Unsupported("projection")  # exclusions and operators need the whole document
+        if sort and not all(type(value) is int and value in (1, -1) for value in sort.values()):
+            raise _Unsupported("sort")
+        key_field = next((field for field in _KEYED_FIELDS if _is_scalar(criteria.get(field))), None)
+        if key_field is None and projection is None:
+            raise _Unsupported("whole documents of a whole collection")
+        tree = None if projection is None else _path_tree(
+            {"_id", *projection, *_criteria_paths(criteria), *(sort or {})})
+
+        coll = self._collection
+        path = os.path.join(coll.database.client._storage._repository,
+                            self.database_name, self.collection_name + ".collection")
+        if not os.path.isfile(path):
+            raise _Unsupported("no collection file")
+        options = coll.codec_options
+        raw_options = options.with_options(document_class=RawBSONDocument)
+
+        def decode(value):
+            if tree is None:
+                return bson.decode(value, codec_options=options)
+            return _pick(RawBSONDocument(value, raw_options), tree, options)
+
+        with closing(sqlite3.connect(path, timeout=5)) as conn:
+            if key_field is None:
+                docs = [decode(value) for (value,) in conn.execute("SELECT v FROM documents")]
+            else:
+                docs = []
+                for key in _matching_keys(conn, path, key_field, criteria[key_field]):
+                    row = conn.execute("SELECT v FROM documents WHERE k = ?", (key,)).fetchone()
+                    if row is not None:  # deleted since the key index was read
+                        docs.append(decode(row[0]))
+        sort_list = list(sort.items()) if sort else None
+        return _run_monty_query(docs, criteria, projection, sort_list, skip, limit)
+
+    def query(self, criteria=None, properties=None, sort=None, hint=None, skip=0, limit=0, **kwargs):
+        if not hint and not kwargs:
+            try:
+                yield from self._fast_query(criteria, properties, sort, skip, limit)
+                return
+            except (_Unsupported, sqlite3.Error):
+                pass
+        yield from super().query(criteria, properties, sort, hint, skip, limit, **kwargs)
+
+    def count(self, criteria=None, hint=None):
+        if not hint:
+            try:
+                return len(self._fast_query(criteria, ["_id"], None, 0, 0))
+            except (_Unsupported, sqlite3.Error):
+                pass
+        return super().count(criteria, hint)
 
 
 def get_store(collection_name):

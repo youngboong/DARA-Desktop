@@ -3348,6 +3348,9 @@ async def plot(task_id: int, idx: int | None = Query(None, ge=0), sel: str | Non
 
 
 LIST_SUMMARY_REFRESH_MAX = 3  # stale summaries upgraded per list request (bounds the latency)
+# Record fields a Results row reads; the measured pattern inside ``job`` is left out.
+LIST_TASK_FIELDS = ["index", "uuid", "status", "summary", "submitted_time", "user",
+                    "job.name", "job.metadata", "review.selection", "error"]
 
 
 def _refresh_listed_summaries(tasks: list[dict]) -> dict[int, dict | None]:
@@ -3370,7 +3373,10 @@ def _refresh_listed_summaries(tasks: list[dict]) -> dict[int, dict | None]:
             continue
         budget -= 1
         try:
-            fresh[task["index"]] = refresh_stale_summary(task, lambda: get_worker_store())
+            # The list reads only some fields; the refresh may need the whole record.
+            with get_worker_store() as worker_store:
+                record = worker_store.query_one({"index": task["index"]}) or task
+            fresh[task["index"]] = refresh_stale_summary(record, lambda: get_worker_store())
         except Exception:
             logger.debug("List summary refresh failed", exc_info=True)
     return fresh
@@ -3404,7 +3410,8 @@ async def get_all_tasks(
     with get_worker_store() as worker_store:
         tasks = list(
             worker_store.query(
-                criteria=query_dict, sort={"submitted_time": -1}, skip=skip, limit=limit
+                criteria=query_dict, properties=LIST_TASK_FIELDS,
+                sort={"submitted_time": -1}, skip=skip, limit=limit
             )
         )
 
