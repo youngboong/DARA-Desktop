@@ -157,3 +157,6 @@ dataset/precursor_mixture/Cr2O3_CaF2_CaCO3.xrdml
 
 # DARA updater state (scripts/update_dara.ps1)
 .dara-update/
+
+# Desktop build (packaging/build_dist.ps1): downloaded build tools; outputs go to dist/
+packaging/.build/
