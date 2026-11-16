@@ -426,4 +426,26 @@ def build_version_summary(task: dict, document, record: dict, *, extra_uploaded=
                 None,
             )
         ]
+    shift_text = _curve_shift_caution(record, view.final_result)
+    if shift_text:
+        summary["cautions"] = list(summary.get("cautions") or []) + [
+            fit_cautions._caution("background_curve_scaled", "warning", shift_text, None)
+        ]
     return encode_json(summary)
+
+
+def _curve_shift_caution(record: dict, refinement) -> str | None:
+    """Warning text when the fitted background left the user-defined curve, else ``None``."""
+    from dara import background_curve
+
+    params = record.get("refinement_params") or {}
+    anchors = params.get("background_anchors")
+    data = getattr(refinement, "plot_data", None)
+    if not anchors or data is None:
+        return None
+    try:
+        shift, two_theta = background_curve.curve_shift(data.x, data.y_bkg, anchors, params)
+    except Exception:  # noqa: BLE001 - the version is stored without the caution
+        logger.warning("Background curve shift unavailable", exc_info=True)
+        return None
+    return background_curve.shift_caution(shift, two_theta)

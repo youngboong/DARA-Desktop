@@ -45,6 +45,7 @@ def write_bgmn_bundle(
     ``.str`` file with :func:`dara.cif2str.cif2str` using the final-refinement parameters, so
     the lattice parameters start at the refined values with the same relative bounds.
     """
+    from dara import background_curve
     from dara.cif2str import cif2str
     from dara.cif_names import cif_stem
     from dara.export.bundles import _phase_meta, safe_name
@@ -99,8 +100,13 @@ def write_bgmn_bundle(
         excluded_ranges=refine.get("excluded_ranges"),
         eps2=f"{eps2:.6f}_-0.05^0.05" if eps2 is not None else "0_-0.05^0.05",
         wavelength=search.get("wavelength", "Cu"),
+        background_degree=refine.get("background_degree"),
+        background_anchors=refine.get("background_anchors"),
     )
     created += str_paths + [control]
+    curve_path = out_dir / background_curve.CURVE_FILENAME
+    if refine.get("background_anchors") is not None and curve_path.exists():
+        created.append(curve_path)
     if failed:
         with control.open("a", encoding="utf-8") as handle:
             handle.writelines(f"% Phase {name} could not be exported\n" for name in failed)

@@ -191,6 +191,18 @@ def _refinement_text(params: dict, candidate_summary: dict) -> str:
     return sentence
 
 
+def _background_curve_text(anchors, refinement, refinement_params=None) -> str:
+    """Sentence on a user-defined background; the deviation is read back from the fitted background."""
+    from dara import background_curve
+
+    data = getattr(refinement, "plot_data", None)
+    try:
+        shift, _ = background_curve.curve_shift(data.x, data.y_bkg, anchors, refinement_params)
+    except Exception:  # noqa: BLE001 - the sentence is written without the deviation
+        shift = None
+    return background_curve.methods_sentence(len(anchors), shift)
+
+
 def _database_sources(document, task: dict, phase_sources: set[str]) -> tuple[list[str], bool, float | None]:
     """Databases used for candidates: (keys, user_cifs_used, e_hull cutoff)."""
     sources = [str(item).lower() for item in (getattr(document, "candidate_sources", None) or [])]
@@ -347,6 +359,10 @@ def _methods_paragraph(
         )
         + " "
     )
+    curve_params = search_settings.get("refinement_params") or {}
+    anchors = curve_params.get("background_anchors")
+    if anchors:
+        parts.append(escape(_background_curve_text(anchors, refinement, curve_params)) + " ")
     parts.append("Weight fractions were calculated from the refined scale factors.")
     return "<p>" + "".join(parts) + "</p>"
 

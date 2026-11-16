@@ -50,7 +50,7 @@ from pydantic import (
 )
 
 from dara.analysis_range import normalize_excluded_ranges, validate_analysis_range
-from dara import structure_model
+from dara import background_curve, structure_model
 from dara.bgmn_worker import RefinementCancelled
 from dara.cif import Cif
 from dara.cif2str import cif2str
@@ -73,7 +73,6 @@ FAILED_RUN_KEEP_S = 24 * 3600
 JOB_ID_RE = re.compile(r"^q-[0-9a-f]{12}$")
 COD_SOURCE_RE = re.compile(r"^cod:(\d{1,9})$")
 LIBRARY_SOURCE_RE = re.compile(r"^library:([A-Za-z0-9_-]{1,64})$")
-ANCHORS_MESSAGE = "Background anchor points are not supported yet."
 # Iteration steps per BGMN stage for quick re-refinements (BGMN default: 10x the parameter
 # count). Measured on well-converged fits: 1.1-1.7x faster, Rwp within 0.03 and weight fractions
 # within about 2 %. Unstable fits (several minima) can end in a different minimum.
@@ -118,14 +117,23 @@ class QuickBackground(BaseModel):
 
     degree: int | None = Field(default=None, ge=2, le=20)
     excluded_ranges: list[list[float]] | None = None
-    anchors: Any = None
+    # ``[[two_theta, y], ...]``: a user-defined curve (``null`` drops it); see dara.background_curve.
+    anchors: list[list[float]] | None = None
+    interpolation: Literal["pchip"] = background_curve.INTERPOLATION
 
     @field_validator("anchors")
     @classmethod
-    def _no_anchors(cls, value):
-        if value is not None:
-            raise ValueError(ANCHORS_MESSAGE)
-        return value
+    def _anchors(cls, value):
+        if value is None:
+            return None
+        # The refined range and the excluded ranges are checked against the data in the run.
+        return background_curve.validate_anchors(value, lo=-np.inf, hi=np.inf)
+
+    @model_validator(mode="after")
+    def _one_model(self):
+        if self.anchors is not None and self.degree is not None:
+            raise ValueError("Use either background polynomial terms or anchor points, not both.")
+        return self
 
     @field_validator("excluded_ranges")
     @classmethod
@@ -762,6 +770,8 @@ def default_label(request: QuickRefineRequest) -> str:
     if kind == "remove" and removed:
         return f"Removed {removed}"
     if kind == "background":
+        if request.background and request.background.anchors:
+            return background_curve.label(request.background.anchors)
         return "Background / excluded-range change"
     if kind == "refine_all":
         return "All phases refined"
@@ -891,17 +901,26 @@ def merge_background(base_params: dict | None, background: QuickBackground | Non
     """Refinement parameters with the requested background change applied.
 
     ``degree`` replaces ``background_degree`` (``None`` after an explicit ``null`` returns to
-    BGMN's automatic choice); ``excluded_ranges`` are *added* to the ranges already excluded.
+    BGMN's automatic choice) and drops a user-defined curve; ``anchors`` replace the curve
+    (``background_anchors``, ``None`` drops it) and the polynomial degree. A request without
+    either keeps the base's background, curve included. ``excluded_ranges`` are *added* to the
+    ranges already excluded.
     """
     params = deepcopy(base_params or {})
     if background is None:
         return params
     given = background.model_fields_set
     if "degree" in given:
+        params.pop("background_anchors", None)
         if background.degree is None:
             params.pop("background_degree", None)
         else:
             params["background_degree"] = background.degree
+    if "anchors" in given:
+        params.pop("background_anchors", None)
+        if background.anchors is not None:
+            params.pop("background_degree", None)
+            params["background_anchors"] = deepcopy(background.anchors)
     if background.excluded_ranges:
         params["excluded_ranges"] = normalize_excluded_ranges(
             list(params.get("excluded_ranges") or []) + background.excluded_ranges
@@ -1215,6 +1234,7 @@ def _run_job(job: QuickJob, record: dict, raw: dict | None, base_version: dict |
             refinement_params.get("wmin"), refinement_params.get("wmax"),
             refinement_params.get("excluded_ranges"),
         )
+    check_anchors(refinement_params, document.xrd_data.angles)
 
     function_kwargs = (record.get("job") or {}).get("function_kwargs") or {}
     inherited_uploaded = list((base_version or {}).get("uploaded_stems") or [])
@@ -1321,13 +1341,7 @@ def _run_job(job: QuickJob, record: dict, raw: dict | None, base_version: dict |
         "controls": (
             request.controls.model_dump() if request.controls else (base_version or {}).get("controls")
         ),
-        "background": (
-            {
-                "degree": refinement_params.get("background_degree"),
-                "excluded_ranges": refinement_params.get("excluded_ranges") or [],
-            }
-            if request.background else (base_version or {}).get("background")
-        ),
+        "background": background_record(request, base_version, refinement_params, result),
         "phase_params": versions.encode_json(spec.phase_params),
         "overrides": versions.encode_json(_spec_overrides(spec)),
         "refinement_params": versions.encode_json(refinement_params),
@@ -1364,6 +1378,45 @@ def _run_job(job: QuickJob, record: dict, raw: dict | None, base_version: dict |
     }
     _update(job, stage="Storing version", timings=timings)
     return record_out
+
+
+def check_anchors(refinement_params: dict, angles) -> None:
+    """A user-defined background must lie in the refined range and outside the excluded ranges."""
+    anchors = refinement_params.get("background_anchors")
+    if anchors is None:
+        return
+    angles = np.asarray(angles, dtype=float)
+    wmin, wmax = refinement_params.get("wmin"), refinement_params.get("wmax")
+    try:
+        background_curve.validate_anchors(
+            anchors,
+            lo=wmin if wmin is not None else float(np.nanmin(angles)),
+            hi=wmax if wmax is not None else float(np.nanmax(angles)),
+            excluded_ranges=refinement_params.get("excluded_ranges"),
+        )
+    except ValueError as exc:
+        raise QuickRefineError(str(exc)) from exc
+
+
+def background_record(request: QuickRefineRequest, base_version: dict | None,
+                      refinement_params: dict, result) -> dict | None:
+    """``background`` of a new version record (``None``: the analysis' own background).
+
+    A user-defined curve is recorded with the scale and constant BGMN refined, also when it
+    was inherited from the base version (the scale belongs to this fit).
+    """
+    anchors = refinement_params.get("background_anchors")
+    excluded = refinement_params.get("excluded_ranges") or []
+    if anchors is not None:
+        data = getattr(result, "plot_data", None)
+        scale, constant = (
+            background_curve.fitted_scale(data.x, data.y_bkg, anchors) if data is not None else (None, None)
+        )
+        return {"degree": None, "excluded_ranges": excluded,
+                **background_curve.record(anchors, scale, constant)}
+    if request.background:
+        return {"degree": refinement_params.get("background_degree"), "excluded_ranges": excluded}
+    return (base_version or {}).get("background")
 
 
 def narrow_lattice_stems(request, plan, base_version) -> list[str]:

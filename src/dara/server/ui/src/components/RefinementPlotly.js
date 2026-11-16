@@ -5,6 +5,7 @@ import Scatter from 'plotly.js/lib/scatter';
 import {
   clampRange, finiteRange, insideRange, panRange, viewChangeFromRelayout, wheelNotches, wheelZoomRange, xRangeUpdate,
 } from './plotNavigation.mjs';
+import { HIT_PX } from './backgroundAnchors.mjs';
 
 // The refinement view only renders scatter traces. Importing react-plotly.js
 // directly pulls every Plotly trace type (maps, 3-D, finance, etc.) into the
@@ -181,15 +182,146 @@ function attachNavigation(gd, boundsRef) {
   };
 }
 
+/** Pixel position of data point (x, y) in the main panel, relative to the plot div, or `null`. */
+function dataToPixel(full, x, y) {
+  const xa = full.xaxis;
+  const ya = full.yaxis;
+  const ly = ya.type === 'log' ? (y > 0 ? Math.log10(y) : NaN) : y;
+  const px = xa._offset + xa.l2p(x);
+  const py = ya._offset + ya.l2p(ly);
+  return Number.isFinite(px) && Number.isFinite(py) ? { px, py } : null;
+}
+
+/** Intensity (data units, >= 0) at a pixel row of the main panel. */
+function pixelToIntensity(full, py) {
+  const ya = full.yaxis;
+  const value = ya.p2l(py - ya._offset);
+  return Math.max(ya.type === 'log' ? 10 ** value : value, 0);
+}
+
+const roundTo = (value, digits) => Number(value.toFixed(digits));
+
+// Background curve editing (see backgroundAnchors.mjs): drag an anchor vertically, click the curve
+// to add one, Alt+click an anchor to remove it. `editRef.current` is null when not editing, so the
+// listener is attached once and stays idle. While dragging only the curve and anchor traces are
+// restyled (one per animation frame); React state gets the anchors on mouseup.
+function attachAnchorEditing(gd, editRef) {
+  let drag = null;
+  let frame = null;
+
+  const traceIndex = meta => (gd.data || []).findIndex(trace => trace.meta === meta);
+  const mainPanel = (clientX, clientY) => {
+    const full = gd._fullLayout;
+    if (!full?.xaxis || !full?.yaxis) return null;
+    const rect = gd.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const { xaxis: xa, yaxis: ya } = full;
+    if (px < xa._offset || px > xa._offset + xa._length || py < ya._offset || py > ya._offset + ya._length) return null;
+    return { full, px, py };
+  };
+  const hitAnchor = (edit, at) => {
+    let best = -1;
+    let bestDistance = HIT_PX;
+    edit.anchors.forEach(([x, y], index) => {
+      const point = dataToPixel(at.full, x, y);
+      const distance = point ? Math.hypot(point.px - at.px, point.py - at.py) : Infinity;
+      if (distance <= bestDistance) { best = index; bestDistance = distance; }
+    });
+    return best;
+  };
+
+  const draw = () => {
+    frame = null;
+    if (!drag) return;
+    const curve = drag.edit.curveOf(drag.anchors);
+    const [curveIndex, anchorIndex] = [traceIndex('bg-curve'), traceIndex('bg-anchors')];
+    if (curveIndex < 0 || anchorIndex < 0) return;
+    Plotly.restyle(gd, { y: [curve, drag.anchors.map(point => point[1])] }, [curveIndex, anchorIndex]);
+  };
+
+  function onMove(event) {
+    if (!drag) return;
+    event.preventDefault();
+    const rect = gd.getBoundingClientRect();
+    const y = roundTo(pixelToIntensity(gd._fullLayout, event.clientY - rect.top), 2);
+    drag.anchors = drag.anchors.map((point, index) => (index === drag.index ? [point[0], y] : point));
+    drag.moved = true;
+    if (frame === null) frame = window.requestAnimationFrame(draw);
+  }
+
+  function onUp(event) {
+    if (!drag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('mouseup', onUp, true);
+    if (frame !== null) { window.cancelAnimationFrame(frame); frame = null; }
+    const { edit, anchors, moved } = drag;
+    drag = null;
+    if (moved) edit.onChange(anchors);
+  }
+
+  const onDown = event => {
+    const edit = editRef.current;
+    if (!edit || event.button !== 0 || event.shiftKey) return;
+    const at = mainPanel(event.clientX, event.clientY);
+    if (!at) return;
+    const index = hitAnchor(edit, at);
+    const stop = () => { event.preventDefault(); event.stopPropagation(); };
+    if (index >= 0) {
+      stop();
+      if (event.altKey) { edit.onRemove(index); return; }
+      edit.onSelect(index);
+      drag = { edit, index, anchors: edit.anchors, moved: false };
+      window.addEventListener('mousemove', onMove, true);
+      window.addEventListener('mouseup', onUp, true);
+      return;
+    }
+    // A click on the curve (within HIT_PX) between the range ends adds an anchor there.
+    const x = at.full.xaxis.p2l(at.px - at.full.xaxis._offset);
+    const [y] = edit.curveOf(edit.anchors, [x]);
+    const point = dataToPixel(at.full, x, y);
+    if (!point || Math.abs(point.py - at.py) > HIT_PX || edit.blocked(x)) return;
+    stop();
+    edit.onAdd([roundTo(x, 4), roundTo(y, 2)]);
+  };
+
+  // Plotly's drag layer keeps a crosshair cursor; show what a press would do instead.
+  const onHover = event => {
+    const edit = editRef.current;
+    const layer = gd.querySelector('.nsewdrag');
+    if (!layer || drag) return;
+    const at = edit ? mainPanel(event.clientX, event.clientY) : null;
+    layer.style.cursor = at && hitAnchor(edit, at) >= 0 ? (event.altKey ? 'not-allowed' : 'ns-resize') : '';
+  };
+
+  gd.addEventListener('mousedown', onDown, true);
+  gd.addEventListener('mousemove', onHover);
+  return () => {
+    drag = null;
+    if (frame !== null) window.cancelAnimationFrame(frame);
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('mouseup', onUp, true);
+    gd.removeEventListener('mousedown', onDown, true);
+    gd.removeEventListener('mousemove', onHover);
+  };
+}
+
 /**
  * Plotly scatter plot with the DARA navigation. `xBounds` is the measured 2θ range that zoom
- * and pan stay inside (default: the extent of the plotted data).
+ * and pan stay inside (default: the extent of the plotted data). `anchorEdit` turns on background
+ * curve editing: `{anchors, curveOf(anchors, xs?), blocked(x), onChange, onAdd, onRemove, onSelect}`
+ * (`curveOf` without `xs` gives the curve on the plotted 2θ grid; `blocked(x)` is true where no
+ * anchor may be added). The curve and anchors are the traces with meta 'bg-curve' / 'bg-anchors'.
  */
-export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, ...props }) {
+export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, anchorEdit = null, ...props }) {
   const detach = React.useRef(null);
   const graph = React.useRef(null);
   const boundsRef = React.useRef(xBounds);
   boundsRef.current = xBounds;
+  const editRef = React.useRef(anchorEdit);
+  editRef.current = anchorEdit;
   React.useEffect(() => () => { if (detach.current) detach.current(); }, []);
   // Every click event carries `cursorX`, the 2θ under the mouse (see cursorTwoTheta).
   const handleClick = onClick ? event => onClick({
@@ -198,7 +330,9 @@ export default function RefinementPlotly({ onInitialized, onClick, xBounds = nul
   return <Plot {...props} onClick={handleClick} onInitialized={(figure, gd) => {
     if (detach.current) detach.current();
     graph.current = gd;
-    detach.current = attachNavigation(gd, boundsRef);
+    const detachNavigation = attachNavigation(gd, boundsRef);
+    const detachEditing = attachAnchorEditing(gd, editRef);
+    detach.current = () => { detachNavigation(); detachEditing(); };
     if (onInitialized) onInitialized(figure, gd);
   }} />;
 }

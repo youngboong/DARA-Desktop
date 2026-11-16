@@ -224,6 +224,22 @@ def test_profex_bundle_without_refined_eps2_uses_default_window():
         assert "EPS2=0_-0.05^0.05" in sav
 
 
+def test_profex_bundle_keeps_the_version_background(tmp_path):
+    from dara.export.bundles import build_bundle, zip_directory
+
+    document, _ = _document()
+    document.search_kwargs["refinement_params"]["background_anchors"] = [[12.0, 10.0], [78.0, 8.0]]
+    created = build_bundle("profex", document.final_result, document, tmp_path / "a")
+    assert "UNT=user_bkg.xy\nRU=2\n" in next((tmp_path / "a").glob("*.sav")).read_text()
+    assert tmp_path / "a" / "user_bkg.xy" in created
+    assert "user_bkg.xy" in zipfile.ZipFile(io.BytesIO(zip_directory(tmp_path / "a"))).namelist()
+
+    document, _ = _document()
+    document.search_kwargs["refinement_params"]["background_degree"] = 7
+    build_bundle("profex", document.final_result, document, tmp_path / "b")
+    assert "RU=7" in next((tmp_path / "b").glob("*.sav")).read_text()
+
+
 def test_failed_phase_conversion_is_reported(monkeypatch):
     import tempfile
 

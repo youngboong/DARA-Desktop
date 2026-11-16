@@ -29,7 +29,8 @@ import StructureRefineDrawer, { StructureResults } from '../components/Structure
 import { structurePhases } from '../components/structureModel.mjs';
 import PeakListTab from '../components/PeakListTab';
 import InternalStandardCard from '../components/InternalStandardCard';
-import BackgroundEditor from '../components/BackgroundEditor';
+import BackgroundEditor, { BackgroundCurvePanel } from '../components/BackgroundEditor';
+import { addAnchor, anchorError, anchorLabel, curveWarnings, fitSeries, pchip, removeAnchor, seedAnchors } from '../components/backgroundAnchors.mjs';
 import useKeyboardShortcuts, { FIT_MODAL_CLASS, HELP_MODAL_CLASS } from '../components/useKeyboardShortcuts';
 import { MOUSE_HELP, SHORTCUT_HELP } from '../components/keyboardShortcuts.mjs';
 import {
@@ -227,6 +228,8 @@ function preloadPlot(taskId, plotId) {
 
 const RefinementPlot = React.forwardRef(function RefinementPlot({
   task_id, plot_id, excludedRanges = [], peaks = [], onPeakClick, previewSticks = null, onGroups, title = null, phaseColor = null, phaseLegend = null,
+  // Background curve editing: {anchors, selected, onChange, onAdd, onRemove, onSelect, blocked(x)} or null.
+  anchorEdit = null,
   // Leaves the Phases / Peaks / Structure tabs in view under the workspace plot on a 900 px screen.
   height = 'clamp(440px, 58vh, 1000px)', compact = false,
 }, ref) {
@@ -308,9 +311,34 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   }) : null),
   // eslint-disable-next-line react-hooks/exhaustive-deps
   [plot, labelKey, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title]);
-  const data = React.useMemo(() => (view && previewSticks?.length
-    ? [...view.data, previewTrace(previewSticks, observedPeak(plot) * 0.8, { floor: scale === 'log' ? 1 : 0 })]
-    : view?.data), [view, previewSticks, plot, scale]);
+  // The edited curve and its anchors are two extra traces; without editing the key is constant, so
+  // the plot is not redrawn. During a drag RefinementPlotly restyles them directly.
+  const editing = Boolean(anchorEdit);
+  const grid = React.useMemo(() => (editing && plot ? fitSeries(plot)?.x || null : null), [editing, plot]);
+  const anchorKey = editing ? JSON.stringify([anchorEdit.anchors, anchorEdit.selected]) : '';
+  const data = React.useMemo(() => {
+    let traces = view && previewSticks?.length
+      ? [...view.data, previewTrace(previewSticks, observedPeak(plot) * 0.8, { floor: scale === 'log' ? 1 : 0 })]
+      : view?.data;
+    if (traces && editing && grid) {
+      const { anchors, selected } = anchorEdit;
+      traces = [...traces,
+        { x: grid, y: pchip(anchors, grid), type: 'scatter', mode: 'lines', name: 'Edited background', meta: 'bg-curve',
+          // Not in plot.data, so the legend click handlers could not toggle it.
+          line: { color: '#1677ff', width: 2 }, hoverinfo: 'skip', showlegend: false },
+        { x: anchors.map(point => point[0]), y: anchors.map(point => point[1]), type: 'scatter', mode: 'markers', name: 'Anchors',
+          meta: 'bg-anchors', cliponaxis: false, showlegend: false,
+          marker: { size: 11, color: anchors.map((_, index) => (index === selected ? '#1677ff' : '#ffffff')), line: { color: '#1677ff', width: 2 } },
+          hovertemplate: '2θ %{x:.3f}°<br>%{y:.1f}<extra>Anchor</extra>' }];
+    }
+    return traces;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, previewSticks, plot, scale, grid, anchorKey]);
+  const anchorEditing = React.useMemo(() => (editing && grid ? {
+    ...anchorEdit, curveOf: (anchors, xs) => pchip(anchors, xs || grid),
+  } : null),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [editing, grid, anchorKey, anchorEdit?.onChange]);
   const excludedKey = JSON.stringify(excludedRanges);
   const peaksKey = JSON.stringify(peaks);
   const layout = React.useMemo(() => (view ? { ...view.layout, autosize: true,
@@ -409,7 +437,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       <span className="dara-readout-value"><span data-k="n">I</span> <b data-k="i">–</b></span>
     </div>
     <div ref={containerRef} style={{ width: '100%' }}>
-    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config}
+    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config} anchorEdit={anchorEditing}
       {...plotHandlers} useResizeHandler style={{ height, width: '100%' }} />
     </div>
   </>;
@@ -1045,6 +1073,58 @@ function TaskDetail({ data, task_id, onDelete }) {
   });
   const selectOptions = selectOptionGroups(data.all_results, store.versions);
   const [backgroundOpen, setBackgroundOpen] = React.useState(false);
+  // Background curve editor on the plot: {anchors, selected, series, lo, hi, excluded} or null.
+  const [curveEdit, setCurveEdit] = React.useState(null);
+  React.useEffect(() => setCurveEdit(null), [plot_id]);
+  const manualBackground = versionData?.background?.mode === 'manual' ? versionData.background : null;
+  const startCurveEdit = () => {
+    const params = (versionNumber ? versionData?.refinement_params : data.additional_search_options?.refinement_params) || {};
+    const excluded = [...excludedRanges, ...(versionData?.background?.excluded_ranges || [])];
+    loadPlot(task_id, plot_id).then(plot => {
+      const series = fitSeries(plot);
+      if (!series?.x.length) { message.error('This fit has no background curve to edit.'); return; }
+      const lo = Number.isFinite(params.wmin) ? params.wmin : series.x.reduce((a, b) => Math.min(a, b));
+      const hi = Number.isFinite(params.wmax) ? params.wmax : series.x.reduce((a, b) => Math.max(a, b));
+      // A manual fit is edited from its own anchors; otherwise the start follows the refined background.
+      const anchors = manualBackground?.anchors || seedAnchors({ ...series, lo, hi, excluded });
+      setCurveEdit({ anchors, selected: null, series, lo, hi, excluded });
+    }).catch(error => message.error(error.message));
+  };
+  const editAnchors = React.useMemo(() => (curveEdit ? {
+    anchors: curveEdit.anchors,
+    selected: curveEdit.selected,
+    onChange: anchors => setCurveEdit(previous => previous && { ...previous, anchors }),
+    onAdd: point => setCurveEdit(previous => {
+      if (!previous) return previous;
+      const anchors = addAnchor(previous.anchors, point);
+      return { ...previous, anchors, selected: anchors.findIndex(item => item[0] === point[0]) };
+    }),
+    onRemove: index => setCurveEdit(previous => previous && { ...previous, anchors: removeAnchor(previous.anchors, index), selected: null }),
+    onSelect: index => setCurveEdit(previous => previous && { ...previous, selected: index }),
+    blocked: x => x < curveEdit.lo || x > curveEdit.hi || curveEdit.excluded.some(([a, b]) => a < x && x < b),
+  } : null), [curveEdit]);
+  const curveError = curveEdit ? anchorError(curveEdit.anchors, curveEdit) : null;
+  const curveWarningList = React.useMemo(() => (curveEdit ? curveWarnings({ ...curveEdit.series, ...curveEdit }) : []), [curveEdit]);
+  const curveEditing = Boolean(curveEdit);
+  React.useEffect(() => {
+    if (!curveEditing) return undefined;
+    const onKey = event => {
+      if (event.key !== 'Delete' || event.target?.closest?.('input, textarea, [contenteditable="true"]')) return;
+      setCurveEdit(previous => (previous && previous.selected !== null
+        ? { ...previous, anchors: removeAnchor(previous.anchors, previous.selected), selected: null } : previous));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [curveEditing]);
+  const submitCurve = () => {
+    const { anchors } = curveEdit;
+    // The editor stays open until the new version is shown (plot_id effect), so a failed run keeps the edits.
+    runQuick({ phases: [], background: { anchors, interpolation: 'pchip' }, origin: 'background', label: anchorLabel(anchors) });
+  };
+  const resetCurve = () => {
+    setCurveEdit(null);
+    runQuick({ phases: [], background: { degree: null }, origin: 'background', label: 'Background: automatic' });
+  };
   // Nothing adopted yet and a full version fits better than v1: point at it (the choice stays the user's).
   const betterVersion = adoptedSel !== null ? null : store.versions.filter(item => item.version > 1 && item.refine_mode !== 'fast'
     && Number(item.rwp) < Number(store.versions[0]?.rwp)).sort((x, y) => x.rwp - y.rwp)[0] || null;
@@ -1323,6 +1403,7 @@ function TaskDetail({ data, task_id, onDelete }) {
               extraPhases={versionPhaseOptions(displayedPhases, store.versions)} symbolOf={symbolOf} hideButton openSignal={phaseSignal}
               onSubmit={request => runQuick(request)} />
             <BackgroundEditor open={backgroundOpen} onOpenChange={setBackgroundOpen} busy={quick.busy} disabled={quick.busy} baseDegree={baseDegree}
+              manual={Boolean(manualBackground)} onEditCurve={startCurveEdit}
               getView={() => plotRef.current?.getViewRange?.() || null}
               onSubmit={(background, label) => runQuick({ phases: [], background, origin: 'background', label })} />
           </> : null}
@@ -1359,10 +1440,15 @@ function TaskDetail({ data, task_id, onDelete }) {
             <Button size="small" onClick={clearPeaks}>Clear</Button>
           </> : <Text type="secondary">Click a peak to search references for it (Shift+click adds more) · press ? for shortcuts</Text>}
         </div> : null}
+        {curveEdit ? <BackgroundCurvePanel anchors={curveEdit.anchors} selected={curveEdit.selected}
+          onChange={editAnchors.onChange} onSelect={editAnchors.onSelect} onRemove={editAnchors.onRemove}
+          warnings={curveWarningList} error={curveError} busy={quick.busy}
+          canReset={Boolean(manualBackground) || baseDegree !== null} onSubmit={submitCurve} onReset={resetCurve}
+          onCancel={() => setCurveEdit(null)} /> : null}
         <RefinementPlot ref={plotRef} task_id={task_id} plot_id={versionPending ? undefined : plot_id} title={data.task_label}
           excludedRanges={[...excludedRanges, ...(versionData?.background?.excluded_ranges || [])]}
           peaks={peaks} previewSticks={preview?.sticks || null} onGroups={setPhaseGroups} phaseColor={phaseColor} phaseLegend={phaseLegend}
-          onPeakClick={peakClicksOn ? onPeakClick : undefined} />
+          onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} />
         {displayedResult ? <>
           <Tabs activeKey={fitTab === 'structure' && !structurePhases(displayedResult.phase_details).length ? 'phases' : fitTab} onChange={setFitTab} destroyInactiveTabPane
             items={[

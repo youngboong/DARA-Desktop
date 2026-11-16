@@ -10,6 +10,7 @@ from typing import Literal
 
 import numpy as np
 
+from dara import background_curve
 from dara.analysis_range import validate_analysis_range
 from dara.settings import DaraSettings
 from dara.utils import read_phase_name_from_str
@@ -94,6 +95,7 @@ def generate_control_file(
     eps2: float | str = "0_-0.05^0.05",
     wavelength: Literal["Cu", "Co", "Cr", "Fe", "Mo"] | float = "Cu",
     background_degree: int | None = None,
+    background_anchors: list[list[float]] | None = None,
     itmax: int | None = None,
 ) -> Path:
     """
@@ -115,6 +117,10 @@ def generate_control_file(
             the target material in X-ray tubes.
         background_degree: optional number of background polynomial parameters written as
             native BGMN ``RU=<n>`` (2..20). ``None`` keeps BGMN's automatic choice.
+        background_anchors: optional ``[[two_theta, y], ...]`` of a user-defined background.
+            The PCHIP curve through them is written on the data grid to ``user_bkg.xy`` and used
+            with ``UNT=user_bkg.xy`` and ``RU=2`` (BGMN refines a scale and a constant; see
+            ``dara.background_curve``). Cannot be combined with ``background_degree``.
         itmax: optional cap on the iteration steps of each BGMN refinement stage (``ITMAX``).
             ``None`` keeps BGMN's default of ten times the parameter count.
 
@@ -128,6 +134,8 @@ def generate_control_file(
             or not 2 <= background_degree <= 20
         ):
             raise ValueError("background_degree must be an integer between 2 and 20.")
+    if background_anchors is not None and background_degree is not None:
+        raise ValueError("Use either background_degree or background_anchors, not both.")
     if working_dir is None:
         control_file_path = pattern_path.parent / f"{pattern_path.stem}.sav"
     else:
@@ -148,6 +156,21 @@ def generate_control_file(
     xy_content = trim_pattern(xy_content)
     range_params = validate_analysis_range(xy_content[:, 0], wmin, wmax, excluded_ranges)
     np.savetxt(xy_pattern_path, xy_content, fmt="%.6f")
+    background_lines = f"RU={background_degree}" if background_degree is not None else ""
+    if background_anchors is not None:
+        angles = xy_content[:, 0]
+        anchors = background_curve.validate_anchors(
+            background_anchors,
+            lo=wmin if wmin is not None else float(angles.min()),
+            hi=wmax if wmax is not None else float(angles.max()),
+            excluded_ranges=range_params.get("excluded_ranges"),
+        )
+        background_curve.write_curve(
+            control_file_path.parent / background_curve.CURVE_FILENAME, angles, anchors
+        )
+        background_lines = (
+            f"UNT={background_curve.CURVE_FILENAME}\nRU={background_curve.BGMN_RU}"
+        )
 
     # BGMN manual, section 10 / p.72: CUT[1]=29:34 excludes that interval
     # from least squares without changing the measured intensities.
@@ -179,7 +202,7 @@ def generate_control_file(
     {f"WMIN={wmin}" if wmin is not None else ""}
     {f"WMAX={wmax}" if wmax is not None else ""}
     {cut_lines}
-    {f"RU={background_degree}" if background_degree is not None else ""}
+    {background_lines}
     % Phases
     {phases_str}
     % Measured data

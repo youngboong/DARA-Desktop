@@ -220,6 +220,12 @@ assert.deepEqual(backgroundRequest({ auto: true, degree: 8, ranges: [[20, 25], [
   { background: { degree: null, excluded_ranges: [[20, 25]] }, label: 'Excluded 20–25°' });
 assert.deepEqual(backgroundRequest({ auto: true, degree: 8, ranges: [[20, 25]], baseDegree: 9 }),
   { background: { degree: null, excluded_ranges: [[20, 25]] }, label: 'Background: automatic; Excluded 20–25°' });
+// A manual curve: excluding a range sends no `degree` (the server would drop the curve); a chosen degree replaces it.
+assert.deepEqual(backgroundRequest({ auto: true, degree: 8, ranges: [[20, 25]], manual: true }),
+  { background: { excluded_ranges: [[20, 25]] }, label: 'Excluded 20–25°' });
+assert.equal(backgroundRequest({ auto: true, degree: 8, ranges: [], manual: true }), null);
+assert.deepEqual(backgroundRequest({ auto: false, degree: 6, ranges: [], manual: true }),
+  { background: { degree: 6, excluded_ranges: [] }, label: 'Background: 6 terms' });
 
 // --- code drift: automatic baseline ---------------------------------------------------------
 assert.deepEqual(baselineRequest(), { base: 'best', controls: {}, origin: 'manual', label: 'Baseline (current code)' });

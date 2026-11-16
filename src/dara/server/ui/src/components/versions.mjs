@@ -520,9 +520,10 @@ export function deltaText(row) {
 /**
  * Quick-refine `background` object and label from the editor state; `null` when it would change
  * nothing. `baseDegree` is the explicit polynomial degree of the fit being edited (`null` when
- * BGMN chooses it): choosing Auto on such a fit sends `degree: null` to reset it.
+ * BGMN chooses it): choosing Auto on such a fit sends `degree: null` to reset it. `manual` is true
+ * when the fit uses a user-defined curve: Auto then sends no `degree` (it would drop the curve).
  */
-export function backgroundRequest({ auto, degree, ranges, baseDegree = null }) {
+export function backgroundRequest({ auto, degree, ranges, baseDegree = null, manual = false }) {
   const excluded = (ranges || []).filter(([lo, hi]) => Number.isFinite(lo) && Number.isFinite(hi) && lo < hi)
     .map(([lo, hi]) => [Number(lo), Number(hi)]);
   const hasBase = finite(baseDegree);
@@ -534,6 +535,8 @@ export function backgroundRequest({ auto, degree, ranges, baseDegree = null }) {
   if (terms !== null && !sameDegree) parts.push(`Background: ${terms} terms`);
   if (resetsToAuto) parts.push('Background: automatic');
   if (excluded.length) parts.push(`Excluded ${excluded.map(([lo, hi]) => `${lo}–${hi}`).join(', ')}°`);
+  // A manual curve stays unless a degree is chosen ("Reset to automatic" lives in the curve panel).
+  if (manual && terms === null) return { background: { excluded_ranges: excluded }, label: parts.join('; ') };
   // An unchanged explicit degree is re-sent as is; `null` (Auto) always resets to BGMN's choice.
   return { background: { degree: terms, excluded_ranges: excluded }, label: parts.join('; ') };
 }
