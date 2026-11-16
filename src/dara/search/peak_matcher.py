@@ -735,6 +735,9 @@ def find_residual_regions(
     centre = float(profile_x[0]) + half_w
     while centre <= float(profile_x[-1]) - half_w:
         mask = (profile_x >= centre - half_w) & (profile_x <= centre + half_w)
+        if not mask.any():  # window lies inside an excluded range: no profile points
+            centre += window_step
+            continue
         win_integral = float(np.sum(positive_residual[mask])) * dx
         calc_net_max = float(calc_net[mask].max())
         if win_integral >= detect_threshold and calc_net_max < calc_profile_threshold:
