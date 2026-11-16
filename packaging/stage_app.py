@@ -4,7 +4,8 @@ The bundled CPython already has every dependency installed. This script adds wha
 specific to DARA, keeping the repository layout so the existing scripts work unchanged:
 
     <app>/src/dara        the package (no BGMNwin, __pycache__, UI source, *.map, stale UI chunks)
-    <app>/scripts         launch_dara_web.py, ensure_bgmn.py, windows_ca_bundle.py, materials_project_key.ps1
+    <app>/scripts         launch_dara_web.py, ensure_bgmn.py, windows_ca_bundle.py, materials_project_key.ps1,
+                          library_download.py (the installer's structure-library download)
     <app>/python/Lib/site-packages/dara-src.pth   relative path to <app>/src
 
 Standard library only.
@@ -21,7 +22,8 @@ import sys
 import tomllib
 from pathlib import Path
 
-SCRIPTS = ("launch_dara_web.py", "ensure_bgmn.py", "windows_ca_bundle.py", "materials_project_key.ps1")
+SCRIPTS = ("launch_dara_web.py", "ensure_bgmn.py", "windows_ca_bundle.py", "materials_project_key.ps1",
+           "library_download.py")
 # Only ui/public is served; the rest of ui/ is the Gatsby source and its caches.
 UI_KEEP = {"public"}
 # Gatsby asset names: <name>-<20 hex>.js, styles.<20 hex>.css, plus their .LICENSE.txt files.

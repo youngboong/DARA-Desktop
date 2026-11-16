@@ -11,7 +11,8 @@
     forbids redistribution, so DARA.exe downloads it on first start (scripts\ensure_bgmn.py).
 #>
 param(
-    [switch]$SkipInstaller   # stop after dist\DARA (faster when only testing the app)
+    [switch]$SkipInstaller,  # stop after dist\DARA (faster when only testing the app)
+    [switch]$ReuseRuntime    # keep dist\DARA\python as it is (same dependencies): restage sources, DARA.exe, installer
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,6 +66,27 @@ function Get-FolderMB {
     return [math]::Round(((Get-ChildItem -LiteralPath $Path -Recurse -File -Force | Measure-Object -Sum Length).Sum / 1MB), 1)
 }
 
+function Get-InstallerDefines {
+    # The installer shows the structure library's size without network access, from the pack data the app ships.
+    $packs = Get-Content -LiteralPath (Join-Path $Root 'src\dara\data\structure_packs.json') -Raw | ConvertFrom-Json
+    $pack = @($packs.packs | Where-Object { $_.id -eq 'recommended' })[0]
+    if (-not $pack) { throw 'src\dara\data\structure_packs.json has no "recommended" pack.' }
+    $inv = [System.Globalization.CultureInfo]::InvariantCulture
+    $minutes = [math]::Round($pack.minutes.total)
+    # MAX_PATH (259 characters + NUL) minus "\" and the longest path inside the app folder.
+    $longest = (Get-ChildItem -LiteralPath $App -Recurse -File -Force | ForEach-Object { $_.FullName.Length - $App.Length - 1 } |
+        Measure-Object -Maximum).Maximum
+    return @(
+        "/DLibStructures=$([string]::Format($inv, '{0:N0}', $pack.counts.cod + $pack.counts.mp))",
+        "/DLibCodCount=$([string]::Format($inv, '{0:N0}', $pack.counts.cod))",
+        "/DLibDownloadMB=$([string]::Format($inv, '{0:N0}', $pack.download_mb.total))",
+        "/DLibDiskMB=$([string]::Format($inv, '{0:N0}', $pack.disk_mb.total))",
+        "/DLibDiskBytes=$([int64]($pack.disk_mb.total * 1MB))",
+        "/DLibTime=$(if ($minutes % 60) { "$([math]::Floor($minutes / 60)) h $($minutes % 60) min" } else { "$($minutes / 60) h" })",
+        "/DLibElements=$($pack.elements -join ' ')",
+        "/DMaxAppDirLength=$(259 - 1 - $longest)")
+}
+
 $version = ([regex]::Match((Get-Content -LiteralPath (Join-Path $Root 'pyproject.toml') -Raw), '(?m)^version\s*=\s*"([^"]+)"')).Groups[1].Value
 if (-not $version) { throw 'Could not read the version from pyproject.toml.' }
 Write-Phase "Building DARA Desktop $version"
@@ -72,34 +94,38 @@ $env:PYTHONIOENCODING = 'utf-8'
 Set-DaraEnvironment -RepoRoot $Root
 
 # ---- 1. Bundled CPython with every dependency --------------------------------------------------
-Write-Phase "Preparing uv $UvVersion and CPython $PythonVersion"
-if ([int](@(Install-Uv -RepoRoot $Root)[-1]) -ne 0) { throw 'uv could not be prepared.' }
-if ([int](@(Install-ManagedPython -RepoRoot $Root)[-1]) -ne 0) { throw "CPython $PythonVersion could not be prepared." }
-$basePython = [System.IO.Path]::GetFullPath($script:BasePython)
-$probe = Invoke-Native -FilePath $basePython -Arguments @('-I', '-c', 'import sys; print(sys.version.split()[0])') -Quiet
-if ($basePython -notlike (Join-Path $Root 'tools\python\*') -or ($probe.Lines -join '') -ne $PythonVersion) {
-    # A system Python (the launcher's fallback) is not relocatable; never bundle it.
-    throw "Expected the uv-managed CPython $PythonVersion under tools\python, got $basePython."
-}
-
-Write-Phase "Copying CPython to $App\python"
-if (Test-Path -LiteralPath $App) {
-    try { Remove-Item -LiteralPath $App -Recurse -Force }
-    catch { throw "Could not remove $App. Close DARA.exe if it runs from there. $($_.Exception.Message)" }
-}
-[void](New-Item -ItemType Directory -Force -Path $App)
-$baseDir = Split-Path -Parent $basePython
-& robocopy.exe $baseDir (Join-Path $App 'python') /E /XD include libs __pycache__ /NFL /NDL /NJH /NJS /NP | Out-Null
-if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE." }
-Remove-Item -LiteralPath (Join-Path $App 'python\Lib\EXTERNALLY-MANAGED') -Force -ErrorAction SilentlyContinue
 $appPython = Join-Path $App 'python\python.exe'
+if ($ReuseRuntime -and (Test-Path -LiteralPath $appPython)) {
+    Write-Phase "Reusing the bundled CPython in $App\python"
+} else {
+    Write-Phase "Preparing uv $UvVersion and CPython $PythonVersion"
+    if ([int](@(Install-Uv -RepoRoot $Root)[-1]) -ne 0) { throw 'uv could not be prepared.' }
+    if ([int](@(Install-ManagedPython -RepoRoot $Root)[-1]) -ne 0) { throw "CPython $PythonVersion could not be prepared." }
+    $basePython = [System.IO.Path]::GetFullPath($script:BasePython)
+    $probe = Invoke-Native -FilePath $basePython -Arguments @('-I', '-c', 'import sys; print(sys.version.split()[0])') -Quiet
+    if ($basePython -notlike (Join-Path $Root 'tools\python\*') -or ($probe.Lines -join '') -ne $PythonVersion) {
+        # A system Python (the launcher's fallback) is not relocatable; never bundle it.
+        throw "Expected the uv-managed CPython $PythonVersion under tools\python, got $basePython."
+    }
 
-Write-Phase 'Installing the DARA dependencies into the bundled CPython'
-$constraints = Join-Path $Root 'scripts\constraints-py312-win.txt'
-# -r pyproject.toml installs the dependencies only; dara itself is found through dara-src.pth.
-$install = Invoke-Native -FilePath $script:UvExe -Arguments @('--no-config', 'pip', 'install', '--python', $appPython,
-    '--link-mode', 'copy', '--compile-bytecode', '-c', $constraints, '-r', (Join-Path $Root 'pyproject.toml')) -Quiet
-if ($install.ExitCode -ne 0) { $install.Lines | Select-Object -Last 30 | Write-Host; throw 'Dependency installation failed.' }
+    Write-Phase "Copying CPython to $App\python"
+    if (Test-Path -LiteralPath $App) {
+        try { Remove-Item -LiteralPath $App -Recurse -Force }
+        catch { throw "Could not remove $App. Close DARA.exe if it runs from there. $($_.Exception.Message)" }
+    }
+    [void](New-Item -ItemType Directory -Force -Path $App)
+    $baseDir = Split-Path -Parent $basePython
+    & robocopy.exe $baseDir (Join-Path $App 'python') /E /XD include libs __pycache__ /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE." }
+    Remove-Item -LiteralPath (Join-Path $App 'python\Lib\EXTERNALLY-MANAGED') -Force -ErrorAction SilentlyContinue
+
+    Write-Phase 'Installing the DARA dependencies into the bundled CPython'
+    $constraints = Join-Path $Root 'scripts\constraints-py312-win.txt'
+    # -r pyproject.toml installs the dependencies only; dara itself is found through dara-src.pth.
+    $install = Invoke-Native -FilePath $script:UvExe -Arguments @('--no-config', 'pip', 'install', '--python', $appPython,
+        '--link-mode', 'copy', '--compile-bytecode', '-c', $constraints, '-r', (Join-Path $Root 'pyproject.toml')) -Quiet
+    if ($install.ExitCode -ne 0) { $install.Lines | Select-Object -Last 30 | Write-Host; throw 'Dependency installation failed.' }
+}
 
 Write-Phase 'Copying the DARA sources'
 $stage = Invoke-Native -FilePath $appPython -Arguments @('-I', '-X', 'utf8', (Join-Path $PSScriptRoot 'stage_app.py'), '--repo', $Root, '--app', $App)
@@ -164,7 +190,7 @@ if (-not (Test-Path -LiteralPath $iscc)) {
 }
 
 Write-Phase 'Building the installer'
-& $iscc /Q "/DAppVersion=$version" "/DSourceDir=$App" "/DOutputDir=$Dist" "/DRepoRoot=$Root" (Join-Path $PSScriptRoot 'DARA.iss')
+& $iscc /Q "/DAppVersion=$version" "/DSourceDir=$App" "/DOutputDir=$Dist" "/DRepoRoot=$Root" @(Get-InstallerDefines) (Join-Path $PSScriptRoot 'DARA.iss')
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed to build the installer.' }
 $setup = Join-Path $Dist "DARA-Setup-$version.exe"
 Write-Host ("{0}: {1:N1} MB" -f $setup, ((Get-Item -LiteralPath $setup).Length / 1MB))

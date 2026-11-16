@@ -92,6 +92,7 @@ namespace Dara.Desktop
         bool serverReady;
         bool shownOnce;
         bool attachToRunningServer;
+        bool libraryOffered;
         IntPtr job = IntPtr.Zero;
         Process server;           // python scripts\launch_dara_web.py (supervises the uvicorn server)
         int port;
@@ -247,6 +248,7 @@ namespace Dara.Desktop
                 splash.Visible = false;
                 Log(string.Format("Window ready {0:F1} s after DARA.exe started",
                     (DateTime.Now - Process.GetCurrentProcess().StartTime).TotalSeconds));
+                OfferLibraryResume();
             };
             core.DocumentTitleChanged += delegate
             {
@@ -310,6 +312,7 @@ namespace Dara.Desktop
                     ShowMessagePanel("DARA is open in your web browser",
                         "Address: " + appUrl + "\r\nKeep this window open while you use DARA. Closing it stops DARA.",
                         browserButton, closeButton);
+                    OfferLibraryResume();
                     return;
                 }
                 status.Text = "Opening DARA…";
@@ -371,6 +374,97 @@ namespace Dara.Desktop
             }
             // Explorer can hold an environment from before the key was saved: pass the saved one on.
             if (!string.IsNullOrWhiteSpace(key)) pythonEnvironment["MP_API_KEY"] = key.Trim();
+        }
+
+        // The installer leaves this file while the structure library it was asked to download is
+        // incomplete (Finish later, network error). Its text is the custom element list, if any.
+        // The download itself runs in the server (Advanced > Structure library shows and stops it).
+        // After a resumed download failed (offline, for example) it asks at most once a day.
+        async void OfferLibraryResume()
+        {
+            string marker = Path.Combine(dataDir, "structure-library-pending");
+            string failed = Path.Combine(dataDir, "structure-library-failed");   // holds the date of the last failure
+            string lastFailed = "";
+            try { lastFailed = File.ReadAllText(failed).Trim(); } catch (Exception) { }
+            // Attached: that server may keep its structures elsewhere (a source checkout). Setup running: it is still downloading.
+            if (libraryOffered || attachToRunningServer || !File.Exists(marker) || SetupIsRunning() ||
+                lastFailed == DateTime.Today.ToString("yyyy-MM-dd")) return;
+            libraryOffered = true;
+            Action markFailed = delegate
+            {
+                try { File.WriteAllText(failed, DateTime.Today.ToString("yyyy-MM-dd")); } catch (Exception) { }
+            };
+            var answer = MessageBox.Show(this,
+                "The structure library download chosen during setup is not finished.\n\n" +
+                "Continue it now? It runs in the background while you use DARA; follow or stop it under Advanced > Structure library. " +
+                "If DARA is closed before it ends, DARA asks again next time.\n\n" +
+                "No: do not ask again (you can still download it there).",
+                "DARA - Structure library", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            if (answer != DialogResult.Yes) { TryDelete(marker); return; }
+            string elements = "";
+            try { elements = File.ReadAllText(marker).Trim(); } catch (IOException) { }
+            string selection = elements.Length > 0
+                ? "\"elements\":[\"" + string.Join("\",\"", elements.Split(new[] { ',', ' ' }, StringSplitOptions.RemoveEmptyEntries)) + "\"]"
+                : "\"packs\":[\"recommended\"]";
+            bool mp = pythonEnvironment.ContainsKey("MP_API_KEY") || !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("MP_API_KEY"));
+            string sources = mp ? "\"cod\",\"mp\"" : "\"cod\"";
+            string url = appUrl;
+            int code = await Task.Run(() => HttpPost(url + "api/structure-library/download", "{" + selection + ",\"sources\":[" + sources + "]}"));
+            Log("Structure library download resumed (HTTP " + code + ").");
+            if (code != 200 && code != 409)   // 409: a download is already running
+            {
+                if (code == 400 || code == 422) TryDelete(marker);   // the server rejects this selection: asking again cannot help
+                else markFailed();
+                MessageBox.Show(this, "The structure library download could not be started (HTTP " + code + "). " +
+                    "Start it under Advanced > Structure library.", "DARA - Structure library");
+                return;
+            }
+            var timer = new System.Windows.Forms.Timer();
+            timer.Interval = 15000;
+            timer.Tick += async delegate
+            {
+                string json = await Task.Run(() => HttpGet(url + "api/structure-library/progress", 3000));
+                if (json == null || Regex.IsMatch(json, "\"running\"\\s*:\\s*true")) return;
+                timer.Stop();
+                // shortcut: any finished download clears the marker, even one started for other elements in the
+                // dialog meanwhile; compare the job's request with the marker if that ever matters.
+                if (Regex.IsMatch(json, "\"phase\"\\s*:\\s*\"done\"")) { TryDelete(marker); Log("Structure library download finished."); }
+                else markFailed();
+            };
+            timer.Start();
+        }
+
+        static void TryDelete(string path)
+        {
+            try { File.Delete(path); } catch (Exception) { }
+        }
+
+        // The installer holds this mutex (SetupMutex in DARA.iss) while it runs.
+        static bool SetupIsRunning()
+        {
+            try { using (Mutex.OpenExisting("DARA-Setup-Running")) return true; }
+            catch (WaitHandleCannotBeOpenedException) { return false; }
+            catch (UnauthorizedAccessException) { return true; }
+        }
+
+        static int HttpPost(string url, string json)
+        {
+            try
+            {
+                var request = (HttpWebRequest)WebRequest.Create(url);
+                request.Proxy = null;
+                request.Method = "POST";
+                request.ContentType = "application/json";
+                request.Timeout = 10000;
+                byte[] data = Encoding.UTF8.GetBytes(json);
+                using (var stream = request.GetRequestStream()) stream.Write(data, 0, data.Length);
+                using (var response = (HttpWebResponse)request.GetResponse()) return (int)response.StatusCode;
+            }
+            catch (WebException error)
+            {
+                var response = error.Response as HttpWebResponse;
+                return response != null ? (int)response.StatusCode : 0;
+            }
         }
 
         int ChoosePort()
@@ -524,7 +618,8 @@ namespace Dara.Desktop
         async Task<Tuple<int, string>> RunPython(string script, Action<string> onLine)
         {
             var output = new StringBuilder();
-            var process = StartPython("-I " + script, delegate(string line)
+            // -X utf8: -I ignores PYTHONIOENCODING, and the output is read as UTF-8.
+            var process = StartPython("-I -X utf8 " + script, delegate(string line)
             {
                 output.AppendLine(line);
                 if (onLine != null) onLine(line);
