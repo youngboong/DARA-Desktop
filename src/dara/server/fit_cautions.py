@@ -322,6 +322,17 @@ def search_cautions(candidate_summary: dict | None, search_summary: dict | None)
             )
         )
 
+    offline = candidate_summary.get("mp_offline_cache")
+    if isinstance(offline, int) and offline > 0:
+        cautions.append(
+            _caution(
+                "mp_offline_cache",
+                "warning",
+                f"Materials Project was unreachable; only the {offline} structure"
+                f"{'s' if offline != 1 else ''} cached earlier {'were' if offline != 1 else 'was'} considered.",
+            )
+        )
+
     screening = candidate_summary.get("screening")
     screening = screening if isinstance(screening, dict) else {}
     timed_out = [

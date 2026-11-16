@@ -684,6 +684,7 @@ class PhaseSearchMaker(Maker):
 
         report_progress("Loading reference structures / reaction prediction")
         cod_unavailable: list[str] = []
+        mp_offline_cache = 0
         fixed_stems: list[str] = []
         mp_fallback_formulas: list[str] = []
         fallback_dbs: list[StructureDatabase] = []
@@ -799,6 +800,7 @@ class PhaseSearchMaker(Maker):
                 cod_unavailable.extend(
                     str(i) for i in getattr(db, "last_unavailable", []) if str(i) not in cod_unavailable
                 )
+                mp_offline_cache += getattr(db, "offline_cache_used", 0)
 
         cif_paths = list(cifs_path.glob("*.cif"))
         # A reused structure set is never merged: each structure must stay one required phase.
@@ -828,6 +830,9 @@ class PhaseSearchMaker(Maker):
             repaired=repaired,
         )
         candidate_summary["cod_unavailable"] = cod_unavailable
+        if mp_offline_cache:
+            # Materials Project was unreachable: only structures cached earlier were candidates
+            candidate_summary["mp_offline_cache"] = mp_offline_cache
         if analysis_mode == "known_mixture":
             candidate_summary["mp_fallback_formulas"] = mp_fallback_formulas
         candidate_summary["rejected"] = rejected

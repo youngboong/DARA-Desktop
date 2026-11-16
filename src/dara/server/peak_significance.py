@@ -950,22 +950,10 @@ def hint_mode() -> str:
 
 
 def is_molecular_organic(formula: str) -> bool:
-    """Carbon compound without any metal or metalloid: a molecular organic crystal.
+    """Moved to :func:`dara.structure_db.is_molecular_organic` (kept importable here)."""
+    from dara.structure_db import is_molecular_organic as moved
 
-    The bundled COD list drops organics only when C and H are both present, so organic
-    structures whose CIF lists no hydrogen (formula like ``C11O3``) slip through. They are
-    not candidates for inorganic powder patterns. Elemental carbon is kept.
-    """
-    from pymatgen.core import Composition
-
-    try:
-        elements = Composition(str(formula)).elements
-    except Exception:
-        return False
-    symbols = {element.symbol for element in elements}
-    if "C" not in symbols or symbols == {"C"}:
-        return False
-    return not any(element.is_metal or element.is_metalloid for element in elements)
+    return moved(formula)
 
 
 def _simulate_cod_pool(elements, precursors, wavelength_a, two_theta_range) -> list[dict]:

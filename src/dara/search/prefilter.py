@@ -84,6 +84,7 @@ class ObservedProfile:
     excluded: list
     n_points: int
     config: PrefilterConfig = field(default_factory=PrefilterConfig)
+    net: np.ndarray | None = None  # background-subtracted (smoothed) pattern, not clipped
 
     @property
     def usable(self) -> bool:
@@ -206,7 +207,7 @@ def observed_profile(
     net_max = float(net[valid].max()) if valid.any() else 0.0
     return ObservedProfile(
         angles=x, window_max=window_max, lo=lo, hi=hi, step=step, sigma=float(sigma),
-        net_max=net_max, excluded=excluded, n_points=int(in_range.sum()), config=config,
+        net_max=net_max, excluded=excluded, n_points=int(in_range.sum()), config=config, net=net,
     )
 
 
@@ -275,8 +276,14 @@ def candidate_bound(
     wavelength_a: float,
     excluded_ranges=None,
     config: PrefilterConfig = PrefilterConfig(),
+    top_k: int = 1,
 ) -> dict:
-    """Amount upper bound ``K`` of one candidate (``None`` if it cannot be judged)."""
+    """Amount upper bound ``K`` of one candidate (``None`` if it cannot be judged).
+
+    With ``top_k > 1`` the result also holds ``grid_top``: the ``top_k`` best grid points
+    as ``(K, scale, shift)``, best finite first (infinite points, where too many strong peaks
+    are neutral, come last).
+    """
     result = {"K": None, "n_strong": 0, "best_scale": None, "best_shift": None, "strong_2theta": []}
     two_theta = np.asarray(two_theta, dtype=float)
     intensity = np.asarray(intensity, dtype=float)
@@ -325,6 +332,13 @@ def candidate_bound(
     result["K"] = float(grid[best])
     result["best_scale"] = round(float(scales[best[0]]), 4)
     result["best_shift"] = round(float(shifts[best[1]]), 4)
+    if top_k > 1:
+        # inf = too many strong peaks neutral (outside the range / excluded): not a real match
+        flat = np.argsort(-np.where(np.isfinite(grid), grid, -np.inf), axis=None, kind="stable")[:top_k]
+        rows, cols = np.unravel_index(flat, grid.shape)
+        result["grid_top"] = [
+            (float(grid[i, j]), float(scales[i]), float(shifts[j])) for i, j in zip(rows, cols)
+        ]
     return result
 
 

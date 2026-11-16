@@ -246,6 +246,13 @@ def test_references_unavailable_caution():
     assert search_cautions({"cod_unavailable": []}, {}) == []
 
 
+def test_mp_offline_cache_caution():
+    cautions = search_cautions({"mp_offline_cache": 4}, {})
+    assert [(c["code"], c["level"]) for c in cautions] == [("mp_offline_cache", "warning")]
+    assert "only the 4 structures cached earlier were considered" in cautions[0]["message"]
+    assert search_cautions({"mp_offline_cache": 0}, {}) == []
+
+
 def _load_seed_script():
     path = Path(__file__).parents[1] / "scripts" / "seed_cod_cache.py"
     spec = importlib.util.spec_from_file_location("seed_cod_cache", path)

@@ -1110,6 +1110,7 @@ def build_submission_job(
     use_rxn_predictor: bool | None = None,
     additional_cifs: list | None = None,       # list[dara.cif.Cif], already parsed
     library_cif_ids: list[str] | str = "[]",   # reference library ids
+    reference_ids: list[str] | str = "[]",     # cached database structures ("cod:1234", "mp:mp-5678")
     two_theta_min: float | None = None,
     two_theta_max: float | None = None,
     excluded_ranges: str | list = "[]",
@@ -1150,6 +1151,24 @@ def build_submission_job(
         )
 
         phase_set_cifs = list(phase_set_cifs or [])
+        reference_list = (
+            [str(item) for item in reference_ids]
+            if isinstance(reference_ids, (list, tuple))
+            else _parse_string_list(reference_ids)
+        )
+        if reference_list:
+            # Structures picked from the quick ranking: refine exactly these (Known-phase mode).
+            if phase_set_cifs:
+                raise HTTPException(status_code=400, detail="Choose either a phase set or ranked structures")
+            from dara.search.quick_rank import reference_cifs
+
+            try:
+                phase_set_cifs = reference_cifs(reference_list)
+            except KeyError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Structure {exc.args[0]} is not in the local cache; run the quick ranking again.",
+                )
         if phase_set_cifs:
             if analysis_mode not in ("", "known_mixture"):
                 raise HTTPException(status_code=400, detail="Reusing a phase set needs Known-phase refinement")
@@ -1355,6 +1374,7 @@ def build_submission_job(
         job.metadata["submission_settings"] = {
             "filename": name, "analysis_mode": analysis_mode, "atmosphere": atmosphere,
             "source_task_id": source_task_id, "library_cif_ids": library_ids,
+            "reference_ids": reference_list,
             "candidate_prefilter": candidate_prefilter,
             "screening_timeout_s": screening_timeout_s,
             "max_analysis_minutes": max_analysis_minutes,
@@ -1406,6 +1426,7 @@ async def submit(
     refinement_controls: Annotated[str, Form()] = "{}",
     confirm_wavelength: Annotated[bool, Form()] = False,
     library_cif_ids: Annotated[str, Form()] = "[]",
+    reference_ids: Annotated[str, Form()] = "[]",
     candidate_prefilter: Annotated[Optional[bool], Form()] = None,
     screening_timeout_s: Annotated[Optional[float], Form()] = None,
     max_analysis_minutes: Annotated[Optional[float], Form()] = None,
@@ -1490,6 +1511,7 @@ async def submit(
             use_rxn_predictor=use_rxn_predictor,
             additional_cifs=additional_cifs,
             library_cif_ids=library_cif_ids,
+            reference_ids=reference_ids,
             two_theta_min=two_theta_min,
             two_theta_max=two_theta_max,
             excluded_ranges=excluded_ranges,

@@ -62,4 +62,6 @@ def test_optional_router_list_names_all_modules():
         "dara.server.series_router",
         "dara.server.peak_candidates_router",
         "dara.server.retry_router",
+        "dara.server.quick_rank_router",
+        "dara.server.structure_library_router",
     }

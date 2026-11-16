@@ -142,6 +142,8 @@ _OPTIONAL_ROUTERS = (
     "dara.server.series_router",             # W3
     "dara.server.peak_candidates_router",    # PP WS-B
     "dara.server.retry_router",              # PP WS-B
+    "dara.server.quick_rank_router",         # quick ranking (search-match)
+    "dara.server.structure_library_router",  # structure library packs
 )
 for _module_name in _OPTIONAL_ROUTERS:
     try:

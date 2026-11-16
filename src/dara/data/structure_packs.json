@@ -1,0 +1,91 @@
+{
+ "format_version": 1,
+ "e_hull_cutoff": 0.05,
+ "measured": {
+  "on": "2026-11-13, i5-1335U, Windows 11, home network",
+  "method": "COD: 120 pack CIFs with the search's downloader (4 workers, 0.2 s delay, retries); sizes from 1291 cached pack CIFs. MP: 600 structures in batches of 200; index = one metadata query. Sticks (2026-11-16): 800 pack structures (400 COD, 400 MP), Cu K-alpha1, 2theta 1-130 deg, 3 worker processes, mean of 2 runs; disk size in 4 KiB clusters.",
+  "cod_mean_cif_kb": 15.47,
+  "cod_disk_kb": 17.69,
+  "cod_per_s": 2.45,
+  "cod_theoretical_fraction": 0.0302,
+  "mp_mean_cif_kb": 2.58,
+  "mp_disk_kb": 5.06,
+  "mp_per_s": 59.78,
+  "mp_index_s": 85.0,
+  "stick_s_per_cif": 0.8717,
+  "stick_workers": 3,
+  "stick_disk_kb": 19.73
+ },
+ "packs": [
+  {
+   "id": "recommended",
+   "name": "Recommended: battery and semiconductor elements",
+   "description": "Every COD and Materials Project structure made only of these elements (any combination).",
+   "elements": [
+    "Al",
+    "As",
+    "B",
+    "C",
+    "Cd",
+    "Cl",
+    "Co",
+    "Cu",
+    "F",
+    "Fe",
+    "Ga",
+    "Ge",
+    "H",
+    "Hf",
+    "In",
+    "K",
+    "La",
+    "Li",
+    "Mg",
+    "Mn",
+    "Mo",
+    "N",
+    "Na",
+    "Nb",
+    "Ni",
+    "O",
+    "P",
+    "S",
+    "Sb",
+    "Se",
+    "Si",
+    "Sn",
+    "Ta",
+    "Te",
+    "Ti",
+    "V",
+    "W",
+    "Zn",
+    "Zr"
+   ],
+   "element_notes": "Union of the battery list (Li Na K Mg Al Si P S Ti V Mn Fe Co Ni Cu Zn Zr Nb La C O H F) and the semiconductor list (Si Ge Ga As In P N Al Sb Zn Cd S Se Te Sn Cu O Hf Ti Ta W), plus B (borate coatings, B-doped Si, BN), Cl (chloride solid electrolytes, LiCl/NaCl synthesis residues) and Mo (MoS2/MoO3 electrodes, Mo back contacts).",
+   "counts": {
+    "cod": 20167,
+    "mp": 24656,
+    "sticks": 44214,
+    "mp_theoretical": 14814
+   },
+   "download_mb": {
+    "cod": 304.7,
+    "mp": 62.1,
+    "total": 366.8
+   },
+   "disk_mb": {
+    "cod": 348.4,
+    "mp": 121.8,
+    "sticks": 851.9,
+    "total": 1322.1
+   },
+   "minutes": {
+    "cod": 137.2,
+    "mp": 8.3,
+    "sticks": 214.1,
+    "total": 359.6
+   }
+  }
+ ]
+}

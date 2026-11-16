@@ -10,6 +10,9 @@ import { MAX_SERIES_FILES, seriesPreviewRows } from '../components/seriesTrends.
 import { COMMON_STANDARDS } from '../components/InternalStandardCard';
 import { advancedChanges, forgetRemembered, readRemembered, runAfterSuccess, writeRemembered } from '../components/submitHelpers.mjs';
 import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../components/knownPhases.mjs';
+// explicit .js: on case-insensitive disks webpack would resolve quickRanking.mjs / structureLibrary.mjs first
+import QuickRanking from '../components/QuickRanking.js';
+import StructureLibrary from '../components/StructureLibrary.js';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const { confirm } = Modal;
@@ -221,6 +224,7 @@ function Submission() {
   const library = useReferenceLibrary();
   const [estimate, setEstimate] = useState(null);
   const [estimating, setEstimating] = useState(false);
+  const referenceIds = useRef([]); // structures picked in the quick ranking, sent once by onSubmit
   const watchedMode = Form.useWatch('analysis_mode', form);
   const watchedElements = Form.useWatch('elements', form);
   const watchedPrecursors = Form.useWatch('precursor_formulas', form);
@@ -483,6 +487,55 @@ function Submission() {
     }
   };
 
+  // Quick ranking: the current pattern and chemistry, without validating the whole form.
+  const quickRankingRequest = () => {
+    const values = form.getFieldsValue(true);
+    if (!values.pattern_file) throw new Error('Upload a pattern first.');
+    const body = new FormData();
+    body.append('pattern_file', uploadFile(values.pattern_file));
+    body.append('elements', commaList(values.elements));
+    body.append('precursor_formulas', commaList(values.precursor_formulas));
+    body.append('wavelength', synchrotron ? Number((Number(values.wavelength_sync_a) / 10).toPrecision(10)) : (values.wavelength_lab || 'Cu'));
+    if (values.two_theta_min != null) body.append('two_theta_min', values.two_theta_min);
+    if (values.two_theta_max != null) body.append('two_theta_max', values.two_theta_max);
+    body.append('excluded_ranges', JSON.stringify((values.excluded_ranges || []).filter(item => item?.[0] != null && item?.[1] != null)));
+    body.append('use_cod', values.use_cod !== false);
+    body.append('use_mp', values.use_mp !== false);
+    body.append('mp_e_hull_cutoff', values.mp_e_hull_cutoff ?? 0.05);
+    body.append('max_mp_structures', values.max_mp_structures ?? 100);
+    return body;
+  };
+  // "Refine selected": a Known-phase refinement of exactly the ranked structures. Resolves to
+  // whether it was submitted; otherwise (invalid form, cancelled, server error) the form is restored
+  // so a later Submit never runs a formula search without the chosen structures.
+  const refineRanked = async ({ referenceIds: ids, formulas }) => {
+    const previous = form.getFieldsValue(['analysis_mode', 'precursor_formulas']);
+    const previousMode = analysisMode;
+    form.setFieldsValue({ analysis_mode: 'known_mixture', precursor_formulas: formulas.join(', ') });
+    setAnalysisMode('known_mixture');
+    referenceIds.current = ids;
+    let submitted = false;
+    try {
+      submitted = await onSubmit();
+      // The drawer covers the form, so its inline errors are not visible: name the first one.
+      const invalid = submitted ? [] : form.getFieldsError().flatMap(item => item.errors);
+      if (invalid.length) message.error(`Not submitted: ${invalid[0]}`);
+    } finally {
+      referenceIds.current = [];
+      if (!submitted) {
+        form.setFieldsValue(previous);
+        setAnalysisMode(previousMode);
+      } else {
+        // Known-phase mode was for the ranked structures only: the next analysis keeps the user's mode.
+        const saved = readRemembered(browserStorage());
+        if (saved) writeRemembered(browserStorage(), { ...saved.fields, analysis_mode: previous.analysis_mode }, saved.controls);
+        form.setFieldsValue({ analysis_mode: previous.analysis_mode });
+        setAnalysisMode(previousMode);
+      }
+    }
+    return submitted;
+  };
+
   const onSubmit = async () => {
     let values;
     try {
@@ -492,7 +545,7 @@ function Submission() {
         'screening_timeout_s', 'max_analysis_minutes', 'library_cif_ids', 'additional_phases', 'reuse_additional_cifs'];
       if ((error?.errorFields || []).some(item => advancedNames.includes(item.name?.[0]))) setAdvancedOpen(true);
       if ((error?.errorFields || []).some(item => String(item.name?.[0]).startsWith('standard_'))) setStandardOpen(true);
-      return;
+      return false;
     }
 
     const formData = new FormData();
@@ -516,6 +569,7 @@ function Submission() {
       formData.append('internal_standard', JSON.stringify({ formula: values.standard_formula.trim(), wt_percent: values.standard_wt }));
     }
     formData.append('library_cif_ids', JSON.stringify(values.library_cif_ids || []));
+    if (referenceIds.current.length) formData.append('reference_ids', JSON.stringify(referenceIds.current));
     formData.append('candidate_prefilter', String(values.candidate_prefilter !== false));
     if (values.screening_timeout_s != null) formData.append('screening_timeout_s', values.screening_timeout_s);
     if (values.max_analysis_minutes != null) formData.append('max_analysis_minutes', values.max_analysis_minutes);
@@ -535,6 +589,10 @@ function Submission() {
     const abortControl = new AbortController();
     setMsg(null);
     setSpinning(true);
+    // The returned promise resolves to whether the server accepted the task, once every dialog is closed.
+    let submitted = false;
+    let finish;
+    const done = new Promise(resolve => { finish = () => resolve(submitted); });
     const send = confirmedWavelength => {
       if (confirmedWavelength) formData.set('confirm_wavelength', 'true');
       return fetch(`${URL}${seriesMode ? '/submit-series' : '/submit'}`, { method: 'POST', body: formData, signal: abortControl.signal })
@@ -542,6 +600,7 @@ function Submission() {
         .then(data => {
           // Once the server confirms the submission, UI follow-up failures must never be reported as a failed submission.
           if (data.message === 'submitted' && data.series_id) {
+            submitted = true;
             const seriesUrl = `/series/?id=${encodeURIComponent(data.series_id)}`;
             runAfterSuccess([
               () => writeRemembered(browserStorage(), form.getFieldsValue(true), refinementControls),
@@ -551,6 +610,7 @@ function Submission() {
             return false;
           }
           if (data.message === 'submitted') {
+            submitted = true;
             const remembered = { fields: form.getFieldsValue(true), controls: refinementControls };
             runAfterSuccess([
               () => writeRemembered(browserStorage(), remembered.fields, remembered.controls),
@@ -582,8 +642,9 @@ function Submission() {
                 setSpinning(true);
                 return send(true)
                   .catch(error => { if (error.name !== 'AbortError') setMsg(String(error)); })
-                  .finally(() => setSpinning(false));
+                  .finally(() => { setSpinning(false); finish(); });
               },
+              onCancel: () => finish(),
             });
             return true;
           }
@@ -595,11 +656,13 @@ function Submission() {
       title: seriesMode ? `Submit ${(values.series_files || []).length} patterns as one series?` : 'Do you want to submit the task?',
       onOk() {
         return send(false)
-          .catch(error => { if (error.name !== 'AbortError') setMsg(String(error)); })
+          .then(waiting => { if (!waiting) finish(); }) // true: the wavelength dialog finishes it
+          .catch(error => { if (error.name !== 'AbortError') setMsg(String(error)); finish(); })
           .finally(() => setSpinning(false));
       },
-      onCancel() { abortControl.abort(); setSpinning(false); },
+      onCancel() { abortControl.abort(); setSpinning(false); finish(); },
     });
+    return done;
   };
 
   const modeMessage = analysisMode === 'reaction'
@@ -927,6 +990,11 @@ function Submission() {
               {estimate || estimating
                 ? <EstimateAlert estimate={estimate} loading={estimating} prefilter={watchedPrefilter !== false} />
                 : <p className="dara-run-hint">{analysisMode === 'elemental' ? 'Enter elements or formulas' : 'Enter formulas'} to see the candidate and run-time estimate.</p>}
+              {seriesMode ? null : (
+                <QuickRanking buildRequest={quickRankingRequest} onRefine={refineRanked}
+                  disabled={!watchedPattern || (!splitList(watchedElements).length && !splitList(watchedPrecursors).length)}
+                  disabledReason="Upload a pattern and enter its elements or formulas first" />
+              )}
               {msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null}
               <Form.Item>
                 <Button type="primary" size="large" block onClick={onSubmit} loading={spinning}
@@ -956,6 +1024,7 @@ function Submission() {
                       <Switch checkedChildren="MP" unCheckedChildren="MP" />
                     </Form.Item><span style={{ marginLeft: 8 }}>computed supplement</span></span>
                     <MpKeyStatus />
+                    <StructureLibrary />
                   </Space>
                 </Form.Item>
                 <div className="dara-field-row">

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import itertools
 import os
 import re
@@ -72,6 +73,75 @@ def is_valid_cif_file(path: Path | str) -> bool:
     return bool(re.search(r"^data_\S*", text, re.M)) and "_cell_length_a" in text
 
 
+MP_CACHE_ENV_VAR = "DARA_MP_CACHE_DIR"
+_MP_INDEX_VERSION = 1
+
+
+def mp_cache_dir() -> Path:
+    """Folder of cached Materials Project structures, next to the COD cache.
+
+    ``<id>.cif`` files plus ``index-*.json`` metadata (one file per writer, so the
+    server and the structure-library download never write the same file).
+    ``$DARA_MP_CACHE_DIR`` overrides it.
+    """
+    configured = os.environ.get(MP_CACHE_ENV_VAR, "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return cod_cache_dir().parent / "dara_mp_structures"
+
+
+_MP_ROWS_MEMO: dict = {}
+
+
+def mp_cache_rows() -> dict[str, dict]:
+    """``{material_id: row}`` merged from every index file of the MP cache.
+
+    A row is ``{material_id, formula, spacegroup, e_above_hull, theoretical, chemsys}``;
+    the CIF may still be missing (``mp_cache_dir() / f"{material_id}.cif"``).
+    """
+    import json
+
+    folder = mp_cache_dir()
+    try:
+        files = sorted(folder.glob("index-*.json"))
+        stamp = tuple((p.name, p.stat().st_mtime_ns) for p in files)
+    except OSError:
+        return {}
+    memo = _MP_ROWS_MEMO.get(str(folder))
+    if memo is not None and memo[0] == stamp:
+        return memo[1]
+    rows: dict[str, dict] = {}
+    for path in files:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("version") != _MP_INDEX_VERSION:
+            continue
+        for row in data.get("rows") or []:
+            if isinstance(row, dict) and row.get("material_id"):
+                rows.setdefault(str(row["material_id"]), row)
+    _MP_ROWS_MEMO[str(folder)] = (stamp, rows)
+    return rows
+
+
+def write_mp_index(name: str, rows: list[dict]) -> None:
+    """Merge ``rows`` into ``index-<name>.json`` of the MP cache (atomic write)."""
+    import json
+
+    path = mp_cache_dir() / f"index-{name}.json"
+    merged: dict[str, dict] = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") == _MP_INDEX_VERSION:
+            merged = {str(r["material_id"]): r for r in data.get("rows") or [] if r.get("material_id")}
+    except (OSError, ValueError):
+        pass
+    for row in rows:
+        merged[str(row["material_id"])] = row
+    atomic_write_text(path, json.dumps({"version": _MP_INDEX_VERSION, "rows": list(merged.values())}))
+
+
 def is_theoretical_cif(path: Path | str) -> bool:
     """True if a COD file says its structure was predicted, not measured."""
     try:
@@ -81,6 +151,26 @@ def is_theoretical_cif(path: Path | str) -> bool:
         return False
     return bool(re.search(
         r"^_cod_struct(?:ure)?_determination_method\s+'?theoretical", text, re.M | re.I))
+
+
+@functools.lru_cache(maxsize=65536)
+def is_molecular_organic(formula: str) -> bool:
+    """Carbon compound without any metal or metalloid: a molecular organic crystal.
+
+    The bundled COD list drops organics only when C and H are both present, so organic
+    structures whose CIF lists no hydrogen (formula like ``C11O3``) slip through. They are
+    not candidates for inorganic powder patterns. Elemental carbon is kept, and so is
+    carbon nitride (C3N4), a metal-free phase that is an inorganic material.
+    """
+    try:
+        composition = Composition(str(formula))
+    except Exception:
+        return False
+    elements = composition.elements
+    symbols = {element.symbol for element in elements}
+    if "C" not in symbols or symbols == {"C"} or composition.reduced_formula == "C3N4":
+        return False
+    return not any(element.is_metal or element.is_metalloid for element in elements)
 
 
 def atomic_write_text(path: Path | str, text: str) -> None:
@@ -105,6 +195,21 @@ def atomic_write_text(path: Path | str, text: str) -> None:
 def _is_not_found_error(exc: BaseException) -> bool:
     response = getattr(exc, "response", None)
     return getattr(response, "status_code", None) in (404, 410)
+
+
+def _is_connection_error(exc: BaseException | None) -> bool:
+    """True if ``exc`` (or what it wraps) is a network failure, not an API answer.
+
+    mp_api raises ``requests`` errors from its heartbeat and wraps them in ``MPRestError``
+    during a search (``raise MPRestError(str(ex))`` inside ``except RequestException``).
+    """
+    seen = set()
+    while exc is not None and id(exc) not in seen:
+        if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+            return True
+        seen.add(id(exc))
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 
@@ -150,7 +255,10 @@ class StructureDatabase(MSONable, metaclass=ABCMeta):
             all_data.extend(self.get_formula_data(formula))
 
         if copy_files:
-            file_map = self._generate_file_map(all_data, e_hull_filter, exclude_gases)
+            # Formulas the user named are kept even when they are molecular organics.
+            file_map = self._generate_file_map(
+                all_data, e_hull_filter, exclude_gases, exclude_organics=False
+            )
             copy_and_rename_files(file_map, dest_dir)
         elif not self.local_copy_found:
             # Nothing to copy, so nothing is downloaded; still fail early for databases
@@ -228,16 +336,21 @@ class StructureDatabase(MSONable, metaclass=ABCMeta):
         e_hull_filter,
         exclude_gases,
         download_folder=None,
+        exclude_organics=True,
     ):
         """A mapping of database file paths to new file names with structure metadata included.
 
-        Only structures that pass the gas and energy-above-hull filters are fetched, and
-        downloaded files that do not exist (failed downloads) are left out of the mapping.
+        Only structures that pass the gas, molecular-organic and energy-above-hull filters
+        are fetched, and downloaded files that do not exist (failed downloads) are left out
+        of the mapping.
         """
         selected = []
         for formula, code, sg, e_hull in all_data:
             if exclude_gases and formula in COMMON_GASES:
                 logger.info("Skipping common gas: %s", formula)
+                continue
+            if exclude_organics and is_molecular_organic(formula):
+                logger.info("Skipping molecular organic: %s (%s)", code, formula)
                 continue
 
             if e_hull is not None and e_hull > e_hull_filter:
@@ -571,6 +684,7 @@ class MaterialsProjectDatabase(StructureDatabase):
         self.max_structures = max_structures
         self.e_hull_filter = e_hull_filter
         self._query_cache: dict[tuple, list] = {}
+        self.offline_cache_used = 0  # structures taken from the disk cache while MP was unreachable
 
     @property
     def name(self) -> str:
@@ -621,7 +735,8 @@ class MaterialsProjectDatabase(StructureDatabase):
             e_hull_filter=e_hull_filter,
             max_structures=max(self.max_structures, 20 * len(canonical)),
         )
-        return self._write_documents(docs, copy_files, dest_dir, exclude_gases)
+        # Formulas the user named are kept even when they are molecular organics.
+        return self._write_documents(docs, copy_files, dest_dir, exclude_gases, exclude_organics=False)
 
     def get_cifs_by_chemsys(
         self,
@@ -708,8 +823,24 @@ class MaterialsProjectDatabase(StructureDatabase):
             len(chemsys or formulas or material_ids or []),
             limit,
         )
-        with MPRester(api_key=api_key, mute_progress_bars=True, timeout=60) as mpr:
-            docs = mpr.materials.summary.search(**query)
+        try:
+            with MPRester(api_key=api_key, mute_progress_bars=True, timeout=60) as mpr:
+                docs = mpr.materials.summary.search(**query)
+        except Exception as exc:
+            # Offline only: structures cached by earlier queries or the structure library stand
+            # in. Any other failure (expired key, HTTP error, bad query) fails the job as before.
+            if not _is_connection_error(exc):
+                raise
+            docs = self._cached_documents(formulas, chemsys, material_ids, cutoff, limit)
+            if not docs:
+                raise
+            self.offline_cache_used += len(docs)
+            logger.warning(
+                "Materials Project is unreachable; using %d cached structures from %s.",
+                len(docs), mp_cache_dir(),
+            )
+        else:
+            self.save_documents(docs, "queries")
 
         logger.info(
             "Materials Project returned %d structures. Deduplicating...", len(docs)
@@ -784,7 +915,7 @@ class MaterialsProjectDatabase(StructureDatabase):
                 reduced = Composition(formula).reduced_formula
             except Exception:
                 reduced = str(formula)
-            if reduced in COMMON_GASES:
+            if reduced in COMMON_GASES or is_molecular_organic(reduced):
                 continue
             symmetry = self._doc_value(doc, "symmetry")
             spacegroup = (
@@ -804,6 +935,145 @@ class MaterialsProjectDatabase(StructureDatabase):
                 }
             )
         return rows
+
+    # ----------------------------------------------------------------- disk cache
+    def _index_row(self, doc, composition=None) -> dict:
+        formula = self._doc_value(doc, "formula_pretty")
+        if composition is None:
+            try:
+                composition = Composition(str(formula))
+            except Exception:
+                composition = None
+        symmetry = self._doc_value(doc, "symmetry")
+        spacegroup = symmetry.get("number") if isinstance(symmetry, dict) else getattr(symmetry, "number", None)
+        e_hull = self._doc_value(doc, "energy_above_hull")
+        return {
+            "material_id": str(self._doc_value(doc, "material_id")),
+            "formula": composition.reduced_formula if composition is not None else str(formula),
+            "spacegroup": int(spacegroup) if spacegroup is not None else None,
+            "e_above_hull": float(e_hull) if e_hull is not None else None,
+            "theoretical": bool(self._doc_value(doc, "theoretical", True)),
+            "chemsys": composition.chemical_system if composition is not None else self._doc_value(doc, "chemsys"),
+        }
+
+    def save_documents(self, docs, index_name: str) -> int:
+        """Cache each document's structure as ``<material_id>.cif`` and index it.
+
+        Returns the number of CIF files written. Never raises: the cache is a convenience.
+        """
+        folder = mp_cache_dir()
+        rows, written, failed = [], 0, 0
+        for doc in docs:
+            try:  # one locked or bad file must not skip the remaining documents
+                structure = self._doc_value(doc, "structure")
+                material_id = str(self._doc_value(doc, "material_id") or "")
+                if structure is None or not material_id:
+                    continue
+                path = folder / f"{material_id}.cif"
+                if not is_valid_cif_file(path):
+                    atomic_write_text(path, str(Cif.from_structure(structure, filename=material_id)))
+                    written += 1
+                rows.append(self._index_row(doc, structure.composition))
+            except Exception:  # noqa: BLE001
+                failed += 1
+                logger.debug("Could not cache a Materials Project structure", exc_info=True)
+        if failed:
+            logger.warning("Could not cache %d Materials Project structures in %s", failed, folder)
+        try:
+            if rows:
+                write_mp_index(index_name, rows)
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not index Materials Project structures in %s", folder, exc_info=True)
+        return written
+
+    def _cached_documents(self, formulas, chemsys, material_ids, cutoff, limit) -> list[dict]:
+        """Documents rebuilt from the disk cache for a query (offline fallback)."""
+        rows = mp_cache_rows()
+        wanted_ids = {str(i) for i in material_ids or []}
+        wanted_systems = set(chemsys or [])
+        wanted_formulas = set(formulas or [])
+        picked = []
+        for row in rows.values():
+            if wanted_ids:
+                if row["material_id"] not in wanted_ids:
+                    continue
+            else:
+                if row.get("e_above_hull") is None or row["e_above_hull"] > cutoff:
+                    continue
+                if not (row.get("chemsys") in wanted_systems or row.get("formula") in wanted_formulas):
+                    continue
+            picked.append(row)
+        picked.sort(key=lambda r: (r.get("e_above_hull") or 0.0, r["material_id"]))
+        if limit is not None and not wanted_ids:
+            picked = picked[: 3 * limit]  # dedup follows; the caller caps at ``limit``
+        docs = []
+        for row in picked:
+            path = mp_cache_dir() / f"{row['material_id']}.cif"
+            try:
+                structure = Cif.from_file(path).to_structure()
+            except Exception:  # noqa: BLE001
+                continue
+            docs.append({
+                "material_id": row["material_id"],
+                "formula_pretty": row.get("formula"),
+                "symmetry": {"number": row.get("spacegroup")},
+                "energy_above_hull": row.get("e_above_hull"),
+                "structure": structure,
+                "theoretical": row.get("theoretical", True),
+            })
+        return docs
+
+    def rows_within(self, elements, e_hull_filter: float | None = None, timeout_s: float = 120) -> list[dict]:
+        """Index rows of every MP entry whose elements all lie in ``elements``.
+
+        Same filters as a chemical-system search (not deprecated, e-hull cutoff, no common
+        gases, no molecular organics) but without a structure limit or deduplication.
+        Raises without a key.
+        """
+        api_key = os.environ.get("MP_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "MP_API_KEY is not set; Materials Project structures cannot be queried."
+            )
+        from mp_api.client import MPRester
+
+        allowed = {str(e) for e in elements}
+        cutoff = self.e_hull_filter if e_hull_filter is None else e_hull_filter
+        # The API caps exclude_elements at 60 characters, so the (metadata only) list of every
+        # entry below the cutoff is fetched and the element subset is selected here; nothing
+        # about the user's elements is sent.
+        with MPRester(api_key=api_key, mute_progress_bars=True, timeout=timeout_s) as mpr:
+            docs = mpr.materials.summary.search(
+                deprecated=False,
+                energy_above_hull=(0, cutoff),
+                fields=["material_id", "formula_pretty", "symmetry", "energy_above_hull", "theoretical"],
+            )
+        rows = []
+        for doc in docs:
+            row = self._index_row(doc)
+            if row["formula"] in COMMON_GASES or is_molecular_organic(row["formula"]):
+                continue
+            if row["chemsys"] and not set(row["chemsys"].split("-")) <= allowed:
+                continue
+            rows.append(row)
+        return rows
+
+    def download_to_cache(self, material_ids: list[str], index_name: str, timeout_s: float = 120) -> int:
+        """Fetch the structures of ``material_ids`` into the disk cache (no deduplication)."""
+        api_key = os.environ.get("MP_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "MP_API_KEY is not set; Materials Project structures cannot be queried."
+            )
+        from mp_api.client import MPRester
+
+        with MPRester(api_key=api_key, mute_progress_bars=True, timeout=timeout_s) as mpr:
+            docs = mpr.materials.summary.search(
+                material_ids=[str(i) for i in material_ids],
+                fields=["material_id", "formula_pretty", "symmetry", "energy_above_hull",
+                        "structure", "theoretical"],
+            )
+        return self.save_documents(docs, index_name)
 
     @staticmethod
     def _doc_value(doc, name, default=None):
@@ -864,7 +1134,8 @@ class MaterialsProjectDatabase(StructureDatabase):
         return Cif.from_structure(structure, filename=filename)
 
     def _write_documents(
-        self, docs, copy_files: bool, dest_dir: str, exclude_gases: bool = True
+        self, docs, copy_files: bool, dest_dir: str, exclude_gases: bool = True,
+        exclude_organics: bool = True,
     ):
         if exclude_gases:
             docs = [
@@ -872,6 +1143,14 @@ class MaterialsProjectDatabase(StructureDatabase):
                 for doc in docs
                 if self._doc_value(doc, "structure").composition.reduced_formula
                 not in COMMON_GASES
+            ]
+        if exclude_organics:
+            docs = [
+                doc
+                for doc in docs
+                if not is_molecular_organic(
+                    self._doc_value(doc, "structure").composition.reduced_formula
+                )
             ]
         cifs = [self._document_to_cif(doc) for doc in docs]
         if copy_files:
@@ -907,7 +1186,8 @@ def cod_candidate_rows(
 
     Mirrors ``get_cifs_by_chemsys`` (every sub-system of ``elements``) plus
     ``get_cifs_by_formulas`` (reduced-formula match of ``precursors``) followed by the
-    gas and energy-above-hull filters of ``_generate_file_map``. Rows are unique by
+    gas, molecular-organic and energy-above-hull filters of ``_generate_file_map`` (named
+    precursor formulas are kept even when organic). Rows are unique by
     COD id. With ``formulas_only`` the element query is skipped (known-mixture mode).
     """
     db = database if database is not None else shared_cod_database()
@@ -917,7 +1197,9 @@ def cod_candidate_rows(
         names = sorted(set(elements or []))
         for size in range(1, len(names) + 1):
             for combo in itertools.combinations(names, size):
-                data.extend(info.get("-".join(combo), []))
+                data.extend(
+                    row for row in info.get("-".join(combo), []) if not is_molecular_organic(row[0])
+                )
     for formula in precursors or []:
         try:
             composition = Composition(formula)
