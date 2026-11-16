@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import {
-  MAX_REFINE, combinationText, defaultSelection, flagTags, latticePercent, overlayTraces, percent, pollDelay, poolText,
-  rankingRows, refineSelection, sourceInfo,
+  MAX_REFINE, SORTERS, assignColors, combinationText, defaultSelection, flagTags, latticePercent, overlayTraces, percent,
+  pollDelay, poolText, progressText as rankingProgress, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo,
+  toggleKey,
 } from '../src/dara/server/ui/src/components/quickRanking.mjs';
 import {
   cachedText, durationText, jobOutcome, parseElements, progressPercent, progressText, sizeText,
@@ -64,6 +65,55 @@ assert.deepEqual(traces[1].x, [29.1, 29.1, null, 33.8, 33.8, null]);
 assert.deepEqual(traces[1].y, [0, 120.5, null, 0, 30, null]);
 assert.notEqual(traces[1].line.color, traces[2].line.color);
 assert.deepEqual(overlayTraces(null, []), []);
+
+// stable colours: a row keeps its colour when another is deselected; a new row takes a free colour
+const colors = assignColors({}, ['a', 'b', 'c']);
+assert.equal(new Set(Object.values(colors)).size, 3);
+const fewer = assignColors(colors, ['a', 'c']);
+assert.equal(fewer.c, colors.c);
+assert.equal(assignColors(fewer, ['a', 'c', 'd']).d, colors.b, 'the freed colour is reused');
+assert.equal(Object.keys(assignColors({}, Array.from({ length: 12 }, (_, i) => `k${i}`))).length, 12, 'more rows than colours');
+
+// focused row: a dotted preview when not selected, bold when selected; colours follow the map
+const preview = overlayTraces(response, ['cod:1513300'], { 'cod:1513300': '#123456' }, 'cod:2108027');
+assert.equal(preview.length, 3);
+assert.equal(preview[1].line.color, '#123456');
+assert.equal(preview[2].line.dash, 'dot');
+assert.equal(overlayTraces(response, ['cod:1513300'], {}, 'cod:1513300')[1].line.width, 3);
+assert.equal(overlayTraces(response, [], {}, 'nope').length, 1);
+
+// pool line: new optional counts appear only when > 0
+assert.equal(poolText({ ...response, pool: { ...response.pool, downloaded: 12, unavailable: 3, missing_cif: 0, simulated: 0 } }),
+  'Ranked 54 candidates (COD 50, MP 4) in 1.2 s · 12 downloaded now · 3 unavailable');
+assert.equal(poolText({ pool: { candidates: 0, downloaded: 0, unavailable: 0 } }), 'Ranked 0 candidates');
+
+// progress: phase, counts and time are optional (old servers send only elapsed_s)
+assert.equal(rankingProgress({ phase: 'downloading', done: 1200, total: 2000, elapsed_s: 8.4 }), 'Downloading structures · 1,200 of 2,000 · 8 s');
+assert.equal(rankingProgress({ phase: 'simulating', total: 0, elapsed_s: 0.2 }), 'Simulating reference patterns');
+assert.equal(rankingProgress({ elapsed_s: 3 }), 'Ranking candidates · 3 s');
+assert.equal(rankingProgress(undefined), 'Ranking candidates');
+
+// sorting
+const byRank = [...rows].sort(SORTERS.score).map(row => row.rank);
+assert.deepEqual(byRank, [3, 2, 1]);
+assert.deepEqual([...rows].sort(SORTERS.lattice).map(row => row.rank), [3, 1, 2]);
+assert.deepEqual([...rows].sort(SORTERS.peaks).map(row => row.rank), [1, 2, 3], 'equal share: more peaks last');
+assert.equal(SORTERS.lattice({}, {}), 0);
+assert.equal(SORTERS.peaks({ matched: 0, expected: 0 }, { matched: 1, expected: 2 }) < 0, true);
+
+// keyboard and selection
+assert.equal(rowKeyAction('ArrowDown'), 'next');
+assert.equal(rowKeyAction('ArrowUp'), 'previous');
+assert.equal(rowKeyAction(' '), 'toggle');
+assert.equal(rowKeyAction('Enter'), null);
+assert.deepEqual(toggleKey(['a', 'b'], 'a'), ['b']);
+assert.deepEqual(toggleKey(['b'], 'a'), ['b', 'a']);
+
+// request identity: same inputs, same key; another file or value, another key
+const file = { name: 'x.xy', size: 10, lastModified: 1 };
+assert.equal(requestKey([['pattern_file', file], ['elements', '["Fe"]']]), requestKey([['pattern_file', { ...file }], ['elements', '["Fe"]']]));
+assert.notEqual(requestKey([['pattern_file', file]]), requestKey([['pattern_file', { ...file, size: 11 }]]));
+assert.notEqual(requestKey([['include_theoretical', 'true']]), requestKey([['include_theoretical', 'false']]));
 
 assert.equal(pollDelay(0), 700);
 assert.equal(pollDelay(10), 2000);

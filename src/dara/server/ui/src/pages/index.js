@@ -11,7 +11,7 @@ import { COMMON_STANDARDS } from '../components/InternalStandardCard';
 import { advancedChanges, forgetRemembered, readRemembered, runAfterSuccess, writeRemembered } from '../components/submitHelpers.mjs';
 import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../components/knownPhases.mjs';
 // explicit .js: on case-insensitive disks webpack would resolve quickRanking.mjs / structureLibrary.mjs first
-import QuickRanking from '../components/QuickRanking.js';
+import QuickRankingWorkspace, { QuickRankingSummary, useQuickRanking } from '../components/QuickRanking.js';
 import StructureLibrary from '../components/StructureLibrary.js';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
@@ -72,6 +72,17 @@ const Container = styled.div`
   .dara-run-summary dd { margin: 0; overflow-wrap: anywhere; }
   .dara-run-summary .missing { color: var(--dara-text-hint); }
   .dara-run-hint { margin: 0 0 16px; color: var(--dara-text-hint); font-size: var(--dara-font-13); }
+  .dara-run-actions { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; padding-bottom: 16px; }
+  .dara-run-actions.single { grid-template-columns: minmax(0, 1fr); }
+  .dara-run-search:not([disabled]) { background: var(--dara-shell); border-color: var(--dara-shell); color: var(--dara-shell-text); }
+  .dara-run-search:not([disabled]):hover, .dara-run-search:not([disabled]):focus { background: #33503f; border-color: #33503f; color: var(--dara-shell-text); }
+  .dara-run-action-note { margin: 4px 0 0; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
+  .dara-qr-summary {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+    margin: 0 0 16px; padding: 8px 12px;
+    background: var(--dara-surface-sunken); border: 1px solid var(--dara-border); border-radius: var(--dara-radius);
+  }
+  .dara-qr-summary-meta { color: var(--dara-text-secondary); font-size: var(--dara-font-12); }
   .dara-advanced-toggle {
     display: flex; align-items: center; gap: 8px; width: 100%;
     margin: 0; padding: 0 0 16px; border: 0; background: none; cursor: pointer; text-align: left;
@@ -517,9 +528,14 @@ function Submission() {
     let submitted = false;
     try {
       submitted = await onSubmit();
-      // The drawer covers the form, so its inline errors are not visible: name the first one.
-      const invalid = submitted ? [] : form.getFieldsError().flatMap(item => item.errors);
-      if (invalid.length) message.error(`Not submitted: ${invalid[0]}`);
+      // The workspace hides the form: name the first error and go back to the setup, where it is
+      // marked; the ranking stays open behind the Run card's "Open".
+      const invalid = submitted ? [] : form.getFieldsError().filter(item => item.errors.length);
+      if (invalid.length) {
+        message.error(`Not submitted: ${invalid[0].errors[0]}`);
+        quick.close(false);
+        form.scrollToField(invalid[0].name, { block: 'center' });
+      }
     } finally {
       referenceIds.current = [];
       if (!submitted) {
@@ -535,6 +551,7 @@ function Submission() {
     }
     return submitted;
   };
+  const quick = useQuickRanking(quickRankingRequest);
 
   const onSubmit = async () => {
     let values;
@@ -689,10 +706,16 @@ function Submission() {
     ? `2θ ${watchedThetaMin ?? 'start'}–${watchedThetaMax ?? 'end'}°`
     : 'measured 2θ range';
   const selected = instrumentDetails[selectedInstrument];
+  const quickReady = !!watchedPattern && (splitList(watchedElements).length > 0 || splitList(watchedPrecursors).length > 0);
+  const msgAlert = msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null;
 
   return (
     <Layout hasSider={false} title="Submit">
-      <Container>
+      {/* The workspace replaces the setup on screen; the form stays mounted with its file and values. */}
+      {quick.shown ? <QuickRankingWorkspace quick={quick} onRefine={refineRanked} alert={msgAlert}
+        context={[watchedPattern?.name, elementSummary && `Elements ${elementSummary}`, formulaSummary && `Formulas ${formulaSummary}`,
+          <>Radiation {wavelengthSummary}</>, rangeSummary]} /> : null}
+      <Container hidden={quick.shown}>
         <h1 className="dara-sr-only">New analysis</h1>
         <Form className="dara-submit-layout" layout="vertical" form={form}
           initialValues={{
@@ -990,19 +1013,23 @@ function Submission() {
               {estimate || estimating
                 ? <EstimateAlert estimate={estimate} loading={estimating} prefilter={watchedPrefilter !== false} />
                 : <p className="dara-run-hint">{analysisMode === 'elemental' ? 'Enter elements or formulas' : 'Enter formulas'} to see the candidate and run-time estimate.</p>}
-              {seriesMode ? null : (
-                <QuickRanking buildRequest={quickRankingRequest} onRefine={refineRanked}
-                  disabled={!watchedPattern || (!splitList(watchedElements).length && !splitList(watchedPrecursors).length)}
-                  disabledReason="Upload a pattern and enter its elements or formulas first" />
-              )}
-              {msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null}
-              <Form.Item>
-                <Button type="primary" size="large" block onClick={onSubmit} loading={spinning}
-                  // Nothing to analyse yet: no pattern (a rerun reuses the original one) and no series files.
-                  disabled={spinning || loadingClone || (phaseSet && !phaseSet.phases) || (seriesMode ? !seriesCount : !watchedPattern && !cloneSource)}>
-                  {seriesMode ? `Submit series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Submit'}
-                </Button>
-              </Form.Item>
+              {seriesMode ? null : <QuickRankingSummary quick={quick} />}
+              {quick.shown ? null : msgAlert}
+              {/* Two ways to run: a quick search-match shortlist, or the full analysis (the primary action). */}
+              <div className={`dara-run-actions${seriesMode ? ' single' : ''}`}>
+                {seriesMode ? null : <div>
+                  <Button className="dara-run-search" size="large" block onClick={quick.open} disabled={!quickReady}>Search-match</Button>
+                  <p className="dara-run-action-note">{quickReady ? 'Rank reference structures against the pattern in seconds' : 'Needs a pattern and its elements or formulas'}</p>
+                </div>}
+                <div>
+                  <Button type="primary" size="large" block onClick={onSubmit} loading={spinning}
+                    // Nothing to analyse yet: no pattern (a rerun reuses the original one) and no series files.
+                    disabled={spinning || loadingClone || (phaseSet && !phaseSet.phases) || (seriesMode ? !seriesCount : !watchedPattern && !cloneSource)}>
+                    {seriesMode ? `Submit series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Submit'}
+                  </Button>
+                  <p className="dara-run-action-note">Full phase search with Rietveld refinement</p>
+                </div>
+              </div>
             </Card>
 
             <section className="dara-card dara-card-advanced" aria-label="Advanced options">

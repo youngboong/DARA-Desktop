@@ -5,7 +5,9 @@ start a ranking in a worker thread (``asyncio.to_thread``) and wait a few second
 A warm pool answers ``{"status": "done", ...}`` directly; otherwise the answer is
 ``{"status": "pending", "job_id"}`` and ``GET /api/quick-ranking/{job_id}`` returns the same
 shape until the ranking is done. The same inputs reuse a running job, or a finished one for
-``REUSE_DONE_S``.
+``REUSE_DONE_S``. The pending view carries ``phase`` ("listing", "downloading", "simulating",
+"ranking"), ``done`` and ``total`` (0 when unknown); ``DELETE /api/quick-ranking/{job_id}``
+stops the job at its next check and forgets it (downloaded files stay).
 """
 
 from __future__ import annotations
@@ -54,11 +56,15 @@ def _run(params: dict) -> dict:
 
 
 def _job_view(job_id: str, job: dict) -> dict:
+    if job["cancel"].is_set():
+        return {"status": "cancelled", "job_id": job_id}
     if job["status"] == "done":
         return {**job["result"], "status": "done", "job_id": job_id}
     if job["status"] == "error":
         return {"status": "error", "job_id": job_id, "error": job["error"]}
-    return {"status": "pending", "job_id": job_id, "elapsed_s": round(time.monotonic() - job["started"], 1)}
+    phase, done, total = job["progress"]  # one tuple, swapped atomically by the worker thread
+    return {"status": "pending", "job_id": job_id, "elapsed_s": round(time.monotonic() - job["started"], 1),
+            "phase": phase, "done": done, "total": total}
 
 
 async def _start_and_wait(params: dict, key_parts) -> dict:
@@ -70,7 +76,8 @@ async def _start_and_wait(params: dict, key_parts) -> dict:
         elif job is not None and job["status"] == "done" and time.monotonic() - job["finished"] > REUSE_DONE_S:
             job = None  # the library or the MP key may have changed since
         if job is None:
-            job = {"status": "pending", "started": time.monotonic(), "result": None, "error": None, "task": None}
+            job = {"status": "pending", "started": time.monotonic(), "result": None, "error": None, "task": None,
+                   "progress": ("listing", 0, 0), "cancel": threading.Event()}
             _JOBS[job_id] = job
             while len(_JOBS) > _JOBS_MAX:
                 _JOBS.popitem(last=False)
@@ -79,11 +86,20 @@ async def _start_and_wait(params: dict, key_parts) -> dict:
             _JOBS.move_to_end(job_id)
             fresh = False
     if fresh:
+        from dara.structure_library import Cancelled
+
+        def progress(phase, done, total):
+            job["progress"] = (phase, int(done), int(total))
+
         async def runner():
             try:
-                job["result"] = await asyncio.to_thread(_run, params)
+                job["result"] = await asyncio.to_thread(
+                    _run, {**params, "progress": progress, "should_stop": job["cancel"].is_set}
+                )
                 job["finished"] = time.monotonic()
                 job["status"] = "done"
+            except Cancelled:
+                job["status"] = "cancelled"
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Quick ranking failed", exc_info=True)
                 job["error"] = f"{type(exc).__name__}: {exc}"
@@ -133,7 +149,7 @@ def _elements_and_precursors(elements_raw, precursors_raw) -> tuple[list[str], l
     if len(elements) > MAX_ELEMENTS:  # the pool spans every sub-system: 2^n chemical systems
         raise HTTPException(
             status_code=422,
-            detail=f"The quick ranking takes at most {MAX_ELEMENTS} elements ({len(elements)} given); "
+            detail=f"The search-match takes at most {MAX_ELEMENTS} elements ({len(elements)} given); "
             "remove elements that cannot form crystalline phases in the sample.",
         )
     return elements, precursors
@@ -217,8 +233,19 @@ async def quick_ranking_status(job_id: str):
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Unknown or expired quick ranking; start it again.")
+        raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
     task = job.get("task")
     if task is not None and not task.done():
         await asyncio.wait({task}, timeout=2.0)
     return _job_view(job_id, job)
+
+
+@router.delete("/quick-ranking/{job_id}")
+async def quick_ranking_cancel(job_id: str):
+    """Stop a ranking at its next check and forget it, so the same request starts afresh."""
+    with _JOBS_LOCK:
+        job = _JOBS.pop(job_id, None)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
+    job["cancel"].set()
+    return {"status": "cancelled", "job_id": job_id}

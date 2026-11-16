@@ -280,3 +280,175 @@ def test_prefilter_simulation_ignores_the_stick_cache(tmp_path, monkeypatch):
     # cached sticks, so the missing CIF fails instead of borrowing another structure's sticks
     with pytest.raises(Exception):
         prefilter.simulate_reflections(Path("Fe2O3_167_(cod_1234567)-0.cif"), L1, (14.0, 86.0))
+
+
+# --------------------------------------------------------------------------- #
+# fetch on demand, progress, cancel (offline: fake downloaders)
+# --------------------------------------------------------------------------- #
+FETCH_CIF = "data_x\n_cell_length_a 4.0\n_cell_length_b 4.0\n_cell_length_c 4.0\n"
+
+
+@pytest.fixture
+def fetch_caches(tmp_path, monkeypatch):
+    from dara import known_phases, structure_db
+
+    for name in ("COD", "MP", "STICK"):
+        monkeypatch.setenv(f"DARA_{name}_CACHE_DIR", str(tmp_path / name.lower()))
+    monkeypatch.setattr(structure_db.CODDatabase, "REQUEST_DELAY_S", 0)
+    monkeypatch.setattr(known_phases, "mp_configured", lambda: False)
+    monkeypatch.setattr(qr, "simulate_reflections",
+                        lambda path, lam, rng: (np.array([20.0, 30.0]), np.array([100.0, 50.0]), np.array([4.4, 3.0])))
+
+    def use_index(codes):
+        class FakeDB:
+            preparsed_info = {"Li-O": [("Li2O", code, 225, 0.0) for code in codes]}
+
+        monkeypatch.setattr(structure_db, "shared_cod_database", lambda: FakeDB())
+
+    return tmp_path, use_index
+
+
+def _fake_cod(monkeypatch, calls, failing=()):
+    from dara import structure_db
+
+    lock = threading.Lock()
+
+    def download(cod_id, max_attempts=3):
+        with lock:
+            calls.append(cod_id)
+        if cod_id in failing:
+            raise ConnectionError("connection reset")
+        return FETCH_CIF
+
+    monkeypatch.setattr(structure_db.CODDatabase, "_download_cod", staticmethod(download))
+
+
+def test_missing_cifs_are_fetched_on_demand_and_failures_counted(fetch_caches, monkeypatch):
+    from dara import known_phases, structure_db
+
+    tmp, use_index = fetch_caches
+    use_index(["1000001", "1000002", "1000003"])
+    (tmp / "cod").mkdir()
+    (tmp / "cod" / "1000001.cif").write_text(FETCH_CIF)
+    calls, steps = [], []
+    _fake_cod(monkeypatch, calls, failing={"1000003"})
+    monkeypatch.setattr(known_phases, "mp_configured", lambda: True)
+    monkeypatch.setattr(qr, "mp_pool_rows", lambda *a: [
+        {"material_id": "mp-1", "formula": "Li2O", "spacegroup": 225, "e_above_hull": 0.0, "theoretical": False}])
+
+    def mp_download(self, ids, index_name, timeout_s=120):
+        assert ids == ["mp-1"] and index_name == "queries"  # the server's own MP index file
+        (tmp / "mp").mkdir(exist_ok=True)
+        (tmp / "mp" / "mp-1.cif").write_text(FETCH_CIF)
+
+    monkeypatch.setattr(structure_db.MaterialsProjectDatabase, "download_to_cache", mp_download)
+    pool = qr.build_pool(["Li", "O"], [], L1, (10.0, 86.0), fetch=True,
+                         progress=lambda *step: steps.append(step))
+    assert sorted(calls) == ["1000002", "1000003"]  # the cached CIF is not fetched again
+    summary = pool.summary()
+    assert summary["downloaded"] == 2 and summary["unavailable"] == summary["missing_cif"] == 1
+    assert summary["candidates"] == 3 and summary["sources"] == {"cod": 2, "mp": 1}
+    assert any("1 of 4 reference structures could not be downloaded" in c for c in pool.caveats)
+    assert {s[0] for s in steps} == {"listing", "downloading", "simulating"}
+    assert all(isinstance(s[1], int) and isinstance(s[2], int) for s in steps)
+    assert ("downloading", 3, 3) in steps
+    # without fetch (library callers, the benchmark) nothing is downloaded
+    calls.clear()
+    pool = qr.build_pool(["Li", "O"], [], L1, (10.0, 86.0), use_mp=False)
+    assert calls == [] and pool.summary()["downloaded"] == 0 and pool.missing_cif == 1
+
+
+def test_unreachable_cod_ranks_the_cache_and_says_so(fetch_caches, monkeypatch):
+    tmp, use_index = fetch_caches
+    codes = [f"10000{i:02d}" for i in range(10)]
+    use_index(codes)
+    (tmp / "cod").mkdir()
+    (tmp / "cod" / f"{codes[0]}.cif").write_text(FETCH_CIF)
+    calls = []
+    _fake_cod(monkeypatch, calls, failing=set(codes))
+    pool = qr.build_pool(["Li", "O"], [], L1, (10.0, 86.0), use_mp=False, fetch=True)
+    assert len(calls) == qr.FETCH_CHUNK  # gave up after one failed step, not 9 retries
+    assert len(pool.candidates) == 1 and pool.unavailable == 9 and pool.downloaded == 0
+    assert any("not reachable" in c for c in pool.caveats)
+
+
+def test_stop_between_download_steps_keeps_finished_files(fetch_caches, monkeypatch):
+    from dara.structure_library import Cancelled
+
+    tmp, use_index = fetch_caches
+    use_index([f"10000{i:02d}" for i in range(12)])
+    calls = []
+    _fake_cod(monkeypatch, calls)
+    stop = lambda: len(calls) >= 1  # noqa: E731
+    pool = qr.build_pool(["Li", "O"], [], L1, (10.0, 86.0), use_mp=False, fetch=True, should_stop=stop)
+    assert len(calls) == qr.FETCH_CHUNK and pool.candidates == []
+    assert len(list((tmp / "cod").glob("*.cif"))) == qr.FETCH_CHUNK and not list((tmp / "cod").glob("*.tmp"))
+    x, y = _pattern([(A_D, A_I, 2000, 1.0)])
+    with pytest.raises(Cancelled):
+        qr.quick_ranking(x, y, elements=["Li", "O"], use_mp=False, should_stop=stop)
+
+
+def test_router_progress_and_cancel(monkeypatch):
+    import io
+    import time
+
+    from fastapi import HTTPException, UploadFile
+
+    from dara.server import quick_rank_router as router_module
+    from dara.structure_library import Cancelled
+
+    runs = []
+
+    def downloading(params):
+        runs.append(1)
+        while not params["should_stop"]():
+            params["progress"]("downloading", 3, 9)
+            time.sleep(0.01)
+        raise Cancelled()
+
+    monkeypatch.setattr(router_module, "_run", downloading)
+    monkeypatch.setattr(router_module, "WAIT_S", 0.2)
+    router_module._JOBS.clear()
+    content = (DATA / "BiFeO3.xy").read_bytes()
+
+    def upload():
+        return router_module.quick_ranking_upload(
+            UploadFile(io.BytesIO(content), filename="BiFeO3.xy"), elements='["Fe","Bi","O"]',
+            precursor_formulas="[]", wavelength="Cu", two_theta_min=None, two_theta_max=None,
+            excluded_ranges="[]", include_theoretical=False, use_cod=True, use_mp=False,
+            mp_e_hull_cutoff=0.05, max_mp_structures=100,
+        )
+
+    async def scenario():
+        first = await upload()
+        assert first["status"] == "pending"
+        assert (first["phase"], first["done"], first["total"]) == ("downloading", 3, 9)
+        job = router_module._JOBS[first["job_id"]]
+        assert await router_module.quick_ranking_cancel(first["job_id"]) == {
+            "status": "cancelled", "job_id": first["job_id"]}
+        await asyncio.wait({job["task"]}, timeout=5)
+        assert job["status"] == "cancelled"  # the worker stopped at its next check
+        for call in (router_module.quick_ranking_status, router_module.quick_ranking_cancel):
+            with pytest.raises(HTTPException) as info:
+                await call(first["job_id"])
+            assert info.value.status_code == 404
+        again = await upload()  # the same request starts afresh
+        assert again["status"] == "pending" and again["job_id"] == first["job_id"] and len(runs) == 2
+        job = router_module._JOBS[again["job_id"]]
+        await router_module.quick_ranking_cancel(again["job_id"])
+        await asyncio.wait({job["task"]}, timeout=5)
+
+    asyncio.run(scenario())
+
+
+def test_suggested_structure_with_unphysical_density_is_left_out(monkeypatch):
+    pool = qr.Pool()
+    pool.candidates = [_cand("cod:1", "A", A_D, A_I), _cand("cod:2", "B", B_D, B_I, sg=2)]
+    pool.candidates[0].path = Path("bad.cif")
+    monkeypatch.setattr(qr, "build_pool", lambda *a, **k: pool)
+    monkeypatch.setattr(qr, "_unphysical_density", lambda path: path.name == "bad.cif")
+    x, y = _pattern([(A_D, A_I, 1.0, 1.0), (B_D, B_I, 0.6, 1.0)])
+    result = qr.quick_ranking(x, y, elements=["A"])
+    assert [row["source"] for row in result["ranking"]] == ["cod:2"]
+    assert [step["source"] for step in result["combination"]] == ["cod:2"]
+    assert any("unphysical density (cod:1)" in text for text in result["caveats"])

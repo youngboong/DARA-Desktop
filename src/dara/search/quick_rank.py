@@ -34,6 +34,7 @@ import time
 import warnings
 from collections import OrderedDict
 from dataclasses import dataclass, field, replace
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +214,8 @@ class Pool:
     missing_cif: int = 0
     simulated: int = 0
     failed: int = 0
+    downloaded: int = 0
+    unavailable: int = 0
     sources: dict = field(default_factory=dict)
     caveats: list[str] = field(default_factory=list)
 
@@ -220,7 +223,8 @@ class Pool:
         return {
             "rows": self.rows, "cached": self.cached, "missing_cif": self.missing_cif,
             "simulated": self.simulated, "failed": self.failed, "sources": dict(self.sources),
-            "candidates": len(self.candidates),
+            "candidates": len(self.candidates), "downloaded": self.downloaded,
+            "unavailable": self.unavailable,
         }
 
 
@@ -281,6 +285,50 @@ def mp_pool_rows(elements, e_hull_cutoff: float, limit: int) -> list[dict]:
     return rows
 
 
+FETCH_CHUNK = 8  # COD ids per step: cancel and progress granularity (4 polite connections)
+
+
+def _fetch_missing(pool: Pool, sources: list[str], report, should_stop) -> bool:
+    """Download ``cod:<id>`` / ``mp:<id>`` CIFs into the shared caches; ``True`` when stopped.
+
+    Reuses the structure library's COD downloader (polite, remembers 404s) and the MP cache
+    download. A source that is unreachable adds a caveat; the ranking goes on with the cache.
+    """
+    from types import SimpleNamespace
+
+    from dara import structure_library as lib
+    from dara.structure_db import MaterialsProjectDatabase
+
+    cod_ids = [s.split(":", 1)[1] for s in sources if s.startswith("cod:")]
+    mp_ids = [s.split(":", 1)[1] for s in sources if s.startswith("mp:")]
+    total = len(sources)
+    report("downloading", 0, total)
+    try:
+        if cod_ids:
+            emit = SimpleNamespace(emit=lambda phase, done, _total, *args, **kwargs: report("downloading", done, total))
+            try:
+                lib._download_cod(cod_ids, emit, should_stop, chunk_size=FETCH_CHUNK)
+            except ConnectionError:
+                logger.warning("Quick ranking: COD is not reachable", exc_info=True)
+                pool.caveats.append(
+                    "COD (www.crystallography.net) is not reachable: the structures not downloaded "
+                    "yet were not ranked; rank again when the connection is back."
+                )
+        if mp_ids:
+            lib._check_cancel(should_stop)
+            try:
+                MaterialsProjectDatabase().download_to_cache(mp_ids, "queries")
+            except Exception as exc:  # noqa: BLE001 - offline or a bad key: rank what is cached
+                logger.warning("Quick ranking: Materials Project download failed", exc_info=True)
+                pool.caveats.append(
+                    f"Materials Project structures could not be downloaded ({type(exc).__name__})."
+                )
+            report("downloading", total, total)
+    except lib.Cancelled:
+        return True
+    return False
+
+
 def build_pool(
     elements,
     precursors,
@@ -293,69 +341,85 @@ def build_pool(
     mp_limit: int = 100,
     include_theoretical: bool = False,
     simulate: bool = True,
+    fetch: bool = False,
     should_stop=None,
+    progress=None,
 ) -> Pool:
-    """Candidates of the normal phase search with sticks (cache first, then simulation)."""
+    """Candidates of the normal phase search with sticks (cache first, then simulation).
+
+    With ``fetch`` the CIFs missing from the caches are downloaded first, into the caches a
+    search and the structure library use; one that cannot be fetched is skipped and counted.
+    ``progress(phase, done, total)`` reports "listing", "downloading" and "simulating".
+    ``should_stop()`` ends the pool early (between downloads and between simulations).
+    """
     from dara import known_phases
     from dara.structure_db import cod_cache_dir, cod_candidate_rows, mp_cache_dir
 
+    report = progress or (lambda phase, done, total: None)
+    report("listing", 0, 0)
     pool = Pool()
     entries: list[Candidate] = []
+    cod_rows: list[tuple] = []
+    mp_rows: list[dict] = []
     if use_cod:
-        rows = cod_candidate_rows(list(elements), list(precursors or []), e_hull_cutoff)
-        folder = cod_cache_dir()
-        pool.rows += len(rows)
-        for formula, code, sg, e_hull in rows:
-            path = folder / f"{code}.cif"
-            if not path.is_file():
-                pool.missing_cif += 1
-                continue
-            if _cod_theoretical(path):
-                continue
-            entries.append(Candidate(
-                source=f"cod:{code}", formula=_reduced(formula),
-                spacegroup=int(sg) if sg is not None else None, path=path, e_above_hull=e_hull,
-            ))
-        if pool.missing_cif:
-            pool.caveats.append(
-                f"{pool.missing_cif} of {len(rows)} COD structures are not downloaded yet and were "
-                "not ranked (a phase search or the structure library downloads them)."
-            )
+        cod_rows = cod_candidate_rows(list(elements), list(precursors or []), e_hull_cutoff)
     if use_mp:
         if not known_phases.mp_configured():
             pool.caveats.append("Materials Project is not configured (no MP_API_KEY): COD only.")
         else:
             try:
-                mp_rows = mp_pool_rows(elements, e_hull_cutoff, mp_limit)
+                listed = mp_pool_rows(elements, e_hull_cutoff, mp_limit)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Quick ranking: Materials Project query failed", exc_info=True)
                 pool.caveats.append(
                     f"The Materials Project query failed ({type(exc).__name__}): COD only."
                 )
-                mp_rows = []
-            hidden = 0
-            for row in mp_rows:
-                if row.get("theoretical") and not include_theoretical:
-                    hidden += 1
-                    continue
-                path = mp_cache_dir() / f"{row['material_id']}.cif"
-                if not path.is_file():
-                    pool.missing_cif += 1
-                    continue
-                pool.rows += 1
-                entries.append(Candidate(
-                    source=f"mp:{row['material_id']}", formula=row["formula"],
-                    spacegroup=row.get("spacegroup"), path=path,
-                    e_above_hull=row.get("e_above_hull"), theoretical=bool(row.get("theoretical")),
-                ))
+                listed = []
+            mp_rows = [r for r in listed if include_theoretical or not r.get("theoretical")]
+            hidden = len(listed) - len(mp_rows)
             if hidden:
                 pool.caveats.append(
                     f"{hidden} computed-only (theoretical) Materials Project structures are hidden; "
                     "tick 'Include theoretical (computed) structures' to rank them."
                 )
-    for entry in entries:
+    cod_folder, mp_folder = cod_cache_dir(), mp_cache_dir()
+    missing = [f"cod:{code}" for _, code, _, _ in cod_rows if not (cod_folder / f"{code}.cif").is_file()]
+    missing += [f"mp:{r['material_id']}" for r in mp_rows if not (mp_folder / f"{r['material_id']}.cif").is_file()]
+    if fetch and missing and _fetch_missing(pool, missing, report, should_stop):
+        return pool
+    for formula, code, sg, e_hull in cod_rows:
+        path = cod_folder / f"{code}.cif"
+        if not path.is_file():
+            pool.missing_cif += 1
+        elif not _cod_theoretical(path):
+            entries.append(Candidate(
+                source=f"cod:{code}", formula=_reduced(formula),
+                spacegroup=int(sg) if sg is not None else None, path=path, e_above_hull=e_hull,
+            ))
+    for row in mp_rows:
+        path = mp_folder / f"{row['material_id']}.cif"
+        if not path.is_file():
+            pool.missing_cif += 1
+            continue
+        entries.append(Candidate(
+            source=f"mp:{row['material_id']}", formula=row["formula"],
+            spacegroup=row.get("spacegroup"), path=path,
+            e_above_hull=row.get("e_above_hull"), theoretical=bool(row.get("theoretical")),
+        ))
+    pool.rows = len(cod_rows) + len(mp_rows)
+    if fetch and missing:
+        pool.downloaded = len(missing) - pool.missing_cif
+        pool.unavailable = pool.missing_cif
+    if pool.missing_cif:
+        pool.caveats.append(
+            f"{pool.missing_cif} of {pool.rows} reference structures "
+            + ("could not be downloaded" if fetch else "are not downloaded yet")
+            + " and were not ranked."
+        )
+    for index, entry in enumerate(entries):
         if should_stop is not None and should_stop():
             break
+        report("simulating", index, len(entries))
         cached = cached_sticks(entry.source, wavelength_a, two_theta_range)
         if cached is None:
             if not simulate:
@@ -693,6 +757,22 @@ def rank(
     }
 
 
+@lru_cache(maxsize=4096)
+def _unphysical_density(path: Path) -> bool:
+    """Whether the CIF's computed density is outside the range the phase search accepts."""
+    from pymatgen.core import Structure
+
+    from dara.structure_quality import _DENSITY_RANGE
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            density = float(Structure.from_file(path).density)
+    except Exception:  # noqa: BLE001 - unreadable here: the refinement reports it
+        return False
+    return not _DENSITY_RANGE[0] <= density <= _DENSITY_RANGE[1]
+
+
 def quick_ranking(
     angles,
     intensities,
@@ -708,23 +788,53 @@ def quick_ranking(
     use_mp: bool = True,
     mp_limit: int = 100,
     include_theoretical: bool = False,
+    progress=None,
+    should_stop=None,
 ) -> dict:
-    """Pool + ranking in the response shape of ``/api/quick-ranking``."""
+    """Pool (missing CIFs downloaded) + ranking in the response shape of ``/api/quick-ranking``.
+
+    ``progress(phase, done, total)`` as in :func:`build_pool`, then ``"ranking"``. Raises
+    ``structure_library.Cancelled`` when ``should_stop()`` turns true before the ranking.
+    """
+    from dara.structure_library import Cancelled
+
     started = time.perf_counter()
     lam1, _ = wavelength_lines(wavelength)
     x = np.asarray(angles, float)
     lo = float(np.nanmin(x)) if wmin is None else float(wmin)
     hi = float(np.nanmax(x)) if wmax is None else float(wmax)
     two_theta_range = (max(1.0, lo - 6.0), min(178.0, hi + 6.0))
+    stopped = should_stop or (lambda: False)
+    if stopped():
+        raise Cancelled()
     pool = build_pool(
         elements, precursors, lam1, two_theta_range, e_hull_cutoff=e_hull_cutoff,
         use_cod=use_cod, use_mp=use_mp, mp_limit=mp_limit, include_theoretical=include_theoretical,
+        fetch=True, should_stop=should_stop, progress=progress,
     )
+    if stopped():
+        raise Cancelled()
+    if progress is not None:
+        progress("ranking", 0, 0)
     pool_s = time.perf_counter() - started
-    result = rank(
-        angles, intensities, pool.candidates, wavelength=wavelength, wmin=wmin, wmax=wmax,
-        excluded_ranges=excluded_ranges,
-    )
+    candidates = pool.candidates
+    for _ in range(4):
+        result = rank(
+            angles, intensities, candidates, wavelength=wavelength, wmin=wmin, wmax=wmax,
+            excluded_ranges=excluded_ranges,
+        )
+        # a suggested structure with an impossible density makes the refinement of the whole
+        # selection fail: drop it and rank again
+        bad = {step["source"] for step in result["combination"]} & {
+            c.source for c in candidates if c.path is not None and _unphysical_density(c.path)
+        } if result["combination"] else set()
+        if not bad:
+            break
+        candidates = [c for c in candidates if c.source not in bad]
+        pool.caveats.append(
+            f"{len(bad)} structure{'s' if len(bad) != 1 else ''} with an unphysical density "
+            f"({', '.join(sorted(bad))}) left out of the ranking."
+        )
     return {
         "status": "done",
         "pool": pool.summary(),

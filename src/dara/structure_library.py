@@ -273,12 +273,16 @@ class Progress:
 
 
 def _check_cancel(cancel_file):
-    if cancel_file and Path(cancel_file).exists():
+    """Raise ``Cancelled`` when ``cancel_file`` (a path, or a callable like ``should_stop``) says stop."""
+    if cancel_file and (cancel_file() if callable(cancel_file) else Path(cancel_file).exists()):
         raise Cancelled()
 
 
-def _download_cod(ids, progress: Progress, cancel_file) -> tuple[int, int]:
-    """Fetch missing COD CIFs with the search's own polite downloader. Returns (failed, done)."""
+def _download_cod(ids, progress: Progress, cancel_file, chunk_size: int | None = None) -> tuple[int, int]:
+    """Fetch missing COD CIFs with the search's own polite downloader. Returns (failed, done).
+
+    Cancel and progress are checked every ``chunk_size`` ids (default ``COD_CHUNK``).
+    """
     from dara.structure_db import CODDatabase, _is_not_found_error, atomic_write_text, cod_cache_dir
 
     folder = cod_cache_dir()
@@ -302,9 +306,10 @@ def _download_cod(ids, progress: Progress, cancel_file) -> tuple[int, int]:
             raise
 
     db._download_cod = fetch
-    for start in range(0, len(missing), COD_CHUNK):
+    step = chunk_size or COD_CHUNK
+    for start in range(0, len(missing), step):
         _check_cancel(cancel_file)
-        chunk = missing[start : start + COD_CHUNK]
+        chunk = missing[start : start + step]
         cifs, bad = db._fetch_many(chunk, folder)
         failed += len(bad) - len([i for i in bad if i in not_found])
         nbytes += sum((folder / f"{i}.cif").stat().st_size for i in cifs if (folder / f"{i}.cif").is_file())

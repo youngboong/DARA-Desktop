@@ -15,13 +15,15 @@ Both read the same screens; the staff use the lists, filters and comparisons mor
 
 ## Product Purpose
 
-DARA identifies the crystalline phases in a powder XRD pattern and quantifies them: it searches reference structures (COD, Materials Project, a local library, uploaded CIFs), ranks candidate phase sets by automated Rietveld refinement (BGMN), and lets the analyst refine further (add or remove phases, background, structure) as versions.
+DARA is a complete powder XRD analysis program: the working set of classical XRD software (HighScore, TOPAS, Match!, Jade) with automation added and a much more convenient UI. Functions that analysts use routinely in XRD practice belong in DARA; automation removes the manual steps, it does not replace the functions.
+
+At its core DARA identifies the crystalline phases in a powder XRD pattern and quantifies them: it searches reference structures (COD, Materials Project, a local library, uploaded CIFs), ranks candidate phase sets by automated Rietveld refinement (BGMN), and lets the analyst refine further (add or remove phases, background, structure) as versions.
 
 Success: the analyst decides which phase set is right, and can defend that decision with the fit, the amounts and the cautions, in minutes rather than an afternoon of manual refinement.
 
 ## Positioning
 
-Automated phase search plus Rietveld refinement with explicit evidence: every candidate comes with its fit, residuals, unexplained peaks and automated cautions, and every manual change is a reproducible version beside the original search result.
+Classical XRD software made automatic and easy to use. Automated phase search plus Rietveld refinement with explicit evidence: every candidate comes with its fit, residuals, unexplained peaks and automated cautions, and every manual change is a reproducible version beside the original search result.
 
 ## Operating Context
 
@@ -55,3 +57,4 @@ Automated phase search plus Rietveld refinement with explicit evidence: every ca
 3. Exceptions stand out, the normal stays quiet: colour and emphasis mark what needs attention.
 4. Dense and calm, like instrument software: one line per item, details on demand.
 5. Nothing is lost: every refinement is a version beside the original, never an overwrite.
+6. Complete for daily practice: a routine XRD task should not send the analyst to another program. A function gets screen space in proportion to how central it is in practice (search-match is a workspace, not a side panel).

@@ -70,7 +70,7 @@ export default function StructureLibrary() {
       <Modal title="Structure library" open={open} onCancel={() => setOpen(false)} footer={null} width={640}>
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
           <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            Download reference structures ahead of time: phase searches then work offline and the quick ranking needs no
+            Download reference structures ahead of time: phase searches then work offline and the search-match needs no
             simulation. Downloads resume where they stopped; nothing changes until you download.
           </Typography.Paragraph>
           {error ? <Alert type="error" showIcon message={error} /> : null}
