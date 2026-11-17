@@ -214,6 +214,9 @@ def test_calibration_needs_device_file_and_keeps_original(tmp_path, monkeypatch)
     assert 'DetW=0.11' in (folder / 'instrument.sav').read_text() and (folder / 'instrument.geq').is_file()
     assert instrument_profiles.registered_profiles()[stored['id']]['calibration']['standard'] == 'LaB6'
     assert {path.name: path.read_bytes() for path in (profiles / built['id'].removeprefix('user-')).iterdir()} == original
+    # a flat pattern gives no FWHM curve; the DetW calibration still succeeds and says why
+    assert calibration['fwhm_curve'] is False and calibration['fwhm_curve_note'] and done['fwhm_curve']['usable'] is False
+    assert instrument_profiles.load_fwhm_curve(stored['id']) is None
 
 
 def test_candidate_comparison_grid_exclusions_and_identity(monkeypatch, references):

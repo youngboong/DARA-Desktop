@@ -222,3 +222,154 @@ def calibrate_detw(device_text, pattern_path, standard, wavelength="Cu", progres
                 "sav": with_detw(device_text, best), "detw": best, "detw_start": start,
                 "rwp_start": curve[min(curve, key=lambda d: abs(d - start))], "rwp": curve[best],
                 "apparent_size_nm": size, "curve": sorted(curve.items())}
+
+
+# ---- Instrument FWHM curve (Caglioti) from a measured standard ------------------------------
+
+CURVE_MIN_PEAKS = 5
+CURVE_MIN_SPAN_DEG = 40.0
+CURVE_MAX_RMS_DEG = 0.02
+_MIN_REL_INTENSITY = 1.0  # % of the strongest calculated reflection
+_SNAP_DEG = 0.3  # a measured peak may sit this far from its calculated angle (zero shift, displacement)
+
+
+def caglioti_fwhm(curve, two_theta):
+    """Instrument FWHM b (deg) of ``curve`` at ``two_theta``: sqrt(U tan^2 + V tan + W).
+
+    Outside the 2theta range of the standard's peaks the nearest edge value is used (no
+    extrapolation). Returns ``(b, clamped)``; b is None when the curve is not positive there."""
+    angle = min(max(float(two_theta), curve["two_theta_min"]), curve["two_theta_max"])
+    t = math.tan(math.radians(angle / 2))
+    square = curve["u"] * t * t + curve["v"] * t + curve["w"]
+    return (math.sqrt(square) if square > 0 else None), angle != float(two_theta)
+
+
+def fwhm_curve_from_standard(angles, intensities, standard, wavelength="Cu", excluded_ranges=None):
+    """Caglioti curve FWHM^2 = U tan^2(theta) + V tan(theta) + W of a measured line-broadening standard.
+
+    Background: the running-minimum estimate of the search pre-filter (``observed_profile``).
+    Peak positions: the standard's own reflections (shipped CIF, Kalpha1), each moved to the
+    highest net point within 0.3 deg, then pseudo-Voigt doublet fits (``fit_peak_profiles``)
+    and a weighted least-squares fit of FWHM^2 against tan(theta).
+    """
+    import dataclasses
+
+    import numpy as np
+
+    from dara.export.peak_profile import fit_peak_profiles
+    from dara.search.prefilter import PrefilterConfig, observed_profile, simulate_reflections
+    from dara.search.quick_rank import wavelength_lines
+
+    x = np.asarray(angles, dtype=float)
+    y = np.asarray(intensities, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    order = np.argsort(x[finite], kind="stable")
+    x, y = x[finite][order], y[finite][order]
+    report = {"standard": standard, "wavelength": wavelength, "u": None, "v": None, "w": None,
+              "u_esd": None, "v_esd": None, "w_esd": None, "two_theta_min": None, "two_theta_max": None,
+              "peaks": [], "peak_count": 0, "rms_deg": None, "usable": False, "reason": None}
+    # no smoothing, so that observed - net is the background alone
+    profile = observed_profile(x, y, excluded_ranges=excluded_ranges,
+                               config=dataclasses.replace(PrefilterConfig(), smooth_half_width_deg=0.0))
+    if not profile.usable:
+        report["reason"] = "The pattern is too short or too flat."
+        return report
+    net = profile.net
+    background = y - net
+    calculated, height, _ = simulate_reflections(standard_cif(standard), wavelength_lines(wavelength)[0],
+                                                 (float(x[0]) + _SNAP_DEG, float(x[-1]) - _SNAP_DEG))
+    positions = []
+    for center in calculated[height >= _MIN_REL_INTENSITY * height.max() / 100]:
+        near = np.flatnonzero(np.abs(x - center) <= _SNAP_DEG)
+        if near.size:
+            positions.append(float(x[near[np.argmax(net[near])]]))
+    fits = fit_peak_profiles(x, y, background, positions, wavelength, excluded_ranges)
+    points = sorted({(round(f["two_theta_fit"], 4), f["fwhm_deg"], f["fwhm_esd_deg"]) for f in fits
+                     if f["fit_note"] is None and f["fwhm_esd_deg"] > 0})
+    report["peaks"] = [{"two_theta": tt, "fwhm_deg": round(h, 5), "fwhm_esd_deg": round(e, 5)} for tt, h, e in points]
+    report["peak_count"] = len(points)
+    if len(points) < 3:
+        report["reason"] = f"{len(points)} peaks of {standard} could be fitted; at least {CURVE_MIN_PEAKS} are needed."
+        return report
+    tt, h, e = (np.array(column) for column in zip(*points))
+    t = np.tan(np.radians(tt / 2))
+    design = np.column_stack((t * t, t, np.ones_like(t)))
+    sigma = 2 * h * e  # esd of FWHM^2
+    (u, v, w), *_ = np.linalg.lstsq(design / sigma[:, None], h * h / sigma, rcond=None)
+    dof = len(points) - 3
+    chi2 = float(np.sum(((design @ (u, v, w) - h * h) / sigma) ** 2)) / dof if dof else 1.0
+    esd = np.sqrt(np.clip(np.diag(np.linalg.pinv((design / sigma[:, None]).T @ (design / sigma[:, None])) * chi2), 0, None))
+    lo, hi = float(tt.min()), float(tt.max())
+    report.update(u=float(u), v=float(v), w=float(w), u_esd=float(esd[0]), v_esd=float(esd[1]), w_esd=float(esd[2]),
+                  two_theta_min=lo, two_theta_max=hi)
+    grid = np.tan(np.radians(np.linspace(lo, hi, 200) / 2))
+    positive = bool(np.all(u * grid**2 + v * grid + w > 0))
+    if positive:
+        fitted = np.sqrt(design @ (u, v, w))
+        report["rms_deg"] = float(np.sqrt(np.mean((fitted - h) ** 2)))
+    reasons = []
+    if len(points) < CURVE_MIN_PEAKS:
+        reasons.append(f"{len(points)} peaks fitted; at least {CURVE_MIN_PEAKS} are needed")
+    if hi - lo < CURVE_MIN_SPAN_DEG:
+        reasons.append(f"fitted peaks span {hi - lo:.1f} deg 2theta; at least {CURVE_MIN_SPAN_DEG:.0f} deg is needed")
+    if not positive:
+        reasons.append("the fitted FWHM^2 is not positive over the covered range")
+    elif report["rms_deg"] > CURVE_MAX_RMS_DEG:
+        reasons.append(f"residual RMS {report['rms_deg']:.3f} deg exceeds {CURVE_MAX_RMS_DEG} deg")
+    report["usable"] = not reasons
+    report["reason"] = "; ".join(reasons) or None
+    return report
+
+
+def profile_key(profile):
+    """Canonical name of a registered (``user-<uuid>``) or bundled profile; raises when unknown."""
+    profile = str(profile)
+    if profile.startswith("user-"):
+        registered_profile_path(profile)
+        return profile
+    if Path(profile).name != profile or not (DEVICES / f"{profile}.geq").is_file():
+        raise FileNotFoundError("Instrument profile not found")
+    return profile
+
+
+def _curve_path(profile):
+    # Registered profiles are immutable and bundled ones read-only: the curve is a separate record.
+    return registry_directory() / "fwhm-curves" / f"{profile_key(profile)}.json"
+
+
+def load_fwhm_curve(profile):
+    """Stored FWHM curve of ``profile`` or None (also for an unknown profile)."""
+    try:
+        return json.loads(_curve_path(profile).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def save_fwhm_curve(profile, curve):
+    path = _curve_path(profile)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(curve), encoding="utf-8")
+    temporary.replace(path)
+
+
+def delete_fwhm_curve(profile):
+    """True when a stored curve was removed."""
+    path = _curve_path(profile)
+    if not path.is_file():
+        return False
+    path.unlink()
+    return True
+
+
+def stored_fwhm_curves():
+    """{profile: summary} of every stored curve, for the profile listing."""
+    curves = {}
+    for path in (registry_directory() / "fwhm-curves").glob("*.json"):
+        try:
+            curve = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        curves[path.stem] = {key: curve.get(key) for key in (
+            "standard", "measured_on", "two_theta_min", "two_theta_max", "rms_deg", "peak_count", "pattern")}
+    return curves

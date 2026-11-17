@@ -186,7 +186,7 @@ def peak_csv_bytes(rows: list[dict], columns=COLUMNS) -> bytes:
 
 OBSERVED_COLUMNS = (
     "two_theta_deg", "d_angstrom", "intensity", "intensity_rel_percent",
-    "fwhm_deg", "fwhm_esd_deg", "eta", "fit_note",
+    "fwhm_deg", "fwhm_esd_deg", "eta", "fit_note", "instrument_fwhm_deg",
     "phase", "phase_label", "hkl", "delta_two_theta_deg", "size_nm", "size_note",
 )
 ASSIGN_TOLERANCE_DEG = 0.1  # smallest assignment window; a broad calculated peak widens it to its FWHM
@@ -215,7 +215,8 @@ def observed_peak_rows(peaks, reflections: list[dict], *, wavelength, profiles=N
     phase, hkl and ``delta_two_theta_deg`` (observed − calculated). Otherwise those stay empty
     (unassigned). ``profiles`` (``peak_profile.fit_peak_profiles`` results in the frame's row
     order) give the Kα1 FWHM of each peak; ``size_nm`` is the Scherrer estimate
-    ``k·λ / (β·cos θ)`` with β the FWHM minus ``instrument_fwhm`` (``corrected_fwhm``).
+    ``k·λ / (β·cos θ)`` with β the FWHM minus ``instrument_fwhm`` (``corrected_fwhm``): a
+    constant in degrees or a function of 2θ (the instrument's FWHM curve).
     """
     lam = wavelength_angstrom(wavelength)
     widths, width = [], None
@@ -231,7 +232,8 @@ def observed_peak_rows(peaks, reflections: list[dict], *, wavelength, profiles=N
     for two_theta, intensity, fit in observed:
         fit = fit or {}
         fwhm, eta = fit.get("fwhm_deg"), fit.get("eta")
-        beta = corrected_fwhm(fwhm, eta, instrument_fwhm)
+        b = instrument_fwhm(two_theta) if callable(instrument_fwhm) else instrument_fwhm
+        beta = corrected_fwhm(fwhm, eta, b)
         row = {
             "two_theta_deg": round(two_theta, 4),
             "d_angstrom": round(lam / (2 * np.sin(np.radians(two_theta / 2))), 5) if lam else None,
@@ -241,6 +243,7 @@ def observed_peak_rows(peaks, reflections: list[dict], *, wavelength, profiles=N
             "fwhm_esd_deg": None if fit.get("fwhm_esd_deg") is None else round(fit["fwhm_esd_deg"], 4),
             "eta": None if eta is None else round(eta, 3),
             "fit_note": fit.get("fit_note") if profiles is not None else "not fitted",
+            "instrument_fwhm_deg": round(b, 4) if b else None,
             "phase": None, "phase_label": None, "hkl": None, "delta_two_theta_deg": None,
             "size_nm": round(scherrer_nm(beta, two_theta, lam, k), 1) if beta and lam else None,
             "size_note": BELOW_RESOLUTION if fwhm is not None and beta is None else None,
@@ -275,7 +278,8 @@ def williamson_hall(rows: list[dict], *, wavelength, k: float = 0.89, instrument
     """Williamson-Hall fit per phase of ``observed_peak_rows`` output (classical FWHM form).
 
     Points are the assigned peaks with a fitted FWHM: ``x = 4·sin θ`` and ``y = β·cos θ`` (β the
-    instrument-corrected FWHM in radians; ``y_err`` from the FWHM esd). A least-squares line
+    instrument-corrected FWHM in radians, ``instrument_fwhm`` as in ``observed_peak_rows``;
+    ``y_err`` from the FWHM esd). A least-squares line
     ``y = k·λ/D + ε·x`` is fitted when a phase has at least 4 such peaks spread over at least
     30° 2θ: ``size_nm = D``, ``strain_percent = 100·ε`` (0 when the slope is negative), R² and
     the standard errors of both. ``reliable`` is False without a fit, with R² below 0.5, an
@@ -291,12 +295,13 @@ def williamson_hall(rows: list[dict], *, wavelength, k: float = 0.89, instrument
             "phase": row["phase"], "phase_label": row.get("phase_label"), "points": [], "unresolved": 0,
         })
         fwhm, eta = row.get("fwhm_deg"), row.get("eta")
-        beta = corrected_fwhm(fwhm, eta, instrument_fwhm)
+        b = instrument_fwhm(row["two_theta_deg"]) if callable(instrument_fwhm) else instrument_fwhm
+        beta = corrected_fwhm(fwhm, eta, b)
         if not beta or not lam_nm:
             entry["unresolved"] += 1
             continue
         theta = np.radians(row["two_theta_deg"] / 2)
-        slope_of_correction = fwhm / beta if instrument_fwhm and (eta or 0) < 0.5 else 1.0
+        slope_of_correction = fwhm / beta if b and (eta or 0) < 0.5 else 1.0
         entry["points"].append({
             "hkl": row.get("hkl"), "two_theta": row["two_theta_deg"],
             "x": float(4 * np.sin(theta)), "y": float(np.radians(beta) * np.cos(theta)),

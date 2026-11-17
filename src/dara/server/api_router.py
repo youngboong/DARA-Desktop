@@ -23,7 +23,7 @@ from functools import lru_cache
 from io import BytesIO, StringIO
 from pathlib import Path
 from traceback import print_exc
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import numpy as np
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
@@ -810,6 +810,8 @@ async def instrument_profiles():
     """Return the instrument profiles actually bundled with this server."""
     from dara.instrument_profiles import device_detw, device_file_text, registered_profiles
 
+    from dara.instrument_profiles import stored_fwhm_curves
+
     custom = registered_profiles()
     profiles = _available_instrument_profiles() + list(custom)
     calibratable = []
@@ -820,7 +822,8 @@ async def instrument_profiles():
                 calibratable.append(name)
         except (OSError, ValueError):
             continue
-    return {"profiles": profiles, "details": custom, "calibratable": calibratable}
+    # fwhm_curves: {profile: summary} of the instrument FWHM curves measured from a standard
+    return {"profiles": profiles, "details": custom, "calibratable": calibratable, "fwhm_curves": stored_fwhm_curves()}
 
 
 @router.post("/pattern/inspect")
@@ -3215,17 +3218,51 @@ async def task_peaks_csv(task_id: int, sel: str | None = Query(None)):
     return _csv_response(peak_csv_bytes(rows), filename)
 
 
-async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrument_fwhm=None):
-    """``(task, rows, wavelength, selection, document, refinement)``: EFLECH peaks of the measured
-    pattern (the cached peaks of quick-refine diagnostics) with the Kα1 FWHM of a pseudo-Voigt fit
-    of each (cached per fit), each assigned to the nearest reflection of ``sel``, with Scherrer
-    sizes for the constant ``k`` and the instrument FWHM ``instrument_fwhm`` (°)."""
+def _instrument_correction(document, mode, instrument_fwhm):
+    """``(b, instrument)``: the instrument FWHM removed from each peak (None, a constant in degrees
+    or a function of 2θ from the task profile's FWHM curve) and the ``instrument`` block of the
+    response. Default mode: ``curve`` when the profile has a usable curve, else ``constant`` when
+    ``instrument_fwhm`` is given, else ``none``."""
+    from dara.instrument_profiles import caglioti_fwhm, load_fwhm_curve
+
+    settings = document.search_kwargs or {}
+    profile = str(settings.get("instrument_profile") or "")
+    curve = load_fwhm_curve(profile) if profile else None
+    # a curve measured with another anode does not describe this measurement
+    same_anode = curve and str(curve.get("wavelength")).lower() == str(settings.get("wavelength", "Cu")).lower()
+    curve = curve if same_anode and curve.get("usable") else None
+    mode = mode if isinstance(mode, str) else ("curve" if curve else "constant" if instrument_fwhm else "none")
+    instrument = {"mode": mode, "profile": profile or None, "standard": None, "measured_on": None,
+                  "two_theta_range": None, "clamped": 0}
+    if mode == "curve":
+        if curve is None:
+            raise HTTPException(status_code=400, detail=(
+                f"Instrument profile {profile or '(none)'} has no FWHM curve for this radiation: "
+                "measure a line-broadening standard for it first."))
+        instrument.update(standard=curve.get("standard"), measured_on=curve.get("measured_on"),
+                          two_theta_range=[curve["two_theta_min"], curve["two_theta_max"]])
+        return (lambda two_theta: caglioti_fwhm(curve, two_theta)[0]), instrument
+    if mode == "constant":
+        if not instrument_fwhm:
+            raise HTTPException(status_code=400, detail="instrument=constant needs instrument_fwhm (°).")
+        return instrument_fwhm, instrument
+    return None, instrument
+
+
+async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrument_fwhm=None, instrument=None):
+    """``(task, rows, wavelength, selection, document, refinement, settings)``: EFLECH peaks of the
+    measured pattern (the cached peaks of quick-refine diagnostics) with the Kα1 FWHM of a
+    pseudo-Voigt fit of each (cached per fit), each assigned to the nearest reflection of ``sel``,
+    with Scherrer sizes for the constant ``k`` after removing the instrument FWHM chosen by
+    ``instrument`` (``_instrument_correction``). ``settings`` holds k, instrument_fwhm,
+    instrument_profile and the ``instrument`` block."""
     from dara.export.peak_list import observed_peak_rows
     from dara.server import quick_refine
 
     k = k if isinstance(k, (int, float)) else 0.89  # direct calls leave the Query default objects
     instrument_fwhm = instrument_fwhm if isinstance(instrument_fwhm, (int, float)) else None
     task, reflections, wavelength, selection, document, refinement = await _peak_rows_of(task_id, sel)
+    correction, applied = _instrument_correction(document, instrument, instrument_fwhm)
     try:
         peaks = await asyncio.to_thread(quick_refine.task_peaks, task["uuid"], document)
         plot_data = refinement.plot_data
@@ -3238,46 +3275,49 @@ async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrume
         logger.warning("Peak detection of task %s failed", task_id, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Peak detection failed: {exc}") from exc
     rows = observed_peak_rows(peaks, reflections, wavelength=wavelength, profiles=profiles, k=k,
-                              instrument_fwhm=instrument_fwhm)
-    return task, rows, wavelength, selection, document, refinement
+                              instrument_fwhm=correction)
+    if applied["two_theta_range"]:  # peaks outside the standard's range got the edge value of the curve
+        low, high = applied["two_theta_range"]
+        applied["clamped"] = sum(row["fwhm_deg"] is not None and not low <= row["two_theta_deg"] <= high for row in rows)
+    settings = {"k": k, "instrument_fwhm": instrument_fwhm, "instrument_profile": applied["profile"] or "",
+                "instrument": applied}
+    return task, rows, wavelength, selection, document, refinement, settings
 
 
 _SCHERRER_K = Query(0.89, gt=0, le=2, description="Scherrer constant K (0.89: FWHM-based Scherrer)")
 _INSTRUMENT_FWHM = Query(None, ge=0, le=0.5, description="Instrument FWHM (°) removed before Scherrer / Williamson-Hall")
-
-
-def _size_settings(document, k, instrument_fwhm) -> dict:
-    return {
-        "k": k if isinstance(k, (int, float)) else 0.89,
-        "instrument_fwhm": instrument_fwhm if isinstance(instrument_fwhm, (int, float)) else None,
-        "instrument_profile": str((document.search_kwargs or {}).get("instrument_profile") or ""),
-    }
+_INSTRUMENT_MODE = Query(None, description=(
+    "Instrument broadening removed: curve (the profile's FWHM curve from a standard), constant (instrument_fwhm) "
+    "or none; default curve when the profile has one, else constant when instrument_fwhm is given, else none"))
+InstrumentMode = Literal["curve", "constant", "none"]
 
 
 @router.get("/task/{task_id}/observed-peaks")
 async def task_peaks_measured(
     task_id: int, sel: str | None = Query(None), k: float = _SCHERRER_K, instrument_fwhm: float | None = _INSTRUMENT_FWHM,
+    instrument: InstrumentMode | None = _INSTRUMENT_MODE,
 ):
     """Peaks of the measured pattern (EFLECH) with their fitted Kα1 FWHM and Scherrer size, each
     assigned to the nearest reflection of ``sel``."""
     from dara.export.peak_list import OBSERVED_COLUMNS
 
-    _, rows, wavelength, selection, document, _ = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm)
+    _, rows, wavelength, selection, _, _, settings = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm, instrument)
     return {
         "columns": list(OBSERVED_COLUMNS), "rows": rows, "wavelength": wavelength,
         "selection": selection,
         "unassigned": sum(row["phase"] is None for row in rows),
-        **_size_settings(document, k, instrument_fwhm),
+        **settings,
     }
 
 
 @router.get("/task/{task_id}/observed-peaks.csv")
 async def task_peaks_measured_csv(
     task_id: int, sel: str | None = Query(None), k: float = _SCHERRER_K, instrument_fwhm: float | None = _INSTRUMENT_FWHM,
+    instrument: InstrumentMode | None = _INSTRUMENT_MODE,
 ):
     from dara.export.peak_list import OBSERVED_COLUMNS, peak_csv_bytes
 
-    task, rows, _, selection, _, _ = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm)
+    task, rows, _, selection, _, _, _ = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm, instrument)
     filename = download_name(task_id, task["job"]["name"], "peaks_observed", selection, "csv")
     return _csv_response(peak_csv_bytes(rows, OBSERVED_COLUMNS), filename)
 
@@ -3285,19 +3325,21 @@ async def task_peaks_measured_csv(
 @router.get("/task/{task_id}/williamson-hall")
 async def task_williamson_hall(
     task_id: int, sel: str | None = Query(None), k: float = _SCHERRER_K, instrument_fwhm: float | None = _INSTRUMENT_FWHM,
+    instrument: InstrumentMode | None = _INSTRUMENT_MODE,
 ):
     """Williamson-Hall fit (β·cos θ against 4·sin θ) per phase of ``sel`` from the fitted FWHM of
     its assigned measured peaks, with the Rietveld crystallite size and microstrain for comparison."""
     from dara.export.peak_list import williamson_hall
 
-    _, rows, wavelength, selection, document, refinement = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm)
-    settings = _size_settings(document, k, instrument_fwhm)
+    _, rows, wavelength, selection, document, refinement, settings = await _measured_peak_rows_of(
+        task_id, sel, k, instrument_fwhm, instrument)
+    correction, _ = _instrument_correction(document, settings["instrument"]["mode"], settings["instrument_fwhm"])
     try:
         details = _phase_refinement_details(refinement)
     except Exception:  # noqa: BLE001 - the comparison values are an addition
         logger.debug("Rietveld size/strain of task %s unavailable", task_id, exc_info=True)
         details = {}
-    phases = williamson_hall(rows, wavelength=wavelength, k=settings["k"], instrument_fwhm=settings["instrument_fwhm"])
+    phases = williamson_hall(rows, wavelength=wavelength, k=settings["k"], instrument_fwhm=correction)
     for entry in phases:
         detail = details.get(entry["phase"]) or {}
         grain = next(iter(detail.get("grain_sizes") or []), None) or {}

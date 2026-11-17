@@ -173,6 +173,12 @@ def _run_calibration(job, device, pattern_path, base):
 
     try:
         fit = instrument_profiles.calibrate_detw(device, pattern_path, job["standard"], job["wavelength"], progress)
+        try:  # the FWHM curve is an addition: its failure must not fail the DetW calibration
+            from dara.xrd import load_pattern
+
+            curve = _measure_curve(load_pattern(pattern_path), pattern_path.name, job["standard"], job["wavelength"])
+        except Exception as error:  # noqa: BLE001
+            curve = {"usable": False, "reason": f"FWHM curve failed: {error}"[:300]}
         day = datetime.now(timezone.utc).date().isoformat()
         suffix = f" · calibrated ({job['standard']}, {day})"
         calibration = {"standard": job["standard"], "pattern": pattern_path.name, "source_profile": job["profile"],
@@ -180,7 +186,9 @@ def _run_calibration(job, device, pattern_path, base):
                        "rwp": fit["rwp"], "apparent_size_nm": fit["apparent_size_nm"],
                        "curve": [[round(d, 5), r] for d, r in fit["curve"]], "date": day,
                        # Best value at the end of the scanned range: the true minimum may lie outside it.
-                       "at_scan_edge": fit["detw"] in (min(d for d, _ in fit["curve"]), max(d for d, _ in fit["curve"]))}
+                       "at_scan_edge": fit["detw"] in (min(d for d, _ in fit["curve"]), max(d for d, _ in fit["curve"])),
+                       # instrument FWHM curve (Caglioti) of the standard, stored apart when usable
+                       "fwhm_curve": bool(curve["usable"]), "fwhm_curve_note": curve["reason"]}
         files = {".geq": fit["geq"], **({".ger": fit["ger"]} if fit["ger"] else {}), ".sav": fit["sav"]}
         notes = (f"DetW fitted to {job['standard']} ({pattern_path.name}): {fit['detw_start']:g} -> {fit['detw']:.4g} mm, "
                  f"Rwp {fit['rwp_start']:.2f} -> {fit['rwp']:.2f} %"
@@ -188,11 +196,67 @@ def _run_calibration(job, device, pattern_path, base):
         label = base["label"].split(" · calibrated (")[0]  # recalibration replaces the old suffix
         stored = _store(label[:120 - len(suffix)] + suffix, base["geometry"], base["radiation"], notes,
                         False, "", files, {"calibration": calibration})
-        job.update(status="done", result=stored)
+        if curve["usable"]:
+            try:
+                instrument_profiles.save_fwhm_curve(stored["id"], curve)
+            except OSError as error:
+                curve.update(usable=False, reason=f"FWHM curve not stored: {error}")
+        job.update(status="done", result=stored, fwhm_curve=curve)
     except Exception as error:  # noqa: BLE001 - reported to the user through the job
         job.update(status="failed", error=str(error)[-500:])
     finally:
         shutil.rmtree(pattern_path.parent, ignore_errors=True)
+
+
+def _measure_curve(data, pattern_name, standard, wavelength):
+    curve = instrument_profiles.fwhm_curve_from_standard(data.angles, data.intensities, standard, wavelength)
+    curve.update(pattern=pattern_name, measured_on=datetime.now(timezone.utc).date().isoformat())
+    return curve
+
+
+def _profile_key(profile):
+    try:
+        return instrument_profiles.profile_key(profile)
+    except (ValueError, FileNotFoundError) as error:
+        raise HTTPException(404, "Instrument profile not found.") from error
+
+
+@router.post("/instrument-profiles/{profile}/fwhm-curve")
+async def measure_fwhm_curve(
+    profile: str,
+    standard: Literal["Si", "LaB6", "Al2O3"] = Form(...),
+    wavelength: Literal["Cu", "Co", "Cr", "Fe", "Mo"] = Form("Cu"),
+    pattern_file: UploadFile = File(...),
+):
+    """Instrument FWHM curve of a profile from a measured line-broadening standard; stored on the
+    profile (replacing an earlier one) when usable. Returns the full report with ``stored``."""
+    from dara.xrd import load_pattern
+
+    key = _profile_key(profile)
+    with tempfile.TemporaryDirectory(prefix="dara-standard-") as folder:
+        pattern_path = Path(folder) / Path(pattern_file.filename or "standard.xy").name
+        pattern_path.write_bytes(await pattern_file.read(64 * 1024 * 1024))
+        try:
+            data = load_pattern(pattern_path)
+        except Exception as error:
+            raise HTTPException(400, f"Could not read pattern: {error}") from error
+    curve = await run_in_threadpool(_measure_curve, data, pattern_path.name, standard, wavelength)
+    if curve["usable"]:
+        instrument_profiles.save_fwhm_curve(key, curve)
+    return {**curve, "profile": key, "stored": bool(curve["usable"])}
+
+
+@router.get("/instrument-profiles/{profile}/fwhm-curve")
+async def fwhm_curve(profile: str):
+    curve = instrument_profiles.load_fwhm_curve(_profile_key(profile))
+    if curve is None:
+        raise HTTPException(404, "This profile has no FWHM curve.")
+    return {**curve, "profile": profile}
+
+
+@router.delete("/instrument-profiles/{profile}/fwhm-curve")
+async def delete_fwhm_curve(profile: str):
+    return {"profile": profile, "deleted": instrument_profiles.delete_fwhm_curve(_profile_key(profile))}
 
 
 @router.get("/instrument-profiles/calibrate/{job_id}")
