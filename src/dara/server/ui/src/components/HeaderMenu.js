@@ -3,6 +3,11 @@ import styled from 'styled-components';
 import { useEffect, useState } from 'react';
 import { Link } from 'gatsby';
 import React from 'react';
+import UpdateDialog from './UpdateDialog';
+import { UPDATE_CHECK_MS, showUpdateTag } from './appUpdate.mjs';
+
+const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
+const PAGES = ['submit', 'results', 'series', 'tutorial'];
 
 const StyledMenu = styled(Menu)`
   border-bottom: none;
@@ -17,23 +22,40 @@ function keyForPath(pathname) {
 
 function HeaderMenu() {
   const [ selected_key, set_selected_key ] = useState('');
+  const [ update, set_update ] = useState(null);
+  const [ update_open, set_update_open ] = useState(false);
 
   // Read the path after mount so the server-rendered markup matches the first client render.
   useEffect(() => { set_selected_key(keyForPath(window.location.pathname)); }, []);
 
+  // Version and update state; the server caches the GitHub check for 6 h.
+  useEffect(() => {
+    const load = () => fetch(`${URL}/update`).then(response => (response.ok ? response.json() : null))
+      .then(data => { if (data) set_update(data); }).catch(() => {});
+    load();
+    const timer = setInterval(load, UPDATE_CHECK_MS);
+    return () => clearInterval(timer);
+  }, []);
+
   const handleSelect = ({ key }) => {
-    if (key !== 'doc') {  // the documentation link leaves the app
+    if (PAGES.includes(key)) {  // documentation leaves the app; version and update items open no page
       set_selected_key(key);
     }
   };
 
+  const handleClick = ({ key }) => {
+    if (key === 'update' || key === 'check-update') set_update_open(true);
+  };
+
   return (
+    <>
     <StyledMenu mode='horizontal' 
       activeKey={[selected_key]}
       defaultActiveFirst={[selected_key]}
       selectedKeys={[selected_key]}
       defaultSelectedKeys={[selected_key]}
       onSelect={handleSelect}
+      onClick={handleClick}
       inlineCollapsed={false}
       disabledOverflow
     >
@@ -46,6 +68,11 @@ function HeaderMenu() {
       <Menu.Item key='series' title='Series'>
         <Link to='/series'>Series</Link>
       </Menu.Item>
+      {showUpdateTag(update) ? (
+        <Menu.Item key='update' title={`DARA ${update.latest} is available`}>
+          <span className='dara-update-tag'>Update available</span>
+        </Menu.Item>
+      ) : null}
       <Menu.SubMenu key='help' title='Help'>
         <Menu.Item key='tutorial' title='Tutorial'>
           <Link to='/tutorial'>Tutorial</Link>
@@ -53,8 +80,15 @@ function HeaderMenu() {
         <Menu.Item key='doc' title='Documentation'>
           <a href="https://CederGroupHub.github.io/dara/" target="_blank" rel="noopener noreferrer">Documentation</a>
         </Menu.Item>
+        {update ? <Menu.Divider /> : null}
+        {update?.packaged ? <Menu.Item key='check-update'>Check for updates</Menu.Item> : null}
+        {update ? <Menu.Item key='version' disabled className='dara-version-item'>{`DARA ${update.current}`}</Menu.Item> : null}
       </Menu.SubMenu>
     </StyledMenu>
+    {update?.packaged ? (
+      <UpdateDialog open={update_open} onClose={() => set_update_open(false)} status={update} onStatus={set_update} />
+    ) : null}
+    </>
   )
 }
 

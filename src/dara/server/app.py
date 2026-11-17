@@ -20,6 +20,7 @@ from dara.server.candidate_comparison_router import router as candidate_comparis
 from dara.server import quick_refine
 from dara.server.quick_refine import router as quick_refine_router
 from dara.server.versions_router import router as versions_router
+from dara.server.update_router import router as update_router
 from dara.server.setting import get_dara_server_settings
 from dara.server.worker import worker_process
 
@@ -133,6 +134,7 @@ app.include_router(instrument_router)
 app.include_router(candidate_comparison_router)
 app.include_router(quick_refine_router)
 app.include_router(versions_router)
+app.include_router(update_router)
 app.include_router(presence.router)
 
 _OPTIONAL_ROUTERS = (

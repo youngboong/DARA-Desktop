@@ -233,3 +233,44 @@ code {
   font-weight: 600;
   color: var(--dara-text);
 }
+
+/* In-app update (HeaderMenu, UpdateDialog): a quiet outlined tag on the green bar, ochre like the nav underline. */
+.dara-update-tag {
+  display: inline-block;
+  padding: 0 6px;
+  font-size: var(--dara-font-12);
+  line-height: 20px;
+  color: var(--dara-shell-mark);
+  border: 1px solid var(--dara-shell-mark);
+  border-radius: var(--dara-radius);
+  white-space: nowrap;
+}
+
+.ant-menu-item:hover .dara-update-tag {
+  color: var(--dara-shell-text);
+  border-color: var(--dara-shell-text);
+}
+
+.dara-version-item.ant-menu-item-disabled {
+  font-size: var(--dara-font-12);
+  font-variant-numeric: tabular-nums;
+  color: var(--dara-text-hint) !important;
+  cursor: default;
+}
+
+/* Release notes are plain text from GitHub: wrapped, scrolled, never rendered as HTML. */
+.dara-update-notes {
+  max-height: 240px;
+  margin: 0;
+  padding: var(--dara-space-2) var(--dara-space-3);
+  overflow: auto;
+  font-family: inherit;
+  font-size: var(--dara-font-13);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--dara-text);
+  background: var(--dara-surface-sunken);
+  border: 1px solid var(--dara-border);
+  border-radius: var(--dara-radius);
+}

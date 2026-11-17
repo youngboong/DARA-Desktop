@@ -13,6 +13,12 @@
 ;   /NOLIBRARY    do not download it (also unticks the box in the wizard)
 ;   /LIBRARYELEMENTS=Li,Co,O   download only these elements instead of the recommended library
 ;                 (tests, small offline mirrors); a silent install still needs /LIBRARY as well
+;   /UPDATE       in-app update (DARA.exe runs "/SILENT /SUPPRESSMSGBOXES /NOLIBRARY /UPDATE", then
+;                 closes): wait until that DARA.exe has exited, install into the existing folder without
+;                 any page or question, skip the key, BGMN and library steps (DARA.exe does them when it
+;                 starts) and start the new DARA.exe
+; /DTestBuild (build_dist.ps1 -TestAppId) builds a copy for update tests with its own AppId, folder,
+; mutexes, data folder and shortcuts, so it never upgrades or closes the real DARA.
 ; The Materials Project key is never taken on the command line: it is asked in the wizard or
 ; on the first start of DARA.
 
@@ -22,6 +28,13 @@
 #ifndef LibStructures
   #error The structure-library numbers (/DLib...) are required: build with packaging\build_dist.ps1
 #endif
+#ifdef TestBuild
+  #define DaraName "DARA-UpdateTest"
+  #define DaraAppId "{{9F3A2C61-7B4E-4D2A-8C15-2E6B0A9D4F73}"
+#else
+  #define DaraName "DARA"
+  #define DaraAppId "{{6C0E5D7B-2F0A-4E52-9B86-3D1A7E4C8B21}"
+#endif
 #ifndef MaxAppDirLength
   ; MAX_PATH minus the longest relative path inside dist\DARA (build_dist.ps1 measures it).
   #define MaxAppDirLength 100
@@ -29,14 +42,14 @@
 
 [Setup]
 ; Fixed AppId: a newer installer upgrades the existing installation in place.
-AppId={{6C0E5D7B-2F0A-4E52-9B86-3D1A7E4C8B21}
-AppName=DARA
+AppId={#DaraAppId}
+AppName={#DaraName}
 AppVersion={#AppVersion}
-AppVerName=DARA {#AppVersion}
+AppVerName={#DaraName} {#AppVersion}
 AppPublisher=DARA
 AppPublisherURL=https://github.com/CederGroupHub/dara
-DefaultDirName={localappdata}\Programs\DARA
-DefaultGroupName=DARA
+DefaultDirName={localappdata}\Programs\{#DaraName}
+DefaultGroupName={#DaraName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
@@ -46,18 +59,18 @@ OutputDir={#OutputDir}
 OutputBaseFilename=DARA-Setup-{#AppVersion}
 SetupIconFile={#RepoRoot}\logo\dara.ico
 UninstallDisplayIcon={app}\DARA.exe
-UninstallDisplayName=DARA {#AppVersion}
+UninstallDisplayName={#DaraName} {#AppVersion}
 LicenseFile={#SourceDir}\LICENSE.txt
 Compression=lzma2/max
 SolidCompression=yes
 LZMANumBlockThreads=4
 WizardStyle=modern
 ; DARA.exe holds this mutex while it runs; setup and uninstall ask the user to close it first.
-AppMutex=DARA-Desktop-SingleInstance
+AppMutex={#DaraName}-Desktop-SingleInstance
 CloseApplications=yes
 ; Held while setup runs: a second setup asks to close this one, and DARA.exe does not offer to
 ; continue the library download that this setup is still running.
-SetupMutex=DARA-Setup-Running
+SetupMutex={#DaraName}-Setup-Running
 ; The Materials Project key is a user environment variable: tell Explorer it changed.
 ChangesEnvironment=yes
 
@@ -95,25 +108,29 @@ Type: filesandordirs; Name: "{app}\tools\rsync"
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\DARA"; Filename: "{app}\DARA.exe"
-Name: "{autodesktop}\DARA"; Filename: "{app}\DARA.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#DaraName}"; Filename: "{app}\DARA.exe"
+Name: "{autodesktop}\{#DaraName}"; Filename: "{app}\DARA.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\DARA.exe"; Description: "{cm:LaunchProgram,DARA}"; Flags: nowait postinstall skipifsilent
+; In-app update: silent, so the entry above is skipped; reopen DARA as it was before.
+Filename: "{app}\DARA.exe"; Flags: nowait; Check: IsUpdate
 
 [UninstallDelete]
 ; Created by DARA.exe at run time inside the install folder: the downloaded BGMN programs,
-; Python caches, the CA bundle and launcher logs. Then the WebView2 cache and launcher logs.
+; Python caches, the CA bundle and launcher logs. Then the WebView2 cache, launcher logs and
+; downloaded updates.
 Type: filesandordirs; Name: "{app}\src"
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\scripts"
 Type: filesandordirs; Name: "{app}\tools"
 Type: filesandordirs; Name: "{app}\artifacts"
 Type: dirifempty; Name: "{app}"
-Type: filesandordirs; Name: "{localappdata}\DARA\WebView2"
-Type: filesandordirs; Name: "{localappdata}\DARA\logs"
-Type: files; Name: "{localappdata}\DARA\structure-library-pending"
-Type: files; Name: "{localappdata}\DARA\structure-library-failed"
+Type: filesandordirs; Name: "{localappdata}\{#DaraName}\WebView2"
+Type: filesandordirs; Name: "{localappdata}\{#DaraName}\logs"
+Type: filesandordirs; Name: "{localappdata}\{#DaraName}\updates"
+Type: files; Name: "{localappdata}\{#DaraName}\structure-library-pending"
+Type: files; Name: "{localappdata}\{#DaraName}\structure-library-failed"
 
 [Code]
 const
@@ -174,9 +191,35 @@ begin
       Result := True;
 end;
 
+function IsUpdate: Boolean;
+begin
+  Result := HasSwitch('/UPDATE');
+end;
+
+{ Runs before the AppMutex check, which would end a silent setup at once while DARA.exe still
+  runs. DARA.exe closes right after starting this setup; once its mutex is gone the server it
+  ran in a kill-on-close job has been stopped too. }
+function InitializeSetup: Boolean;
+var
+  I: Integer;
+begin
+  Result := True;
+  if not IsUpdate then
+    Exit;
+  I := 0;
+  while CheckForMutexes('{#DaraName}-Desktop-SingleInstance') and (I < 240) do
+  begin
+    Sleep(250);
+    I := I + 1;
+  end;
+  Log(Format('Update: waited %d ms for DARA.exe to close', [I * 250]));
+  { Let Windows finish ending the server processes before their files are replaced. }
+  Sleep(1500);
+end;
+
 function DataDir: String;
 begin
-  Result := ExpandConstant('{localappdata}\DARA');
+  Result := ExpandConstant('{localappdata}\{#DaraName}');
 end;
 
 { Where the bundled app keeps downloaded structures (structure_db.cod_cache_dir without a
@@ -564,7 +607,8 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurStep = ssPostInstall then
+  { An update keeps the saved key, BGMN and the library marker as they are. }
+  if (CurStep = ssPostInstall) and not IsUpdate then
   begin
     SaveKey;
     RunDownloads;

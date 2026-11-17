@@ -125,6 +125,9 @@ def main(argv=None) -> int:
     # that an (editable) install would have written, without installing a second copy of dara.
     project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))["project"]
     dist_info = site_packages / f"dara_xrd-{project['version']}.dist-info"
+    for stale in site_packages.glob("dara_xrd-*.dist-info"):  # a reused runtime keeps the previous version's
+        if stale != dist_info:
+            shutil.rmtree(stale)
     dist_info.mkdir(exist_ok=True)
     (dist_info / "METADATA").write_text(
         f"Metadata-Version: 2.1\nName: {project['name']}\nVersion: {project['version']}\n", encoding="utf-8")

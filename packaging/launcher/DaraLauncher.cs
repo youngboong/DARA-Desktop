@@ -29,9 +29,17 @@ namespace Dara.Desktop
 {
     static class Program
     {
+#if DARA_TEST_BUILD
+        // build_dist.ps1 -TestAppId: a copy for update tests that never meets the real DARA (mutexes, data folder).
+        public const string Name = "DARA-UpdateTest";
+#else
+        public const string Name = "DARA";
+#endif
         // Also used by the installer (AppMutex) to ask the user to close DARA before an upgrade.
-        public const string MutexName = "DARA-Desktop-SingleInstance";
+        public const string MutexName = Name + "-Desktop-SingleInstance";
         public static readonly int ShowMessage = Native.RegisterWindowMessage("DARA-Desktop-Show");
+        // Posted by the server (src\dara\server\update_router.py) once a downloaded update is verified.
+        public static readonly int UpdateMessage = Native.RegisterWindowMessage("DARA-Desktop-Update");
 
         [STAThread]
         static int Main(string[] args)
@@ -68,7 +76,7 @@ namespace Dara.Desktop
         static readonly string[] IsolatedVariables = { "PYTHONHOME", "PYTHONPATH", "VIRTUAL_ENV", "CONDA_PREFIX", "PYTHONSTARTUP" };
 
         readonly string appDir = Path.GetDirectoryName(Application.ExecutablePath);
-        readonly string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "DARA");
+        readonly string dataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), Program.Name);
         readonly bool forceKeyPrompt;
         readonly Dictionary<string, string> pythonEnvironment = new Dictionary<string, string>();
 
@@ -442,7 +450,7 @@ namespace Dara.Desktop
         // The installer holds this mutex (SetupMutex in DARA.iss) while it runs.
         static bool SetupIsRunning()
         {
-            try { using (Mutex.OpenExisting("DARA-Setup-Running")) return true; }
+            try { using (Mutex.OpenExisting(Program.Name + "-Setup-Running")) return true; }
             catch (WaitHandleCannotBeOpenedException) { return false; }
             catch (UnauthorizedAccessException) { return true; }
         }
@@ -512,6 +520,9 @@ namespace Dara.Desktop
             // Window lifetime decides the server lifetime here, not the browser heartbeat.
             pythonEnvironment["DARA_IDLE_SHUTDOWN"] = "0";
             pythonEnvironment["DARA_SERVER_HOST"] = "127.0.0.1";
+            // In-app updates: where the server downloads the installer and which window runs it (InstallUpdate).
+            pythonEnvironment["DARA_UPDATE_DIR"] = Path.Combine(dataDir, "updates");
+            pythonEnvironment["DARA_LAUNCHER_WINDOW"] = Handle.ToInt64().ToString();
             PruneServerLogs();
             server = StartPython("-u " + Quote(Path.Combine(appDir, "scripts", "launch_dara_web.py")) +
                 " --no-browser --port " + port + " --timeout " + StartupTimeoutSeconds, delegate(string line)
@@ -756,7 +767,50 @@ namespace Dara.Desktop
                 Native.SetForegroundWindow(Handle);
                 return;
             }
+            if (m.Msg == Program.UpdateMessage && Program.UpdateMessage != 0)
+            {
+                BeginInvokeSafe(InstallUpdate);
+                return;
+            }
             base.WndProc(ref m);
+        }
+
+        // The server downloaded and verified an update and wrote updates\install-request.txt (installer
+        // path, SHA-256). The installer is started from here, outside the kill-on-close job, so it outlives
+        // DARA.exe. With /UPDATE it waits until this process has exited (and with it the server), installs
+        // without questions and starts the new DARA.exe (DARA.iss).
+        void InstallUpdate()
+        {
+            string folder = Path.Combine(dataDir, "updates");
+            string request = Path.Combine(folder, "install-request.txt");
+            try
+            {
+                var lines = File.ReadAllLines(request);
+                TryDelete(request);
+                string installer = Path.GetFullPath(lines[0].Trim());
+                if (!string.Equals(Path.GetDirectoryName(installer), folder, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("The installer is not in " + folder + ".");
+                // Open without write sharing: the file cannot change between the hash check and the start.
+                using (var stream = new FileStream(installer, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    string actual;
+                    using (var sha = System.Security.Cryptography.SHA256.Create())
+                        actual = BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "");
+                    if (!actual.Equals(lines[1].Trim(), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidDataException("The checksum of " + installer + " does not match the release.");
+                    var info = new ProcessStartInfo(installer, "/SILENT /SUPPRESSMSGBOXES /NOLIBRARY /UPDATE");
+                    info.UseShellExecute = false;
+                    Process.Start(info).Dispose();
+                }
+                Log("Update: started " + installer);
+                closeConfirmed = true;   // the page already asked about running analyses
+                Close();
+            }
+            catch (Exception error)
+            {
+                Log("Update failed: " + error);
+                MessageBox.Show(this, "The update could not be started: " + error.Message, "DARA - Update");
+            }
         }
 
         // ---------------------------------------------------------------------------------------

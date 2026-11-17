@@ -12,7 +12,8 @@
 #>
 param(
     [switch]$SkipInstaller,  # stop after dist\DARA (faster when only testing the app)
-    [switch]$ReuseRuntime    # keep dist\DARA\python as it is (same dependencies): restage sources, DARA.exe, installer
+    [switch]$ReuseRuntime,   # keep dist\DARA\python as it is (same dependencies): restage sources, DARA.exe, installer
+    [switch]$TestAppId       # update tests only: DARA-UpdateTest with its own AppId, folder and mutexes (DARA.iss)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -251,7 +252,7 @@ $numeric = ($version -replace '[^0-9.].*$', '')
 $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 & $csc /nologo /target:winexe /platform:x64 /optimize+ "/out:$(Join-Path $App 'DARA.exe')" `
     "/win32icon:$(Join-Path $Root 'logo\dara.ico')" "/win32manifest:$(Join-Path $PSScriptRoot 'launcher\app-manifest.xml')" `
-    /r:System.Windows.Forms.dll /r:System.Drawing.dll "/r:$($sdkFiles[0])" "/r:$($sdkFiles[1])" `
+    /r:System.Windows.Forms.dll /r:System.Drawing.dll "/r:$($sdkFiles[0])" "/r:$($sdkFiles[1])" @(if ($TestAppId) { '/define:DARA_TEST_BUILD' }) `
     (Join-Path $PSScriptRoot 'launcher\DaraLauncher.cs') $assemblyInfo
 if ($LASTEXITCODE -ne 0) { throw 'csc failed to build DARA.exe.' }
 Write-Host ("dist\DARA: {0} MB" -f (Get-FolderMB $App))
@@ -272,7 +273,7 @@ if (-not (Test-Path -LiteralPath $iscc)) {
 }
 
 Write-Phase 'Building the installer'
-& $iscc /Q "/DAppVersion=$version" "/DSourceDir=$App" "/DOutputDir=$Dist" "/DRepoRoot=$Root" @(Get-InstallerDefines) (Join-Path $PSScriptRoot 'DARA.iss')
+& $iscc /Q "/DAppVersion=$version" "/DSourceDir=$App" "/DOutputDir=$Dist" "/DRepoRoot=$Root" @(Get-InstallerDefines) @(if ($TestAppId) { '/DTestBuild' }) (Join-Path $PSScriptRoot 'DARA.iss')
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed to build the installer.' }
 $setup = Join-Path $Dist "DARA-Setup-$version.exe"
 Write-Host ("{0}: {1:N1} MB" -f $setup, ((Get-Item -LiteralPath $setup).Length / 1MB))
