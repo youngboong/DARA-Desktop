@@ -239,6 +239,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   const [showDiagnostics, setShowDiagnostics] = React.useState(true);
   const [showPhaseProfiles, setShowPhaseProfiles] = React.useState(false);
   const [showReflections, setShowReflections] = React.useState(true);
+  const [hklLabels, setHklLabels] = React.useState(false);
+  const [dAxis, setDAxis] = React.useState(false);
   const [resetKey, setResetKey] = React.useState(0);
   const [selection, setSelection] = React.useState({});
   const [yRange, setYRange] = React.useState(null);
@@ -307,10 +309,10 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   const labelKey = (labeled || []).map((trace, index) => [trace?.name, phaseColor && ['phase-profile', 'reflection'].includes(plot.data[index]?.meta)
     ? phaseColor(plot.data[index].legendgroup) : ''].join('\u0000')).join('\u0001');
   const view = React.useMemo(() => (plot ? buildRefinementView({ ...plot, data: labeled }, {
-    selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title,
+    selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis,
   }) : null),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [plot, labelKey, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title]);
+  [plot, labelKey, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis]);
   // The edited curve and its anchors are two extra traces; without editing the key is constant, so
   // the plot is not redrawn. During a drag RefinementPlotly restyles them directly.
   const editing = Boolean(anchorEdit);
@@ -425,6 +427,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       <Tooltip title="Bragg positions"><Text>Bragg</Text></Tooltip><Switch aria-label="Bragg positions" checked={showReflections} onChange={value => { setShowReflections(value); setYRange(null); }} />
       <Tooltip title="Unexplained-peak and diagnostic markers"><Text>Markers</Text></Tooltip><Switch aria-label="Peak markers" checked={showDiagnostics} onChange={setShowDiagnostics} />
       <Tooltip title="Fit the intensity axis to the visible 2θ range (F)"><Text>Auto-Y</Text></Tooltip><Switch aria-label="Auto-Y" checked={fitY} onChange={value => { setFitY(value); setYRange(null); }} />
+      <Tooltip title="Miller indices of the strongest reflections of the shown phases; zoom in to label more"><Text>hkl labels</Text></Tooltip><Switch aria-label="hkl labels" checked={hklLabels} onChange={value => { setHklLabels(value); setYRange(null); }} />
+      {wavelength > 0 ? <><Tooltip title="d-spacing axis (Å, Kα1) along the top of the pattern"><Text>d axis</Text></Tooltip><Switch aria-label="d axis" checked={dAxis} onChange={setDAxis} /></> : null}
       <Button onClick={resetView}>Reset zoom</Button>
       <Tooltip title={`Left-drag to zoom into a box (2θ only while Auto-Y is on), Shift- or right-drag to pan 2θ, mouse wheel to zoom 2θ at the cursor, double-click or Reset zoom to show the whole pattern. Zoom and pan stop at the measured range. Click a phase in the legend to show its profile and Bragg positions; hover for 2θ, d-spacing and hkl. The lower panel shows observed − calculated.${onPeakClick ? ' Click a missing-peak marker or an observed point to search references for that peak (Shift+click to select several).' : ''}`}>
         <InfoCircleOutlined aria-label="Plot navigation help" style={{ color: 'var(--dara-text-hint)' }} />

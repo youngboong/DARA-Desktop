@@ -3,7 +3,7 @@ import { Alert, Button, Checkbox, Dropdown, Space, Tag, Tooltip } from 'antd';
 import { DownloadOutlined, DownOutlined } from '@ant-design/icons';
 import { FormulaText } from './ChemicalFormula';
 import {
-  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, overallAlertType,
+  EXPORT_FORMATS, PATTERN_FILES, displacementTag, evidenceLines, exportHref, figureHref, overallAlertType, patternHref,
   overallColor, overallShortLabel, reasonsText, screeningTags, verdictColor,
 } from './confidence.mjs';
 
@@ -97,6 +97,8 @@ export function DownloadMenu({ taskId, selection, size, blocked = null, reportBl
     { key: 'svg', label: <a href={figureHref(API, taskId, 'svg', selection, hkl)}>Figure (SVG)</a> },
     { key: 'export', label: 'Export for…', children: EXPORT_FORMATS.map(format => ({
       key: `export:${format.key}`, label: <a href={exportHref(API, taskId, format.key, selection)}>{format.label}</a> })) },
+    { key: 'pattern', label: 'Pattern data', children: PATTERN_FILES.map(file => ({
+      key: `pattern:${file.key}`, label: <a href={patternHref(API, taskId, file.path, selection)}>{file.label}</a> })) },
     ...extraItems.map(({ onClick, ...item }) => item),
     { type: 'divider' },
     { key: 'hkl', label: <Checkbox checked={hkl}>Miller indices on the figure</Checkbox> },

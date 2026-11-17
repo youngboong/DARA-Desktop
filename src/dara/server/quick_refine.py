@@ -1707,22 +1707,27 @@ async def submit_quick_refine(task_id: int, request: QuickRefineRequest) -> dict
     }
 
 
+def task_peaks(task_uuid: str, document) -> pd.DataFrame:
+    """EFLECH peaks (``2theta``, ``intensity``) of a task's pattern with its own wavelength,
+    instrument profile and analysis range (cached on disk)."""
+    task_dir = task_cache(task_uuid)
+    pattern = _ensure_pattern(document, task_dir)
+    kwargs = {
+        key: value
+        for key, value in (document.search_kwargs or {}).items()
+        if key in {"wavelength", "instrument_profile"}
+    }
+    return _observed_peaks(
+        task_dir, pattern, kwargs, (document.search_kwargs or {}).get("refinement_params")
+    )
+
+
 def warm_task(record: dict, raw: dict | None) -> None:
     """Pre-decode the document and pre-compute the observed peaks (best effort)."""
 
     def work():
         try:
-            document = _DOCUMENTS.get(record["uuid"], raw)
-            task_dir = task_cache(record["uuid"])
-            pattern = _ensure_pattern(document, task_dir)
-            kwargs = {
-                key: value
-                for key, value in (document.search_kwargs or {}).items()
-                if key in {"wavelength", "instrument_profile"}
-            }
-            _observed_peaks(
-                task_dir, pattern, kwargs, (document.search_kwargs or {}).get("refinement_params")
-            )
+            task_peaks(record["uuid"], _DOCUMENTS.get(record["uuid"], raw))
         except Exception:  # noqa: BLE001
             logger.debug("Quick-refine warm-up failed", exc_info=True)
 

@@ -169,11 +169,59 @@ def _hkl_text(hkl) -> str | None:
     return None if hkl is None else " ".join(str(value) for value in hkl)
 
 
-def peak_csv_bytes(rows: list[dict]) -> bytes:
-    """CSV of ``rows`` (UTF-8 with BOM, header = ``COLUMNS``)."""
+def peak_csv_bytes(rows: list[dict], columns=COLUMNS) -> bytes:
+    """CSV of ``rows`` (UTF-8 with BOM, header = ``columns``)."""
     buffer = io.StringIO(newline="")
     writer = csv.writer(buffer, lineterminator="\r\n")
-    writer.writerow(COLUMNS)
+    writer.writerow(columns)
     for row in rows:
-        writer.writerow(["" if row.get(key) is None else row[key] for key in COLUMNS])
+        writer.writerow(["" if row.get(key) is None else row[key] for key in columns])
     return buffer.getvalue().encode("utf-8-sig")
+
+
+OBSERVED_COLUMNS = (
+    "two_theta_deg", "d_angstrom", "intensity", "intensity_rel_percent",
+    "phase", "phase_label", "hkl", "delta_two_theta_deg",
+)
+ASSIGN_TOLERANCE_DEG = 0.1  # smallest assignment window; a broad calculated peak widens it to its FWHM
+
+
+def observed_peak_rows(peaks, reflections: list[dict], *, wavelength) -> list[dict]:
+    """One row per observed peak (EFLECH ``2theta``/``intensity`` frame), ordered by 2theta.
+
+    ``intensity`` is EFLECH's integrated peak intensity; ``d`` comes from Bragg's law with the
+    Kα1 wavelength. Each peak is assigned to the nearest reflection of ``reflections`` (rows of
+    ``peak_rows``) when it lies within max(0.1°, FWHM of that reflection's calculated peak):
+    phase, hkl and ``delta_two_theta_deg`` (observed − calculated). Otherwise those stay empty
+    (unassigned).
+    """
+    lam = wavelength_angstrom(wavelength)
+    widths, width = [], None
+    for row in reflections:  # rows of one peak carry its FWHM on the first row only
+        if row.get("fwhm_note") != "same peak as row above":
+            width = row.get("fwhm_deg")
+        widths.append(width or 0.0)
+    angles = np.array([row["two_theta_deg"] for row in reflections], dtype=float)
+    observed = sorted(zip(map(float, peaks["2theta"]), map(float, peaks["intensity"])))
+    maximum = max((value for _, value in observed), default=0.0)
+    rows = []
+    for two_theta, intensity in observed:
+        row = {
+            "two_theta_deg": round(two_theta, 4),
+            "d_angstrom": round(lam / (2 * np.sin(np.radians(two_theta / 2))), 5) if lam else None,
+            "intensity": round(intensity, 3),
+            "intensity_rel_percent": round(100 * intensity / maximum, 2) if maximum > 0 else None,
+            "phase": None, "phase_label": None, "hkl": None, "delta_two_theta_deg": None,
+        }
+        if angles.size:
+            nearest = int(np.argmin(np.abs(angles - two_theta)))
+            delta = two_theta - angles[nearest]
+            if abs(delta) <= max(ASSIGN_TOLERANCE_DEG, widths[nearest]):
+                match = reflections[nearest]
+                row.update(
+                    phase=match["phase"], phase_label=match["phase_label"],
+                    hkl=match.get("hkl_database_setting") or f"{match['h']} {match['k']} {match['l']}",
+                    delta_two_theta_deg=round(float(delta), 4),
+                )
+        rows.append(row)
+    return rows

@@ -3170,8 +3170,8 @@ async def download_task_table(task_id: int):
     return _csv_response(rows_to_csv(rows, TABLE_COLUMNS), filename)
 
 
-async def _peak_rows_of(task_id: int, sel: str | None):
-    """``(task, rows, wavelength, selection)`` of the peak list of one selection."""
+async def _selected_fit(task_id: int, sel: str | None):
+    """``(task, document, refinement, meta, selection)`` of ``sel`` (default: the adopted fit)."""
     from dara.server import review_router, versions
 
     task, document = await review_router._load_completed_task(task_id)
@@ -3179,13 +3179,19 @@ async def _peak_rows_of(task_id: int, sel: str | None):
     selection = review_router._report_selection(None, False, review, sel)
     review_router._refuse_quick_check(task, selection)
     refinement, meta = versions.resolve_refinement(document, task, selection)
+    return task, document, refinement, meta, selection
+
+
+async def _peak_rows_of(task_id: int, sel: str | None):
+    """``(task, rows, wavelength, selection, document)`` of the peak list of one selection."""
+    task, document, refinement, meta, selection = await _selected_fit(task_id, sel)
     try:
         rows = peak_table(document, refinement, meta["cifs"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("Peak list of task %s failed", task_id, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Peak list failed: {exc}") from exc
     wavelength = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
-    return task, rows, wavelength, selection
+    return task, rows, wavelength, selection, document
 
 
 @router.get("/task/{task_id}/peaks")
@@ -3194,7 +3200,7 @@ async def task_peaks(task_id: int, sel: str | None = Query(None)):
     or ``version:<n>`` (default: the adopted fit)."""
     from dara.export.peak_list import COLUMNS
 
-    _, rows, wavelength, selection = await _peak_rows_of(task_id, sel)
+    _, rows, wavelength, selection, _ = await _peak_rows_of(task_id, sel)
     return {
         "columns": list(COLUMNS), "rows": rows, "wavelength": wavelength, "selection": selection,
     }
@@ -3204,9 +3210,89 @@ async def task_peaks(task_id: int, sel: str | None = Query(None)):
 async def task_peaks_csv(task_id: int, sel: str | None = Query(None)):
     from dara.export.peak_list import peak_csv_bytes
 
-    task, rows, _, selection = await _peak_rows_of(task_id, sel)
+    task, rows, _, selection, _ = await _peak_rows_of(task_id, sel)
     filename = download_name(task_id, task["job"]["name"], "peaks", selection, "csv")
     return _csv_response(peak_csv_bytes(rows), filename)
+
+
+async def _measured_peak_rows_of(task_id: int, sel: str | None):
+    """``(task, rows, wavelength, selection)``: EFLECH peaks of the measured pattern (the cached
+    peaks of quick-refine diagnostics), each assigned to the nearest reflection of ``sel``."""
+    from dara.export.peak_list import observed_peak_rows
+    from dara.server import quick_refine
+
+    task, reflections, wavelength, selection, document = await _peak_rows_of(task_id, sel)
+    try:
+        peaks = await asyncio.to_thread(quick_refine.task_peaks, task["uuid"], document)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Peak detection of task %s failed", task_id, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Peak detection failed: {exc}") from exc
+    return task, observed_peak_rows(peaks, reflections, wavelength=wavelength), wavelength, selection
+
+
+@router.get("/task/{task_id}/observed-peaks")
+async def task_peaks_measured(task_id: int, sel: str | None = Query(None)):
+    """Peaks of the measured pattern (EFLECH), each assigned to the nearest reflection of ``sel``."""
+    from dara.export.peak_list import OBSERVED_COLUMNS
+
+    _, rows, wavelength, selection = await _measured_peak_rows_of(task_id, sel)
+    return {
+        "columns": list(OBSERVED_COLUMNS), "rows": rows, "wavelength": wavelength,
+        "selection": selection,
+        "unassigned": sum(row["phase"] is None for row in rows),
+    }
+
+
+@router.get("/task/{task_id}/observed-peaks.csv")
+async def task_peaks_measured_csv(task_id: int, sel: str | None = Query(None)):
+    from dara.export.peak_list import OBSERVED_COLUMNS, peak_csv_bytes
+
+    task, rows, _, selection = await _measured_peak_rows_of(task_id, sel)
+    filename = download_name(task_id, task["job"]["name"], "peaks_observed", selection, "csv")
+    return _csv_response(peak_csv_bytes(rows, OBSERVED_COLUMNS), filename)
+
+
+@router.get("/task/{task_id}/pattern.xy")
+async def task_pattern_xy(
+    task_id: int,
+    kind: str = Query("measured", pattern="^(measured|background_subtracted)$"),
+    sel: str | None = Query(None),
+):
+    """Measured pattern, or the observed minus the refined background of ``sel`` (fit range)."""
+    from dara.export.pattern_data import wavelength_text, xy_bytes
+
+    kind = kind if isinstance(kind, str) else "measured"  # direct calls leave the Query default object
+    if kind == "measured":
+        from dara.server import review_router
+
+        task, document = await review_router._load_completed_task(task_id)
+        angles, intensities = document.xrd_data.angles, document.xrd_data.intensities
+        selection, short = None, "measured"
+    else:
+        task, document, refinement, _, selection = await _selected_fit(task_id, sel)
+        plot_data = refinement.plot_data
+        angles = plot_data.x
+        intensities = np.asarray(plot_data.y_obs, dtype=float) - np.asarray(plot_data.y_bkg, dtype=float)
+        short = "bgsub"
+    name = task["job"]["name"]
+    wavelength = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
+    header = f"DARA {kind.replace('_', '-')} pattern | task {task_id}: {name} | wavelength {wavelength_text(wavelength)}"
+    return Response(
+        content=xy_bytes(angles, intensities, header),
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{download_name(task_id, name, short, selection, "xy")}"'},
+    )
+
+
+@router.get("/task/{task_id}/pattern.csv")
+async def task_pattern_csv(task_id: int, sel: str | None = Query(None)):
+    """2theta, d, observed, calculated, background, difference and one column per phase of ``sel``."""
+    from dara.export.pattern_data import fit_csv_bytes
+
+    task, document, refinement, _, selection = await _selected_fit(task_id, sel)
+    wavelength = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
+    filename = download_name(task_id, task["job"]["name"], "fit", selection, "csv")
+    return _csv_response(fit_csv_bytes(refinement.plot_data, wavelength), filename)
 
 
 def _parse_task_ids(ids: str | None) -> list[int]:

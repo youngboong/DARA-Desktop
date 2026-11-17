@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, selectionQuery, levelRank, overallAlertType, overallColor, reasonsText,
-  missingCell, screeningTags, unexplainedSummary, unexplainedTooltipLines, verdictColor,
+  missingCell, patternHref, screeningTags, unexplainedSummary, unexplainedTooltipLines, verdictColor,
 } from '../src/dara/server/ui/src/components/confidence.mjs';
 
 // --- levels ------------------------------------------------------------------
@@ -187,5 +187,11 @@ assert.deepEqual(missingCell({ counts_by_class: { noise: 2, minor: 0, significan
 assert.deepEqual(missingCell({ counts: { missing: 4 } }), { text: '4', sortValue: 4000 });
 assert.deepEqual(missingCell(undefined), { text: '—', sortValue: Infinity });
 assert.ok(missingCell({ counts_by_class: { significant: 2, minor: 0 } }).sortValue > missingCell({ counts_by_class: { significant: 1, minor: 9 } }).sortValue);
+
+// --- pattern data downloads take the selection as `sel` ------------------------
+assert.equal(patternHref('/api', 3, 'pattern.csv', undefined), '/api/task/3/pattern.csv');
+assert.equal(patternHref('/api', 3, 'pattern.csv', 'best'), '/api/task/3/pattern.csv?sel=best');
+assert.equal(patternHref('/api', 3, 'pattern.xy?kind=background_subtracted', 2), '/api/task/3/pattern.xy?kind=background_subtracted&sel=2');
+assert.equal(patternHref('/api', 3, 'pattern.csv', 'version:4'), '/api/task/3/pattern.csv?sel=version%3A4');
 
 console.log('confidence UI tests passed');

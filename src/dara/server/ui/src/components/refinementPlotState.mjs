@@ -1,4 +1,5 @@
 import { addDSpacingHover, clampRange, finiteRange } from './plotNavigation.mjs';
+import { D_TICK_PX, HKL_LABEL_PX, dAxisTicks, hklText, pickHklLabels } from './plotLabels.mjs';
 
 // Keep legend selection in React state: Plotly's internal visibility is lost
 // whenever a toolbar action supplies a fresh data array.
@@ -147,6 +148,7 @@ export function legendRowCount(data = [], width = 0) {
 export function buildRefinementView(plot, {
   selection = {}, showDiagnostics = true, showPhaseProfiles = true,
   showReflections = true, scale = 'linear', yRange = null, xRange = null, fitY = true, plotWidth = null, title = null,
+  hklLabels = false, dAxis = false,
 } = {}) {
   plot = withDSpacing(plot);
   const baseLayout = cloneLayout(plot.layout);
@@ -234,9 +236,10 @@ export function buildRefinementView(plot, {
     return { ...trace, visible, x: numbers(trace.x), y: numbers(trace.x).map(() => position) };
   });
   const top = userY ? 0 : 1;
+  // hkl labels stand above the tallest peaks: more room at the top.
   const range = scale === 'log'
-    ? [Math.log10(smallestPositive / logMarkerBand) - (rows.length + 0.5) * Math.log10(4), Math.log10(maximum) + 0.04 * top]
-    : [minimum - unit * (markerBand + (rows.length ? 0.095 * (rows.length + 0.55) : 0.035)), maximum + unit * 0.05 * top];
+    ? [Math.log10(smallestPositive / logMarkerBand) - (rows.length + 0.5) * Math.log10(4), Math.log10(maximum) + (hklLabels ? 0.35 : 0.04) * top]
+    : [minimum - unit * (markerBand + (rows.length ? 0.095 * (rows.length + 0.55) : 0.035)), maximum + unit * (hklLabels ? 0.2 : 0.05) * top];
   const yaxis = { ...baseLayout.yaxis, type: scale, range, autorange: false,
     // While the intensity axis follows the 2θ window, box zoom and pan act on 2θ only.
     fixedrange: Boolean(fitY && !userY),
@@ -276,5 +279,62 @@ export function buildRefinementView(plot, {
     layout.margin = { ...(layout.margin || {}), r: 24 };
     layout.legend = { ...(layout.legend || {}), font: { ...(layout.legend?.font || {}), size: LEGEND_FONT_SIZE }, itemwidth: 30 };
   }
+  const wavelength = Number(plot.layout?.meta?.wavelength_angstrom);
+  if ((hklLabels || (dAxis && wavelength > 0)) && xView) {
+    // Degrees per pixel of the 2θ axis, so label and tick gaps stay the same on screen at any zoom.
+    const margin = layout.margin || {};
+    const areaPx = Math.max((narrow ? plotWidth : 1000) - (Number(margin.l) || 80) - (Number(margin.r) || 24), 200);
+    const degPerPx = (xView[1] - xView[0]) / areaPx;
+    if (hklLabels) annotations.push(...hklAnnotations(plot, data, selection, xView, HKL_LABEL_PX * degPerPx, scale));
+    if (dAxis && wavelength > 0) {
+      // A second 2θ axis on top of the main panel whose tick labels are d-spacings: the data
+      // stay plotted against 2θ, so zoom and pan are unchanged.
+      layout.xaxis3 = { ...dAxisTicks(xView, wavelength, D_TICK_PX * degPerPx), tickmode: 'array',
+        overlaying: 'x', anchor: 'y', side: 'top', range: [...xView], autorange: false,
+        showgrid: false, zeroline: false, showline: false, ticks: 'outside', ticklen: 4,
+        tickcolor: baseLayout.xaxis?.tickcolor, title: { text: 'd (Å)', standoff: 4, font: { size: 12 } } };
+      layout.margin = { ...(layout.margin || {}), t: Math.max(Number(layout.margin?.t) || 0, 40) + 34 };
+      // A legend row above the panel would sit on the d labels: pin it to the top of the figure.
+      if (layout.legend?.yref !== 'container') layout.legend = { ...(layout.legend || {}), yref: 'container', y: 1, yanchor: 'top' };
+      // Plotly draws an axis only when a trace uses it: an empty trace, last, so trace indices hold.
+      data.push({ type: 'scatter', mode: 'lines', x: [...xView], y: [null, null], xaxis: 'x3', yaxis: 'y',
+        hoverinfo: 'skip', showlegend: false, meta: 'd-axis' });
+    }
+  }
   return { data, layout, rows, fullXRange: fullX || null };
+}
+
+/** Top of the observed, calculated and background curves within `half` degrees of `x`. */
+function curveTop(curves, x, half) {
+  let top = -Infinity;
+  curves.forEach(({ xs, ys }) => {
+    for (let i = 0; i < xs.length; i += 1) {
+      if (Math.abs(xs[i] - x) <= half && ys[i] > top) top = ys[i];
+    }
+  });
+  return top;
+}
+
+/** "(hkl)" annotations above the strongest reflections of the selected phases in the window. */
+function hklAnnotations(plot, data, selection, window, minGap, scale) {
+  const reflections = [];
+  plot.data.forEach((trace, index) => {
+    if (trace.meta !== 'reflection' || !isTraceSelected(trace, index, selection)) return;
+    const xs = numbers(trace.x);
+    const rows = Array.isArray(trace.customdata) ? trace.customdata : [];
+    const color = data[index]?.marker?.color || trace.marker?.color;
+    xs.forEach((x, i) => {
+      const [h, k, l, intensity] = rows[i] || [];
+      if ([h, k, l].every(value => Number.isFinite(Number(value)))) reflections.push({ x, h, k, l, intensity, color });
+    });
+  });
+  const curves = plot.data.filter((trace, index) => !trace.meta && trace.visible !== false && isTraceSelected(trace, index, selection))
+    .map(trace => ({ xs: numbers(trace.x), ys: numbers(trace.y) }));
+  return pickHklLabels(reflections, window, minGap).flatMap(item => {
+    const height = curveTop(curves, item.x, Math.max(minGap / 2, 0.02));
+    if (!Number.isFinite(height) || (scale === 'log' && height <= 0)) return [];
+    return [{ x: item.x, xref: 'x', y: scale === 'log' ? Math.log10(height) : height, yref: 'y',
+      text: hklText(item.h, item.k, item.l), showarrow: false, textangle: -90, yanchor: 'bottom', yshift: 3,
+      font: { size: 11, color: item.color } }];
+  });
 }

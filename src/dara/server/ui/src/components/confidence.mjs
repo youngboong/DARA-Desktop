@@ -175,6 +175,20 @@ export const figureHref = (api, taskId, format, selection, hkl = false) =>
 export const exportHref = (api, taskId, format, selection) =>
   `${api}/task/${taskId}/export/${format}${selectionQuery(selection)}`;
 
+/** Pattern data downloads (`pattern.xy` / `pattern.csv`); they take the selection as `sel`. */
+export const PATTERN_FILES = [
+  { key: 'measured', label: 'Measured pattern (.xy)', path: 'pattern.xy?kind=measured' },
+  { key: 'bgsub', label: 'Background-subtracted (.xy)', path: 'pattern.xy?kind=background_subtracted' },
+  { key: 'fit', label: 'Fit curves (CSV)', path: 'pattern.csv' },
+];
+
+export function patternHref(api, taskId, path, selection) {
+  const sel = selection === 'best' || selection === null ? 'best'
+    : (Number.isInteger(selection) && selection >= 0) || /^version:[1-9]\d{0,5}$/.test(String(selection)) ? String(selection) : null;
+  const query = sel ? `sel=${encodeURIComponent(sel)}` : '';
+  return `${api}/task/${taskId}/${path}${query ? (path.includes('?') ? '&' : '?') + query : ''}`;
+}
+
 const OVERALL_LABEL = { high: 'High confidence', check: 'Check recommended', expert: 'Expert review recommended' };
 export const overallLabel = level => OVERALL_LABEL[level] || null;
 // One word for table cells; the full label goes in the tooltip.
