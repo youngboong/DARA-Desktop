@@ -3,11 +3,11 @@
  "e_hull_cutoff": 0.05,
  "measured": {
   "on": "2026-11-13, i5-1335U, Windows 11, home network",
-  "method": "COD: 120 pack CIFs with the search's downloader (4 workers, 0.2 s delay, retries); sizes from 1291 cached pack CIFs. MP: 600 structures in batches of 200; index = one metadata query. Sticks (2026-11-16): 800 pack structures (400 COD, 400 MP), Cu K-alpha1, 2theta 1-130 deg, 3 worker processes, mean of 2 runs; disk size in 4 KiB clusters. COD over rsync (cod_rsync_per_s, 2026-11-17): 300 pack CIFs, MSYS2 rsync 3.5.2, same PC and network, HTTP download running at the same time.",
+  "method": "COD: 120 pack CIFs with the search's downloader (4 workers, 0.2 s delay, retries); sizes from 1291 cached pack CIFs. MP: 600 structures in batches of 200; index = one metadata query. Sticks (2026-11-16): 800 pack structures (400 COD, 400 MP), Cu K-alpha1, 2theta 1-130 deg, 3 worker processes, mean of 2 runs; disk size in 4 KiB clusters. COD over rsync (cod_rsync_per_s, 2026-11-17; 16 files/s is the rate of the app's 300-file steps including the connection, 601 files in 42.4 s end to end; the pack minutes assume rsync): 300 pack CIFs, MSYS2 rsync 3.5.2, same PC and network, HTTP download running at the same time.",
   "cod_mean_cif_kb": 15.47,
   "cod_disk_kb": 17.69,
   "cod_per_s": 2.45,
-  "cod_rsync_per_s": 19.0,
+  "cod_rsync_per_s": 16.0,
   "cod_theoretical_fraction": 0.0302,
   "mp_mean_cif_kb": 2.58,
   "mp_disk_kb": 5.06,
@@ -82,10 +82,10 @@
     "total": 1322.1
    },
    "minutes": {
-    "cod": 137.2,
+    "cod": 21.0,
     "mp": 8.3,
     "sticks": 214.1,
-    "total": 359.6
+    "total": 243.4
    }
   }
  ]
