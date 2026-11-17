@@ -274,3 +274,77 @@ code {
   border: 1px solid var(--dara-border);
   border-radius: var(--dara-radius);
 }
+
+/* Control bars above the fit plot and the peak tables: groups split by a hairline, each
+   label tight to its control, more room between groups than inside them. */
+.dara-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--dara-space-3);
+  row-gap: var(--dara-space-2);
+  margin-bottom: var(--dara-space-2);
+}
+
+.dara-toolbar-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dara-space-3);
+}
+
+.dara-toolbar-group + .dara-toolbar-group {
+  padding-left: var(--dara-space-3);
+  border-left: 1px solid var(--dara-border);
+}
+
+.dara-toolbar-caption {
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-hint);
+}
+
+/* A label and its control read as one: clicking the label toggles the switch. */
+.dara-toolbar-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+/* Peak tables keep their columns together instead of spreading over a wide screen. */
+.dara-fit-table {
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* Per-phase note under the phase name: wraps instead of widening the column. */
+.dara-cell-note {
+  max-width: 44ch;
+  font-size: var(--dara-font-12);
+  line-height: 1.4;
+  white-space: normal;
+  color: var(--dara-text-hint);
+}
+
+/* Williamson–Hall plots: an even grid however many phases there are. */
+.dara-wh-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: var(--dara-space-3);
+  margin-bottom: var(--dara-space-2);
+}
+
+.dara-wh-title {
+  font-size: var(--dara-font-13);
+  font-weight: 600;
+  text-align: center;
+}
+
+.dara-footnote {
+  display: block;
+  max-width: 120ch;
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-hint);
+}

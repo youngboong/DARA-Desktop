@@ -1,6 +1,6 @@
 import React from 'react';
 import Loadable from 'react-loadable';
-import { Alert, Button, InputNumber, Radio, Select, Space, Spin, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, InputNumber, Radio, Select, Spin, Table, Tooltip, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { API, NOT_AVAILABLE, requestJson } from './QuickRefineProgress';
 import ChemicalFormula from './ChemicalFormula';
@@ -23,9 +23,11 @@ const FIT_NOTE_HELP = {
   'too weak': 'The width is not determined (uncertainty above 30%)',
   'fit failed': 'The profile fit did not converge or the width ran to a limit',
 };
-const QUIET_NOTE ='Single-peak estimates. The Rietveld size of each phase (instrument-corrected with the instrument profile) is the reported value.';
+const QUIET_NOTE = 'Single-peak estimates. The Rietveld size of each phase (instrument-corrected with the instrument profile) is the reported value.';
+const CONSTANT_NOTE = 'The instrument FWHM is one value for all angles, while the instrument broadening varies with angle, so the sizes stay approximate.';
 
-const fixed = digits => value => (value == null ? '—' : Number(value).toFixed(digits));
+// Negative values take the minus sign (U+2212), as on the plot axes.
+const fixed = digits => value => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-/, '\u2212'));
 
 // Formula with the space group, so polymorphs of one formula (R-3c and R-3m Fe2O3) stay apart.
 const phaseText = row => { const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg && !String(label).includes('·') ? `${label} (SG ${sg})` : label; };
@@ -57,22 +59,25 @@ export default function PeakListTab({ taskId, sel, active }) {
   };
   const query = `sel=${encodeURIComponent(sel)}&k=${k}${instrument ? `&instrument_fwhm=${instrument}` : ''}`;
   return <>
-    <Space wrap style={{ marginBottom: 8 }}>
-      <Radio.Group size="small" optionType="button" value={view} onChange={event => setView(event.target.value)}
-        aria-label="Peak list" options={[{ value: 'calculated', label: 'Calculated reflections' }, { value: 'observed', label: 'Observed peaks' },
-          { value: 'size', label: <Tooltip title={WH_HELP}><span>Size / strain (Williamson–Hall)</span></Tooltip> }]} />
-      {view === 'calculated' ? null : <>
+    <div className="dara-toolbar">
+      <div className="dara-toolbar-group">
+        <Radio.Group size="small" optionType="button" value={view} onChange={event => setView(event.target.value)}
+          aria-label="Peak list" options={[{ value: 'calculated', label: 'Calculated reflections' }, { value: 'observed', label: 'Observed peaks' },
+            { value: 'size', label: <Tooltip title={WH_HELP}><span>Size / strain (Williamson–Hall)</span></Tooltip> }]} />
+      </div>
+      {view === 'calculated' ? null : <div className="dara-toolbar-group" aria-label="Size estimate settings">
         <Tooltip title={K_HELP}>
           <Select size="small" aria-label="Scherrer constant" value={k} onChange={setK} options={SCHERRER_K} style={{ width: 96 }} />
         </Tooltip>
-        <Tooltip title={INSTRUMENT_HELP}><Text>Instrument FWHM (°)</Text></Tooltip>
-        <InputNumber size="small" aria-label="Instrument FWHM in degrees" min={0} max={0.5} step={0.005} placeholder="0"
-          value={instrument} onChange={changeInstrument} style={{ width: 90 }} />
-        <Text type="secondary" style={{ fontSize: 12 }}>Constant value; this instrument's broadening varies with angle, so sizes stay approximate.</Text>
-      </>}
-    </Space>
+        <label className="dara-toolbar-item">
+          <Tooltip title={INSTRUMENT_HELP}><span>Instrument FWHM (°)</span></Tooltip>
+          <InputNumber size="small" aria-label="Instrument FWHM in degrees" min={0} max={0.5} step={0.005} placeholder="0"
+            value={instrument} onChange={changeInstrument} style={{ width: 80 }} />
+        </label>
+      </div>}
+    </div>
     {view === 'observed' ? <ObservedPeaks taskId={taskId} query={query} corrected={Boolean(instrument)} onProfile={setProfile} active={active} />
-      : view === 'size' ? <WilliamsonHall taskId={taskId} query={query} onProfile={setProfile} active={active} />
+      : view === 'size' ? <WilliamsonHall taskId={taskId} query={query} corrected={Boolean(instrument)} onProfile={setProfile} active={active} />
         : <CalculatedReflections taskId={taskId} sel={sel} active={active} />}
   </>;
 }
@@ -133,15 +138,17 @@ function ObservedPeaks({ taskId, query, corrected, onProfile, active }) {
         : <Text type="secondary">{row.size_note === 'below instrument resolution' ? '> resolution limit' : '—'}</Text>) },
   ];
   return <>
-    <Space wrap style={{ marginBottom: 8 }}>
+    <div className="dara-toolbar">
       <Radio.Group size="small" optionType="button" value={filter} onChange={event => setFilter(event.target.value)} aria-label="Filter by assignment"
         options={[{ value: 'all', label: 'All' }, { value: 'assigned', label: 'Assigned' }, { value: 'unassigned', label: 'Unassigned' }]} />
       <Text type="secondary" className="dara-num">{`${rows.length} peak${rows.length === 1 ? '' : 's'}, ${unassigned} unassigned`}</Text>
-      <Button icon={<DownloadOutlined />} href={`${API}/task/${taskId}/observed-peaks.csv?${query}`}>Download CSV</Button>
-    </Space>
-    <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
-      pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
-    <Text type="secondary" style={{ fontSize: 12 }}>Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak). {QUIET_NOTE}</Text>
+      <Button size="small" icon={<DownloadOutlined />} href={`${API}/task/${taskId}/observed-peaks.csv?${query}`}>Download CSV</Button>
+    </div>
+    <div className="dara-fit-table">
+      <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
+        pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
+    </div>
+    <Text className="dara-footnote">Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak). {QUIET_NOTE} {corrected ? CONSTANT_NOTE : null}</Text>
   </>;
 }
 
@@ -150,7 +157,7 @@ const gated = (row, detail, text) => (row.reliable === false && row.intercept !=
   ? <Tooltip title={`${row.note}. ${detail}`}><Text type="secondary">Not reliable</Text></Tooltip> : text);
 
 /** Williamson–Hall fit per phase (GET /task/{id}/williamson-hall) beside the Rietveld size and strain. */
-function WilliamsonHall({ taskId, query, onProfile, active }) {
+function WilliamsonHall({ taskId, query, corrected, onProfile, active }) {
   const [body, error] = useSizeRequest(`/task/${taskId}/williamson-hall?${query}`, active, onProfile);
 
   if (error) return <Alert type="error" showIcon message="The size / strain estimates could not be loaded." description={error} />;
@@ -161,7 +168,7 @@ function WilliamsonHall({ taskId, query, onProfile, active }) {
   const columns = [
     { title: 'Phase', key: 'phase', render: (_, row) => <>
       <ChemicalFormula formula={phaseText(row)} />
-      {row.note ? <div><Text type="secondary" style={{ fontSize: 12 }}>{row.note}</Text></div> : null}
+      {row.note ? <div className="dara-cell-note">{row.note}</div> : null}
     </> },
     { title: <Tooltip title="D = K·λ / intercept of the line"><span>W–H size (nm)</span></Tooltip>, key: 'size', className: 'dara-num',
       render: (_, row) => gated(row, `W–H size ${withEsd(row.size_nm, row.size_esd_nm, 0)} nm`, withEsd(row.size_nm, row.size_esd_nm, 0)) },
@@ -178,11 +185,13 @@ function WilliamsonHall({ taskId, query, onProfile, active }) {
   ];
   const plotted = phases.filter(entry => entry.points.length);
   return <>
-    <Table size="small" rowKey="key" dataSource={phases} columns={columns} pagination={false} scroll={{ x: 'max-content' }} style={{ marginBottom: 12 }} />
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+    <div className="dara-fit-table" style={{ marginBottom: 12 }}>
+      <Table size="small" rowKey="key" dataSource={phases} columns={columns} pagination={false} scroll={{ x: 'max-content' }} />
+    </div>
+    <div className="dara-wh-grid">
       {plotted.map(entry => <WilliamsonHallPlot key={entry.phase} entry={entry} />)}
     </div>
-    <Text type="secondary" style={{ fontSize: 12 }}>{QUIET_NOTE}</Text>
+    <Text className="dara-footnote">{QUIET_NOTE} {corrected ? CONSTANT_NOTE : null}</Text>
   </>;
 }
 
@@ -198,11 +207,14 @@ function WilliamsonHallPlot({ entry }) {
       // An unreliable line is drawn quiet: grey and dashed.
       line: entry.reliable ? { color: '#b5482a', width: 1.5 } : { color: '#8c8c8c', width: 1, dash: 'dash' }, hoverinfo: 'skip' });
   }
-  const layout = { height: 260, margin: { l: 70, r: 12, t: 32, b: 44 }, showlegend: false, title: { text: entry.phase_label || entry.phase, font: { size: 13 } },
-    xaxis: { title: { text: '4·sin θ' }, rangemode: 'tozero', zeroline: false }, yaxis: { title: { text: 'β·cos θ (rad)' }, rangemode: 'tozero', zeroline: false } };
-  return <div style={{ flex: '1 1 340px', maxWidth: 520 }}>
-    <Plot data={data} layout={layout} config={{ displaylogo: false, responsive: true }} useResizeHandler style={{ width: '100%', height: 260 }} />
-  </div>;
+  // The title is drawn by the page (ChemicalFormula with the space group, as in the table), not by Plotly.
+  const layout = { height: 250, margin: { l: 64, r: 12, t: 8, b: 44 }, showlegend: false,
+    xaxis: { title: { text: '4·sin θ' }, rangemode: 'tozero', zeroline: false },
+    yaxis: { title: { text: 'β·cos θ (rad)', standoff: 8 }, automargin: true, rangemode: 'tozero', zeroline: false } };
+  return <figure style={{ margin: 0 }}>
+    <figcaption className="dara-wh-title"><ChemicalFormula formula={phaseText(entry)} /></figcaption>
+    <Plot data={data} layout={layout} config={{ displaylogo: false, responsive: true }} useResizeHandler style={{ width: '100%', height: 250 }} />
+  </figure>;
 }
 
 /** Reflections of the displayed fit (hkl, 2θ, d, intensity, FWHM) from GET /task/{id}/peaks, filterable by phase, with the CSV from /peaks.csv. */
@@ -246,13 +258,15 @@ function CalculatedReflections({ taskId, sel, active }) {
         : fixed(3)(value)) },
   ];
   return <>
-    <Space wrap style={{ marginBottom: 8 }}>
-      <Select allowClear aria-label="Filter by phase" placeholder="All phases" style={{ minWidth: 240 }} value={phase} onChange={setPhase}
+    <div className="dara-toolbar">
+      <Select size="small" allowClear aria-label="Filter by phase" placeholder="All phases" style={{ minWidth: 240 }} value={phase} onChange={setPhase}
         options={phases.map(([value, label]) => ({ value, label }))} />
       <Text type="secondary" className="dara-num">{`${shown.length} reflection${shown.length === 1 ? '' : 's'}`}</Text>
-      <Button icon={<DownloadOutlined />} href={`${API}/task/${taskId}/peaks.csv?${query}`}>Download CSV</Button>
-    </Space>
-    <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
-      pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
+      <Button size="small" icon={<DownloadOutlined />} href={`${API}/task/${taskId}/peaks.csv?${query}`}>Download CSV</Button>
+    </div>
+    <div className="dara-fit-table">
+      <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
+        pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
+    </div>
   </>;
 }

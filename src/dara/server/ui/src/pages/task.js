@@ -226,6 +226,14 @@ function preloadPlot(taskId, plotId) {
 }
 
 
+/** A plot-toolbar switch with its label: the label is clickable and sits tight to its switch. */
+function PlotSwitch({ label, ariaLabel = label, help, checked, onChange }) {
+  return <label className="dara-toolbar-item">
+    <Tooltip title={help}><span>{label}</span></Tooltip>
+    <Switch size="small" aria-label={ariaLabel} checked={checked} onChange={onChange} />
+  </label>;
+}
+
 const RefinementPlot = React.forwardRef(function RefinementPlot({
   task_id, plot_id, excludedRanges = [], peaks = [], onPeakClick, previewSticks = null, onGroups, title = null, phaseColor = null, phaseLegend = null,
   // Background curve editing: {anchors, selected, onChange, onAdd, onRemove, onSelect, blocked(x)} or null.
@@ -258,7 +266,9 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   React.useEffect(() => {
     const element = containerRef.current;
     if (!element) return undefined;
-    const measure = () => setPlotWidth(Math.round(element.getBoundingClientRect().width) || null);
+    // Layout width, not getBoundingClientRect: the workspace modal opens with a zoom transform,
+    // and a width read mid-animation put the legend under a squeezed plot.
+    const measure = () => setPlotWidth(element.offsetWidth || null);
     measure();
     if (typeof ResizeObserver === 'undefined') {
       window.addEventListener('resize', measure);
@@ -437,29 +447,42 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   };
   return <>
     {/* The page preview draws the fit only; the workspace has the controls. */}
-    {compact ? null : <Space wrap style={{ marginBottom: 8 }}>
-      <Text>Scale</Text>
-      <Select value={scale} onChange={value => { setScale(value); setYRange(null); }} style={{ width: 90 }}
-        options={[{ value: 'linear', label: 'Linear' }, { value: 'log', label: 'Log' }]} />
-      <Tooltip title="Phase profiles"><Text>Profiles</Text></Tooltip><Switch aria-label="Phase profiles" checked={showPhaseProfiles} onChange={setShowPhaseProfiles} />
-      <Tooltip title="Bragg positions"><Text>Bragg</Text></Tooltip><Switch aria-label="Bragg positions" checked={showReflections} onChange={value => { setShowReflections(value); setYRange(null); }} />
-      <Tooltip title="Unexplained-peak and diagnostic markers"><Text>Markers</Text></Tooltip><Switch aria-label="Peak markers" checked={showDiagnostics} onChange={setShowDiagnostics} />
-      <Tooltip title="Fit the intensity axis to the visible 2θ range (F)"><Text>Auto-Y</Text></Tooltip><Switch aria-label="Auto-Y" checked={fitY} onChange={value => { setFitY(value); setYRange(null); }} />
-      <Tooltip title="Miller indices of the strongest reflections of the shown phases; zoom in to label more"><Text>hkl labels</Text></Tooltip><Switch aria-label="hkl labels" checked={hklLabels} onChange={value => { setHklLabels(value); setYRange(null); }} />
-      {wavelength > 0 ? <><Tooltip title="d-spacing axis (Å, Kα1) along the top of the pattern"><Text>d axis</Text></Tooltip><Switch aria-label="d axis" checked={dAxis} onChange={setDAxis} /></> : null}
-      {onDisplayChange ? <Space size={6} className="dara-plot-display" aria-label="Display treatment of the observed pattern">
-        <Text type="secondary">Display</Text>
+    {compact ? null : <div className="dara-toolbar">
+      {/* Axes | what is drawn | display treatment of the observed trace | view */}
+      <div className="dara-toolbar-group" aria-label="Axes">
+        <label className="dara-toolbar-item">
+          <span>Scale</span>
+          <Select size="small" value={scale} onChange={value => { setScale(value); setYRange(null); }} style={{ width: 80 }}
+            options={[{ value: 'linear', label: 'Linear' }, { value: 'log', label: 'Log' }]} />
+        </label>
+        <PlotSwitch label="Auto-Y" help="Fit the intensity axis to the visible 2θ range (F)" checked={fitY} onChange={value => { setFitY(value); setYRange(null); }} />
+        {wavelength > 0 ? <PlotSwitch label="d axis" help="d-spacing axis (Å, Kα1) along the top of the pattern" checked={dAxis} onChange={setDAxis} /> : null}
+      </div>
+      <div className="dara-toolbar-group" aria-label="Shown on the plot">
+        <PlotSwitch label="Profiles" ariaLabel="Phase profiles" help="Phase profiles" checked={showPhaseProfiles} onChange={setShowPhaseProfiles} />
+        <PlotSwitch label="Bragg" ariaLabel="Bragg positions" help="Bragg positions" checked={showReflections} onChange={value => { setShowReflections(value); setYRange(null); }} />
+        <PlotSwitch label="hkl labels" help="Miller indices of the strongest reflections of the shown phases; zoom in to label more" checked={hklLabels} onChange={value => { setHklLabels(value); setYRange(null); }} />
+        <PlotSwitch label="Markers" ariaLabel="Peak markers" help="Unexplained-peak and diagnostic markers" checked={showDiagnostics} onChange={setShowDiagnostics} />
+      </div>
+      {onDisplayChange ? <div className="dara-toolbar-group" aria-label="Display treatment of the observed pattern">
+        <Tooltip title="Applied to the observed trace on screen only: the fit, the residual and the tables use the measured data">
+          <span className="dara-toolbar-caption">Display only</span>
+        </Tooltip>
         {kalpha2Offered ? <Tooltip title="Rachinger correction: removes the Kα2 component, I(Kα2)/I(Kα1) = 0.5">
           <Checkbox checked={display.kalpha2} onChange={event => onDisplayChange({ ...display, kalpha2: event.target.checked })}>Strip Kα2</Checkbox></Tooltip> : null}
-        <Tooltip title="Savitzky–Golay smoothing (order 2); window in points"><Text>Smooth</Text></Tooltip>
-        <Select aria-label="Smoothing window" value={display.smooth} onChange={value => onDisplayChange({ ...display, smooth: value })} style={{ width: 72 }}
-          options={SMOOTH_WINDOWS.map(points => ({ value: points, label: points ? String(points) : 'Off' }))} />
-      </Space> : null}
-      <Button onClick={resetView}>Reset zoom</Button>
-      <Tooltip title={`Left-drag to zoom into a box (2θ only while Auto-Y is on), Shift- or right-drag to pan 2θ, mouse wheel to zoom 2θ at the cursor, double-click or Reset zoom to show the whole pattern. Zoom and pan stop at the measured range. Click a phase in the legend to show its profile and Bragg positions; hover for 2θ, d-spacing and hkl. The lower panel shows observed − calculated.${onPeakClick ? ' Click a missing-peak marker or an observed point to search references for that peak (Shift+click to select several).' : ''}`}>
-        <InfoCircleOutlined aria-label="Plot navigation help" style={{ color: 'var(--dara-text-hint)' }} />
-      </Tooltip>
-    </Space>}
+        <label className="dara-toolbar-item">
+          <Tooltip title="Savitzky–Golay smoothing (order 2); window in points"><span>Smooth</span></Tooltip>
+          <Select size="small" aria-label="Smoothing window" value={display.smooth} onChange={value => onDisplayChange({ ...display, smooth: value })} style={{ width: 64 }}
+            options={SMOOTH_WINDOWS.map(points => ({ value: points, label: points ? String(points) : 'Off' }))} />
+        </label>
+      </div> : null}
+      <div className="dara-toolbar-group">
+        <Button size="small" onClick={resetView}>Reset zoom</Button>
+        <Tooltip title={`Left-drag to zoom into a box (2θ only while Auto-Y is on), Shift- or right-drag to pan 2θ, mouse wheel to zoom 2θ at the cursor, double-click or Reset zoom to show the whole pattern. Zoom and pan stop at the measured range. Click a phase in the legend to show its profile and Bragg positions; hover for 2θ, d-spacing and hkl. The lower panel shows observed − calculated.${onPeakClick ? ' Click a missing-peak marker or an observed point to search references for that peak (Shift+click to select several).' : ''}`}>
+          <InfoCircleOutlined aria-label="Plot navigation help" style={{ color: 'var(--dara-text-hint)' }} />
+        </Tooltip>
+      </div>
+    </div>}
     {treatment ? <div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>
       {treated?.query === treatment && treated.error ? `The treated pattern could not be loaded (${treated.error}); the measured pattern is shown. ` : ''}
       Display only: the fit, the residual and the tables use the measured data.</Text></div> : null}
