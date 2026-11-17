@@ -61,6 +61,15 @@ def structure_models(record: dict | None) -> dict:
     }
 
 
+def le_bail_stems(record: dict | None) -> list[str]:
+    """Phases a version fitted by Le Bail (``effective_phase_params[stem]["lebail"]``); a
+    version refined from this one inherits them."""
+    params = (record or {}).get("effective_phase_params")
+    if not isinstance(params, dict):
+        return []
+    return sorted(stem for stem, value in params.items() if isinstance(value, dict) and value.get("lebail"))
+
+
 _REFINED_FROM_RE = re.compile(r"^All phases refined( \(from v\d+\))?$")
 
 

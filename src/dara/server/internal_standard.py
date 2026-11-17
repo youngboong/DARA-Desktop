@@ -92,6 +92,10 @@ def quantify(phases: list[dict], spec: dict) -> dict:
     for phase in phases:
         if phase is standard:
             continue
+        if phase.get("le_bail"):  # no amount: it falls into the remainder (amorphous + unidentified)
+            rows.append({"name": phase.get("name"), "absolute_wt_percent": None, "absolute_esd_percent": None,
+                         "sample_wt_percent": None, "sample_esd_percent": None})
+            continue
         weight = phase.get("weight_percent") or 0.0
         weight_esd = phase.get("weight_esd_percent") or 0.0
         absolute = weight * k
@@ -131,5 +135,7 @@ def quantify(phases: list[dict], spec: dict) -> dict:
         if result["status"] == "ok":
             result["status"] = "negative_amorphous"
         messages.append(NEGATIVE_MESSAGE)
+    if any(phase.get("le_bail") for phase in phases):
+        messages.append("Le Bail phases have no amount; the amorphous value includes them.")
     result["message"] = " ".join(messages) or None
     return result

@@ -231,11 +231,17 @@ def fit_figure(
             ax_main.margins(y=0.14)  # room for the labels above the tallest peak
 
         for note in annotations or ():
+            try:  # stored task data: a damaged entry is left out, never fails the figure
+                text, position = str(note["text"])[:120], (float(note["two_theta"]), float(note["intensity"]))
+            except (KeyError, TypeError, ValueError):
+                continue
             # Plain text: a "$" would start matplotlib mathtext.
             ax_main.annotate(
-                str(note["text"]).replace("$", r"\$"), (float(note["two_theta"]), float(note["intensity"])),
+                text.replace("$", r"\$"), position,
                 xytext=(0, 3), textcoords="offset points", ha="center", va="bottom",
                 fontsize=FONT_SIZE - 1, color="black", annotation_clip=True,
+                # as on the web plot: a light label box keeps the text readable over the curves
+                bbox={"boxstyle": "square,pad=0.2", "fc": "white", "ec": "#c9cdc6", "lw": 0.4, "alpha": 0.85}, zorder=6,
             )
 
         for axis in (ax_main, ax_ticks, ax_diff):

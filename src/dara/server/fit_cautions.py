@@ -46,6 +46,11 @@ def _caution(code: str, level: str, message: str, phase: str | None = None) -> d
     return {"code": code, "level": level, "message": message, "phase": phase}
 
 
+def le_bail_names(phase_details) -> list[str]:
+    """Phases of ``phase_details`` fitted by Le Bail (``le_bail: true``, no amount)."""
+    return [name for name, details in (phase_details or {}).items() if (details or {}).get("le_bail")]
+
+
 def fit_cautions(
     fit_quality: dict,
     phase_details: dict,
@@ -120,6 +125,19 @@ def fit_cautions(
                     phase,
                 )
             )
+
+    le_bail = le_bail_names(phase_details)
+    if le_bail:
+        cautions.append(
+            _caution(
+                "weights_relative",
+                "info",
+                f"Weight fractions exclude the Le Bail phase(s) "
+                f"{', '.join(_display_name(name) for name in le_bail)}: a Le Bail fit refines the "
+                "reflection intensities freely and gives no amount, so the other fractions are "
+                "relative among themselves, not absolute.",
+            )
+        )
 
     for phase, details in phase_details.items():
         status = (details or {}).get("refinement_status")

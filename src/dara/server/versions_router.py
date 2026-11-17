@@ -107,6 +107,9 @@ def _version_entry(record: dict) -> dict:
         "phases": summary.get("phases") or record.get("phases") or [],
         "phase_stems": record.get("phases") or [],
         "weight_percent": summary.get("weight_percent") or {},
+        # phases fitted by Le Bail (no amount); weight_percent then excludes them (relative)
+        "le_bail_phases": versions.le_bail_stems(record),
+        "weights_relative": bool(summary.get("weights_relative")),
         "n_unexplained": unexplained_count(summary.get("peak_diagnostics")),
         "n_unexplained_minor": unexplained_minor_count(summary.get("peak_diagnostics")),
         # stored before structure values at their limit became a caution (added on read, as in the detail)

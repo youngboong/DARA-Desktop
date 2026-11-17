@@ -96,6 +96,7 @@ def phase_status(
     k2_spec=None,
     overall_rwp: Optional[float] = None,
     structure_params: Iterable[str] = (),
+    le_bail: bool = False,
 ) -> dict:
     """``refinement_status`` of one phase (rules of design 2.1 A; first match wins).
 
@@ -108,6 +109,7 @@ def phase_status(
         overall_rwp: Rwp of the whole fit, in percent.
         structure_params: names of refined structure parameters (besides ``occ<n>`` and
             ``B<EL>``) whose limit hits count as ``structure_at_limit``.
+        le_bail: the phase was fitted by Le Bail (``dara.result.le_bail_phases``).
     """
     undefined = undefined_keys(section_text)
     if not (section_text or "").strip():
@@ -119,12 +121,13 @@ def phase_status(
         }
     parsed = parse_lst_section(section_text) if parsed is None else parsed
 
+    # a Le Bail phase has no GEWICHT (LeBail=1 omits it, bgmn.de/variables.html): not a failure
     failed_keys = [
         key
         for key in undefined
-        if key not in _PROFILE_KEYS and not key.startswith("GrainSize")
+        if key not in _PROFILE_KEYS and not key.startswith("GrainSize") and not (le_bail and key == "GEWICHT")
     ]
-    if "GEWICHT" not in undefined and parsed.get("GEWICHT") is None:
+    if "GEWICHT" not in undefined and parsed.get("GEWICHT") is None and not le_bail:
         failed_keys.insert(0, "GEWICHT")
     if failed_keys:
         return {

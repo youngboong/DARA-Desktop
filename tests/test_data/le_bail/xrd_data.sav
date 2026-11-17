@@ -1,0 +1,23 @@
+% Theoretical instrumental function
+VERZERR=Aeris-fds-Pixcel1d-Medipix3.geq
+% Wavelength
+LAMBDA=CU
+% Phases
+STRUC[1]=Zn1.7Co0.3O2_186_(cod_1533020).str
+STRUC[2]=Co3O4_227_(cod_9005896).str
+% Measured data
+VAL[1]=xrd_data.xy
+% Result list output
+LIST=xrd_data.lst
+% Peak list output
+OUTPUT=xrd_data.par
+% Diagram output
+DIAGRAMM=xrd_data.dia
+% Global parameters for zero point and sample displacement
+EPS1=0.0
+PARAM[1]=EPS2=0_-0.05^0.05
+NTHREADS=1
+PROTOKOLL=Y
+sum=Zn17Co03O2186cod1533020
+QZn17Co03O2186cod1533020=Zn17Co03O2186cod1533020/sum
+GOAL[1]=QZn17Co03O2186cod1533020

@@ -342,7 +342,7 @@ async def download_report_bundle(
         figure_png = fit_figure(
             refinement, fmt="png", dpi=300, width_mm=170,
             excluded_ranges=(meta.get("refinement_params") or {}).get("excluded_ranges"),
-            counts_like=_counts_like(document), hkl_labels=hkl is True,
+            counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
         )
     except Exception:  # noqa: BLE001 - the Word file is written without the figure
         figure_png = None
@@ -399,7 +399,7 @@ async def download_figure(
     try:
         content = fit_figure(
             refinement, fmt=fmt, dpi=dpi, width_mm=width_mm, excluded_ranges=excluded,
-            counts_like=_counts_like(document), hkl_labels=hkl is True,
+            counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
         )
     except Exception as exc:
         raise HTTPException(500, f"Figure rendering failed: {exc}") from exc

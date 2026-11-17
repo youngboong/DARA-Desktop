@@ -297,11 +297,15 @@ class RefinementResult(BaseModel):
 
         Returns
         -------
-            A dictionary of phase names and their weights.
+            A dictionary of phase names and their weights. A phase without GEWICHT (a Le Bail
+            phase, see ``le_bail_phases``) is left out: the fractions are then relative to
+            the other phases.
         """
         weights = {}
         for phase, data in self.lst_data.phases_results.items():
-            weights[phase] = get_number(data.gewicht)
+            value = get_number(data.gewicht)
+            if value is not None:
+                weights[phase] = value
 
         if normalize:
             tot = np.sum(list(weights.values()))
@@ -406,6 +410,26 @@ def parse_lst_section(text: str) -> dict[str, Any]:
 def lst_phase_sections(texts: str) -> list[str]:
     """Raw "Local parameters and GOALs" sections of a ``.lst`` text, in phase order."""
     return [body for _, body in lst_phase_sections_by_name(texts)]
+
+
+def le_bail_phases(lst_data) -> set[str]:
+    """Phases (``phases_results`` keys) fitted by Le Bail (``LeBail=1`` in their ``.str``).
+
+    BGMN omits F and GEWICHT of such a phase and refines every reflection intensity freely
+    (bgmn.de/variables.html, ``LeBail``); BGMN 4.2.22 then lists ``GEWICHT=UNDEF`` for it, and
+    the control file gives it no ``Q<phase>`` goal (``generate_control_file``). Both are
+    required, so a failed Rietveld phase (which keeps its Q goal) is not taken for one.
+    """
+    raw = getattr(lst_data, "raw_lst", None) or ""
+    names = list(getattr(lst_data, "phases_results", None) or {})
+    sections = lst_phase_sections_by_name(raw)
+    if len(sections) != len(names):  # sections follow the STRUC order of the phases
+        return set()
+    return {
+        name for name, (bgmn_name, body) in zip(names, sections)
+        if re.search(r"^GEWICHT=UNDEF\b", body, re.M)
+        and not re.search(rf"^Q{re.escape(bgmn_name)}=", raw, re.M)
+    }
 
 
 def lst_phase_sections_by_name(texts: str) -> list[tuple[str, str]]:

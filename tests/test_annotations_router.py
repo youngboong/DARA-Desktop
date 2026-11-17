@@ -90,3 +90,15 @@ def test_report_figure_writes_annotations_as_plain_text():
     )
     svg = fit_figure(refinement, fmt="svg", annotations=[{"two_theta": 30, "intensity": 1, "text": "cost $5 & <tag>"}]).decode()
     assert "cost $5 &amp; &lt;tag&gt;" in svg
+
+
+def test_downloaded_figure_and_report_show_the_task_annotations(monkeypatch):
+    """The figure download and the report figure draw the task's stored labels."""
+    import test_review_router
+
+    client, task, _ = test_review_router.context.__wrapped__(monkeypatch)
+    task["annotations"] = [{"id": "a1", "two_theta": 21.0, "intensity": 50.0, "text": "peak <A>"}, "damaged"]
+    svg = client.get("/api/task/9/figure.svg")
+    assert svg.status_code == 200 and "peak &lt;A&gt;" in svg.text
+    report = client.get("/api/task/9/report")
+    assert report.status_code == 200 and "peak &lt;A&gt;" in report.text

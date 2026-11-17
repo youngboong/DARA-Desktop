@@ -237,6 +237,8 @@ function PlotSwitch({ label, ariaLabel = label, help, checked, onChange }) {
   </label>;
 }
 
+const ANNOTATING_HINT = 'Annotating: click the pattern to add a label · drag a label to move it · click a label to edit or delete it · peak clicks are paused.';
+
 /** Inline text field of a plot label at (px, py) of the plot: Enter or leaving the field saves, Esc cancels. */
 function AnnotationEditor({ editor, onCommit, onCancel, onDelete }) {
   const [text, setText] = React.useState(editor.text);
@@ -263,6 +265,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   height = 'clamp(440px, 58vh, 1000px)', compact = false,
   // Display treatment of the observed trace ({kalpha2, smooth}) and its setter; null hides the control.
   display = null, onDisplayChange = null,
+  // Told whether label editing is on, when the caller shows the hint (and pauses its own peak-click hint).
+  onAnnotatingChange = null,
 }, ref) {
   const [plot, setPlot] = React.useState(undefined);
   const [error, setError] = React.useState('');
@@ -419,6 +423,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       if (item) saveAnnotations(upsertAnnotation(annotations, { ...item, two_theta: Number(x.toFixed(4)), intensity: Number(intensity.toFixed(2)) }));
     },
   } : null;
+  const annotatingNow = Boolean(annotate);
+  React.useEffect(() => { onAnnotatingChange?.(annotatingNow); return () => onAnnotatingChange?.(false); }, [annotatingNow, onAnnotatingChange]);
   const commitLabel = text => {
     const editor = labelEditor;
     setLabelEditor(null);
@@ -548,8 +554,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       {wavelength > 0 ? <span className="dara-readout-value">d <b data-k="d">–</b> Å</span> : null}
       <span className="dara-readout-value"><span data-k="n">I</span> <b data-k="i">–</b></span>
     </div>
-    {annotate ? <div className="dara-footnote" style={{ marginBottom: 4 }}>
-      Annotating: click the pattern to add a label · drag a label to move it · click a label to edit or delete it · peak clicks are paused.</div> : null}
+    {annotate && !onAnnotatingChange ? <div className="dara-footnote" style={{ marginBottom: 4 }}>{ANNOTATING_HINT}</div> : null}
     <div ref={containerRef} style={{ width: '100%', position: 'relative' }}>
     <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config} anchorEdit={anchorEditing} annotate={annotate}
       {...plotHandlers} useResizeHandler style={{ height, width: '100%' }} />
@@ -923,6 +928,7 @@ function TaskDetail({ data, task_id, onDelete }) {
   const [compare, setCompare] = React.useState(null);
   const [peaks, setPeaks] = React.useState([]);
   const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [plotAnnotating, setPlotAnnotating] = React.useState(false); // the workspace plot is in label editing
   const [structureOpen, setStructureOpen] = React.useState(false);
   const [fitTab, setFitTab] = React.useState('phases');
   // Internal standard of the best fit after an edit (undefined: the task summary's own block).
@@ -1556,7 +1562,7 @@ function TaskDetail({ data, task_id, onDelete }) {
               onClose={event => { event.preventDefault(); onPeakClick(peak, true); }}>{`${peak.toFixed(2)}°`}</Tag>)}
             <Button size="small" type={drawerShown ? 'default' : 'primary'} onClick={() => setDrawerOpen(true)}>Add phase for these peaks</Button>
             <Button size="small" onClick={clearPeaks}>Clear</Button>
-          </> : <Text type="secondary">Click a peak to search references for it (Shift+click adds more) · press ? for shortcuts</Text>}
+          </> : <Text type="secondary">{plotAnnotating ? ANNOTATING_HINT : 'Click a peak to search references for it (Shift+click adds more) · press ? for shortcuts'}</Text>}
         </div> : null}
         {curveEdit ? <BackgroundCurvePanel anchors={curveEdit.anchors} selected={curveEdit.selected}
           onChange={editAnchors.onChange} onSelect={editAnchors.onSelect} onRemove={editAnchors.onRemove}
@@ -1566,7 +1572,8 @@ function TaskDetail({ data, task_id, onDelete }) {
         <RefinementPlot ref={plotRef} task_id={task_id} plot_id={versionPending ? undefined : plot_id} title={data.task_label}
           excludedRanges={[...excludedRanges, ...(versionData?.background?.excluded_ranges || [])]}
           peaks={peaks} previewSticks={preview?.sticks || null} onGroups={setPhaseGroups} phaseColor={phaseColor} phaseLegend={phaseLegend}
-          onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} display={display} onDisplayChange={setDisplay} />
+          onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} display={display} onDisplayChange={setDisplay}
+          onAnnotatingChange={peakClicksOn ? setPlotAnnotating : null} />
         {displayedResult ? <>
           <Tabs activeKey={fitTab === 'structure' && !structurePhases(displayedResult.phase_details).length ? 'phases' : fitTab} onChange={setFitTab} destroyInactiveTabPane
             items={[

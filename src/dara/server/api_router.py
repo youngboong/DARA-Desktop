@@ -50,6 +50,7 @@ from dara.server.fit_cautions import (
     fit_cautions,
     lattice_bound_flags,
     lattice_range_resolver,
+    le_bail_names,
     search_cautions,
 )
 from dara.server import mass_balance as mass_balance_module
@@ -394,6 +395,7 @@ def _add_status_fields(entry, refinement, name, index, extra, spec, b1_spec, ref
         status = phase_status(
             text, parsed, lattice_spec=lattice_spec, b1_spec=b1_spec, k2_spec=spec_of("k2"),
             overall_rwp=_value_and_esd(getattr(refinement.lst_data, "rwp", None))[0],
+            le_bail=bool(entry.get("le_bail")),
         )
         entry["refinement_status"] = status
     for key, item in lattice.items():
@@ -432,7 +434,12 @@ def _phase_refinement_details(
     refinement status and size/strain; ``references``: reference CIFs (``Cif``) whose lattice
     fills a phase refined with a fixed lattice (state ``fixed_reference``).
     """
+    from dara.result import le_bail_phases
+
     quantitative = _quantitative_phase_details(refinement)
+    # A Le Bail phase has free reflection intensities and therefore no amount (quantity: null).
+    no_amount = {"le_bail": True, "weight_percent": None, "weight_esd_percent": None}
+    le_bail = le_bail_phases(refinement.lst_data)
     output = {}
     for index, (name, phase) in enumerate(refinement.lst_data.phases_results.items()):
         bgmn_unit = str(getattr(phase, "unit", "NM"))
@@ -475,6 +482,7 @@ def _phase_refinement_details(
         b1_value = b1_spec(name) if b1_spec is not None else (spec(name, "b1") if spec else None)
         output[name] = {
             **quantitative.get(name, {}),
+            **(no_amount if name in le_bail else {}),
             "lattice_parameters": lattice,
             **_database_setting_lattice(name, phase, lattice),
             "xray_density": phase.xray_density,
@@ -2164,6 +2172,7 @@ def internal_standard_block(record: dict | None, final_result: dict | None) -> d
             "weight_esd_percent": detail.get("weight_esd_percent"),
             "weight_flag": (verdicts.get(name) or {}).get("weight_flag"),
             "refinement_level": (detail.get("refinement_status") or {}).get("level"),
+            "le_bail": bool(detail.get("le_bail")),
         })
     try:
         return quantify(phases, spec)
@@ -2296,6 +2305,10 @@ def _mass_balance_block(
     amounts, source, weight_percent, phase_details, predict_kwargs, cautions, confidence
 ) -> dict:
     """Mass-balance JSON for one refinement; appends its caution and confidence reason."""
+    if le_bail_names(phase_details):
+        # the element balance needs the amount of every phase; a Le Bail phase has none
+        return {"status": "skipped", "level": None, "reason": "A Le Bail phase has no amount; "
+                "the mass balance needs the amount of every phase."}
     block = mass_balance_module.mass_balance(
         amounts,
         weight_percent,
@@ -2568,6 +2581,8 @@ def _summarize_document(job: dict, document, *, persist_summary: bool = True) ->
             "cautions": final_cautions,
             "mass_balance": final_mass_balance,
             **({"confidence": final_confidence} if final_confidence is not None else {}),
+            # weight fractions exclude a Le Bail phase (see fit_cautions "weights_relative")
+            **({"weights_relative": True} if le_bail_names(final_phase_details) else {}),
         },
         "all_results": all_results,
         "duplicate_results_removed": len(d.results) - len(all_results),
@@ -3336,8 +3351,14 @@ async def _rir_of(task_id: int, sel: str | None):
 
     task, reflections, wavelength, selection, document, refinement, meta = await _peak_rows_of(task_id, sel)
     observed = await _observed_rows(task, document, refinement, reflections, wavelength)
+    from dara.result import le_bail_phases
+
+    le_bail = le_bail_phases(refinement.lst_data)
     structures = {}
     for name in refinement.lst_data.phases_results:
+        if name in le_bail:  # I/Ic needs intensities calculated from atoms; a Le Bail fit has none
+            structures[name] = "Le Bail phase, intensities not calculated from atoms"
+            continue
         reference = next((cif for cif in meta.get("cifs") or [] if cif_stem(cif) == name), None)
         try:
             structures[name] = phase_structure(name, refinement, reference, (meta.get("phases") or {}).get(name))[0]

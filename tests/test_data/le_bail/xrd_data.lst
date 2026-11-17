@@ -1,0 +1,51 @@
+Rietveld refinement to file(s) xrd_data.xy
+BGMN version 4.2.22, 8301 measured points, 42 peaks, 62 parameters
+Start: Tue Nov 17 17:05:37 2026; End: Tue Nov 17 17:05:41 2026
+25 iteration steps
+
+Rp=1.23%  Rpb=47.75%  R=1.61%  Rwp=1.60% Rexp=1.37%
+Durbin-Watson d=1.49
+1-rho=4.55%
+
+Global parameters and GOALs
+****************************
+QZn17Co03O2186cod1533020=1.00000
+EPS2=-0.002184+-0.000014
+
+Local parameters and GOALs for phase Zn17Co03O2186cod1533020
+******************************************************
+SpacegroupNo=186
+HermannMauguin=P6_3mc
+XrayDensity=5.593
+Rphase=3.11%
+UNIT=NM
+A=0.325468+-0.000013
+C=0.520436+-0.000025
+k1=1.00000
+k2=0
+B1=0.003523+-0.000050
+GrainSize(1,1,1)=90.3+-1.3
+GEWICHT=SPHAR4, MeanValue(GEWICHT)=0.0450179
+Atomic positions for phase Zn17Co03O2186cod1533020
+---------------------------------------------
+  2     0.3333  0.6667  0.0000     E=(ZN(0.8500),CO(0.1500))
+  2     0.3333  0.6667  0.3815     E=(O(1.0000))
+
+Local parameters and GOALs for phase Co3O4227cod9005896
+******************************************************
+SpacegroupNo=227
+HermannMauguin=F4_1/d-32/m
+XrayDensity=6.045
+Rphase=1.81%
+UNIT=NM
+A=0.808837+-0.000027
+k1=1.00000
+k2=0.00000078+-0.00000021
+B1=0.00425+-0.00018
+GrainSize(1,1,1)=74.8+-3.1
+GEWICHT=UNDEF
+Atomic positions for phase Co3O4227cod9005896
+---------------------------------------------
+  8     0.5000  0.5000  0.5000     E=(CO(1.0000))
+ 16     0.1250  0.1250  0.1250     E=(CO(1.0000))
+ 32     0.8882  0.8882  0.8882     E=(O(1.0000))

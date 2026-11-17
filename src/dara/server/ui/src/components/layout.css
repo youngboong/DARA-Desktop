@@ -395,3 +395,23 @@ code {
   gap: var(--dara-space-1);
   transform: translate(-50%, -100%);
 }
+
+/* Unit-cell view: one block per phase, an even grid on wide screens. */
+.dara-cell-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+  gap: var(--dara-space-4) var(--dara-space-5);
+  margin-bottom: var(--dara-space-3);
+}
+
+.dara-cell-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--dara-space-1) var(--dara-space-3);
+  margin-bottom: var(--dara-space-2);
+}
+
+.dara-cell-phase details summary {
+  cursor: pointer;
+}

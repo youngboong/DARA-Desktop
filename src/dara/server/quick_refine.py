@@ -44,6 +44,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -215,9 +216,15 @@ class QuickRefineRequest(BaseModel):
     background: QuickBackground | None = None
     label: str | None = Field(default=None, max_length=120)
     origin: Literal[
-        "add_hint", "add_peak_search", "swap", "remove", "background", "manual", "refine_all", "structure"
+        "add_hint", "add_peak_search", "swap", "remove", "background", "manual", "refine_all", "structure",
+        "le_bail",
     ] = "manual"
     structure: QuickStructure | None = None
+    # ``{phase: true}`` fits that phase by Le Bail (LeBail=1: free reflection intensities, no
+    # amount); ``false`` returns it to a Rietveld phase. Later versions inherit the choice.
+    le_bail: dict[Annotated[str, Field(min_length=1, max_length=200)], StrictBool] | None = Field(
+        default=None, max_length=MAX_PHASES
+    )
 
     @field_validator("base")
     @classmethod
@@ -230,9 +237,18 @@ class QuickRefineRequest(BaseModel):
 
     @model_validator(mode="after")
     def _non_empty(self):
+        if sum(bool(value) for value in (self.le_bail or {}).values()) > 1:
+            raise ValueError("Only one phase can be fitted by Le Bail at a time.")
+        if self.origin == "le_bail":
+            if self.phases or self.remove:
+                raise ValueError("A Le Bail change keeps the phase set; do not add or remove phases.")
+            if not self.le_bail:
+                raise ValueError("A Le Bail change needs le_bail: {phase: true or false}.")
         if self.origin == "structure":
             if self.phases or self.remove:
                 raise ValueError("A structure refinement keeps the phase set; do not add or remove phases.")
+            if self.le_bail:
+                raise ValueError("Switch Le Bail phases in a refinement of their own.")
             if self.structure is None:
                 raise ValueError("A structure refinement needs a structure block.")
             return self
@@ -242,7 +258,7 @@ class QuickRefineRequest(BaseModel):
             if self.phases or self.remove:
                 raise ValueError("Refine all phases keeps the phase set; do not add or remove phases.")
             return self
-        if not (self.phases or self.remove or self.controls or self.background):
+        if not (self.phases or self.remove or self.controls or self.background or self.le_bail):
             raise ValueError("Nothing to re-refine: add or remove a phase, or change a setting.")
         return self
 
@@ -753,11 +769,20 @@ def structure_label(structure: QuickStructure) -> str:
     return f"Structure: {name} ({', '.join(parts)})" if parts else f"Structure: {name}"
 
 
+def le_bail_label(choices: dict) -> str:
+    """``Le Bail: Co3O4`` / ``Le Bail off: Co3O4`` (both joined by `` · ``)."""
+    on = ", ".join(_short_name(stem) for stem, value in choices.items() if value)
+    off = ", ".join(_short_name(stem) for stem, value in choices.items() if not value)
+    return " · ".join(part for part in (on and f"Le Bail: {on}", off and f"Le Bail off: {off}") if part)
+
+
 def default_label(request: QuickRefineRequest) -> str:
     if request.label:
         return request.label.strip()
     if request.origin == "structure" and request.structure is not None:
         return structure_label(request.structure)
+    if request.origin == "le_bail":
+        return le_bail_label(request.le_bail)
     added = ", ".join(_short_name(p.ref) for p in request.phases)
     removed = ", ".join(_short_name(value) for value in request.remove)
     kind = request.origin
@@ -784,6 +809,8 @@ def default_label(request: QuickRefineRequest) -> str:
         parts.append("changed refinement controls")
     if request.background:
         parts.append("changed background")
+    if request.le_bail:
+        parts.append(le_bail_label(request.le_bail))
     return ("Re-refinement: " + ", ".join(parts)) if parts else "Re-refinement"
 
 
@@ -949,6 +976,23 @@ def structure_models(request: QuickRefineRequest, plan: PhasePlan, base_version:
     return models
 
 
+def le_bail_stems(request: QuickRefineRequest, plan: PhasePlan, base_version: dict | None) -> list[str]:
+    """Phases of the new run fitted by Le Bail: the base version's, changed by ``request.le_bail``."""
+    stems = set(versions.le_bail_stems(base_version)) & set(plan.stems)
+    for value, on in (request.le_bail or {}).items():
+        matches = [stem for stem in plan.stems if value in (stem, process_phase_name(stem))]
+        if not matches:
+            raise QuickRefineError(f"{value} is not part of the base fit.")
+        (stems.add if on else stems.discard)(matches[0])
+    if len(stems) > 1:
+        # BGMN 4.2.22 (task 120, 2026-11-17): only the first LeBail=1 phase drops its GEWICHT;
+        # the second keeps GEWICHT=0.0+-1.8 and its lattice/B1 e.s.d. diverge (A=0.8+-1.7).
+        raise QuickRefineError(
+            f"Only one phase can be fitted by Le Bail at a time (now: {', '.join(sorted(stems))})."
+        )
+    return sorted(stems)
+
+
 _SITES: "OrderedDict[str, list]" = OrderedDict()
 _SITES_LOCK = threading.Lock()
 
@@ -1058,6 +1102,9 @@ async def check_structure_request(record: dict, request: QuickRefineRequest, sel
     """422 with ``{"refusals": [...]}`` when the structure refinement breaks a rule (R1-R9)."""
     document = await load_document(record["uuid"])
     structure = request.structure
+    if structure.phase in versions.le_bail_stems(base_version) and not structure.reset:
+        raise HTTPException(422, f"{structure.phase} is fitted by Le Bail: its atoms take no part in the fit. "
+                                 "Switch it back to a Rietveld phase first.")
     loop = asyncio.get_running_loop()
     try:
         report = await loop.run_in_executor(
@@ -1253,8 +1300,12 @@ def _run_job(job: QuickJob, record: dict, raw: dict | None, base_version: dict |
     narrow = narrow_lattice_stems(request, plan, base_version)
     for stem in narrow:
         effective[stem] = {**effective[stem], "lattice_range": ADDED_PHASE_LATTICE_RANGE}
+    le_bail = le_bail_stems(request, plan, base_version)
     for stem, model in structure_models(request, plan, base_version).items():
-        effective[stem] = {**effective[stem], "structure_model": model}
+        if stem not in le_bail:  # Le Bail intensities are free; the atoms take no part
+            effective[stem] = {**effective[stem], "structure_model": model}
+    for stem in le_bail:
+        effective[stem] = {**effective[stem], "lebail": True}  # cif2str writes LeBail=1
     fast = is_fast(request)
     cif_texts = {stem: str(cif) for stem, cif in plan.cifs.items()}
     key = fit_key(

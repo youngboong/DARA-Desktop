@@ -67,6 +67,9 @@ def write_bgmn_bundle(
     created: list[Path] = []
     str_paths: list[Path] = []
     failed = failed if failed is not None else []
+    from dara.result import le_bail_phases
+
+    le_bail = le_bail_phases(refinement.lst_data)
     with tempfile.TemporaryDirectory() as temp:
         temp_dir = Path(temp)
         for name in refinement.lst_data.phases_results:
@@ -82,7 +85,8 @@ def write_bgmn_bundle(
                 continue
             cif_path.write_text(text, encoding="utf-8")
             try:
-                str_paths.append(cif2str(cif_path, "", out_dir, **params))
+                lebail = {"lebail": True} if name in le_bail else {}
+                str_paths.append(cif2str(cif_path, "", out_dir, **{**params, **lebail}))
             except Exception:
                 logger.warning("Could not convert %s to a BGMN .str file", name, exc_info=True)
                 failed.append(name)

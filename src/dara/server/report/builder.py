@@ -1167,7 +1167,7 @@ def _build_report_html(
         figure = H.embed_svg(
             fit_figure(
                 refinement, fmt="svg", width_mm=170, excluded_ranges=excluded_ranges,
-                counts_like=counts_like, hkl_labels=hkl_labels,
+                counts_like=counts_like, hkl_labels=hkl_labels, annotations=task.get("annotations"),
             ),
             "Observed and calculated diffraction patterns with reflection positions and difference curve",
         )

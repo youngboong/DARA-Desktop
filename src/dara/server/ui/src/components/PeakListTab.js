@@ -7,6 +7,8 @@ import ChemicalFormula from './ChemicalFormula';
 import { spacegroupOfPhase } from './versions.mjs';
 import { curveRangeText, curveText, instrumentQuery } from './instrumentCurve.mjs';
 import { FwhmCurveDialog } from './InstrumentFwhmCurve';
+import CellRefinementView from './CellRefinementView';
+import { DEFAULT_SHIFT_MODEL, SHIFT_MODELS } from './cellRefinement.mjs';
 
 const { Text } = Typography;
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <Spin /> });
@@ -21,6 +23,8 @@ const INSTRUMENT_HELP = 'Instrument FWHM removed from each peak before Scherrer 
   + 'Standard curve: the Caglioti curve of a line-broadening standard measured on this instrument profile, taken at each peak\'s angle. '
   + 'Constant FWHM: one value for all angles, remembered for this profile.';
 const WH_HELP = 'Williamson–Hall: β·cos θ = K·λ/D + ε·4·sin θ, a straight line through the fitted peaks of one phase (β: Kα1 FWHM with the instrument FWHM removed, in radians). Needs 4 or more fitted peaks over at least 30° 2θ.';
+const CELL_HELP = 'Unit-cell refinement: least-squares lattice parameters from the Kα1 positions of the indexed observed peaks of each phase, with a zero shift, a specimen displacement or an internal-standard 2θ correction.';
+const SHIFT_HELP = 'Instrumental 2θ shift refined with the cell. Zero shift and specimen displacement are not refined together: over a lab scan they are almost fully correlated. An internal standard corrects 2θ with a phase of known cell first.';
 const FIT_NOTE_HELP = {
   merged: 'Found closer than one FWHM to a stronger peak: fitted as that peak, which carries the FWHM',
   overlapped: 'Overlaps its neighbours too much for a width of its own',
@@ -70,7 +74,19 @@ export default function PeakListTab({ taskId, sel, active }) {
   const [curve, setCurve] = React.useState(null); // the profile's curve, once a response used it
   const [curveOpen, setCurveOpen] = React.useState(false);
   const [reload, setReload] = React.useState(0);
+  const [shiftModel, setShiftModel] = React.useState(DEFAULT_SHIFT_MODEL);
+  const [cellPhases, setCellPhases] = React.useState([]); // [{phase, label}] of the fit, for the internal-standard choices
+  const onCellPhases = React.useCallback((phases, correction) => {
+    const found = [...(correction ? [{ phase: correction.standard, label: correction.phase_label || correction.standard }] : []),
+      ...phases.map(entry => ({ phase: entry.phase, label: entry.phase_label || entry.phase }))];
+    setCellPhases(previous => [...previous, ...found.filter(entry => !previous.some(known => known.phase === entry.phase))]);
+  }, []);
   React.useEffect(() => { if (profile !== null) setInstrument(storedFwhm(profile)); }, [profile]);
+  // Another fit or version may have other phases: its standards are listed afresh.
+  React.useEffect(() => {
+    setCellPhases([]);
+    setShiftModel(model => (model.startsWith('standard:') ? DEFAULT_SHIFT_MODEL : model));
+  }, [sel]);
   const changeInstrument = value => {
     const next = Number.isFinite(value) && value > 0 ? value : null;
     setInstrument(next);
@@ -95,9 +111,18 @@ export default function PeakListTab({ taskId, sel, active }) {
       <div className="dara-toolbar-group">
         <Radio.Group size="small" optionType="button" value={view} onChange={event => setView(event.target.value)}
           aria-label="Peak list" options={[{ value: 'calculated', label: 'Calculated reflections' }, { value: 'observed', label: 'Observed peaks' },
-            { value: 'size', label: <Tooltip title={WH_HELP}><span>Size / strain (Williamson–Hall)</span></Tooltip> }]} />
+            { value: 'size', label: <Tooltip title={WH_HELP}><span>Size / strain</span></Tooltip> },
+            { value: 'cell', label: <Tooltip title={CELL_HELP}><span>Unit cell</span></Tooltip> }]} />
       </div>
-      {view === 'calculated' ? null : <div className="dara-toolbar-group" aria-label="Size estimate settings">
+      {view === 'cell' ? <div className="dara-toolbar-group" aria-label="Unit-cell settings">
+        <label className="dara-toolbar-item">
+          <Tooltip title={SHIFT_HELP}><span>Shift model</span></Tooltip>
+          <Select size="small" aria-label="Shift model" value={shiftModel} onChange={setShiftModel} style={{ width: 240 }} dropdownMatchSelectWidth={false}
+            options={[...SHIFT_MODELS, ...cellPhases.map(entry => ({ value: `standard:${entry.phase}`,
+              label: <>Internal standard: <ChemicalFormula formula={entry.label} /></> }))]} />
+        </label>
+      </div> : null}
+      {view !== 'observed' && view !== 'size' ? null : <div className="dara-toolbar-group" aria-label="Size estimate settings">
         <Tooltip title={K_HELP}>
           <Select size="small" aria-label="Scherrer constant" value={k} onChange={setK} options={SCHERRER_K} style={{ width: 96 }} />
         </Tooltip>
@@ -114,7 +139,8 @@ export default function PeakListTab({ taskId, sel, active }) {
     </div>
     {view === 'observed' ? <ObservedPeaks taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
       : view === 'size' ? <WilliamsonHall taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
-        : <CalculatedReflections taskId={taskId} sel={sel} active={active} />}
+        : view === 'cell' ? <CellRefinementView taskId={taskId} sel={sel} model={shiftModel} active={active} onPhases={onCellPhases} />
+          : <CalculatedReflections taskId={taskId} sel={sel} active={active} />}
     {measurable ? <FwhmCurveDialog profile={profile} open={curveOpen} onClose={() => setCurveOpen(false)} onChange={curveChanged} /> : null}
   </>;
 }

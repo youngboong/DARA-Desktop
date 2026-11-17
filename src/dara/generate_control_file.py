@@ -183,7 +183,12 @@ def generate_control_file(
         [f"STRUC[{i}]={str_path.name}" for i, str_path in enumerate(str_paths, start=1)]
     )
 
-    phase_names = [read_phase_name_from_str(str_path) for str_path in str_paths]
+    # A LeBail=1 phase has no GEWICHT (bgmn.de/variables.html: LeBail "will cause to omit
+    # calculation of F, GEWICHT"); in the sum it would make every Q goal UNDEF (BGMN 4.2.22).
+    phase_names = [
+        read_phase_name_from_str(str_path) for str_path in str_paths
+        if not re.search(r"^\s*LeBail\s*=\s*[1-9]", Path(str_path).read_text(), re.MULTILINE)
+    ]
     phase_fraction_str = "\n".join(
         [f"Q{phase_name}={phase_name}/sum" for phase_name in phase_names]
     )
@@ -219,7 +224,7 @@ def generate_control_file(
     NTHREADS={n_threads}
     {f"ITMAX={itmax}" if itmax is not None else ""}
     PROTOKOLL=Y
-    sum={"+".join(phase_name for phase_name in phase_names)}
+    {f"sum={'+'.join(phase_names)}" if phase_names else ""}
     {phase_fraction_str}
     {goal_str}
     """

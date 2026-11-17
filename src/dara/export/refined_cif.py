@@ -336,6 +336,17 @@ def refined_cif_text(name, refinement, *, meta=None, reference_cif=None) -> tupl
     phases = getattr(getattr(refinement, "lst_data", None), "phases_results", None) or {}
     phase = phases.get(name)
     try:
+        from dara.result import le_bail_phases
+
+        if name in le_bail_phases(refinement.lst_data):
+            # free reflection intensities: no refined structure exists, only the refined cell
+            cell = ", ".join(
+                f"{key} {format_esd(value * factor, esd * factor if esd else None)}"
+                for key, _, factor in _CELL
+                for value, esd in [_pair(getattr(phase, key, None))]
+                if value is not None
+            )
+            raise ValueError(f"Le Bail fit, atoms not refined; refined cell (Angstrom, deg): {cell}")
         structure, from_reference = phase_structure(name, refinement, reference_cif, meta)
         text = _write_structure(name, structure, refinement, phase, meta, from_reference=from_reference)
         return text, "refined_cifs"
