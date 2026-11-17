@@ -3186,7 +3186,7 @@ async def _selected_fit(task_id: int, sel: str | None):
 
 
 async def _peak_rows_of(task_id: int, sel: str | None):
-    """``(task, rows, wavelength, selection, document, refinement)`` of the peak list of one selection."""
+    """``(task, rows, wavelength, selection, document, refinement, meta)`` of the peak list of one selection."""
     task, document, refinement, meta, selection = await _selected_fit(task_id, sel)
     try:
         rows = peak_table(document, refinement, meta["cifs"])
@@ -3194,7 +3194,7 @@ async def _peak_rows_of(task_id: int, sel: str | None):
         logger.warning("Peak list of task %s failed", task_id, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Peak list failed: {exc}") from exc
     wavelength = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
-    return task, rows, wavelength, selection, document, refinement
+    return task, rows, wavelength, selection, document, refinement, meta
 
 
 @router.get("/task/{task_id}/peaks")
@@ -3203,7 +3203,7 @@ async def task_peaks(task_id: int, sel: str | None = Query(None)):
     or ``version:<n>`` (default: the adopted fit)."""
     from dara.export.peak_list import COLUMNS
 
-    _, rows, wavelength, selection, _, _ = await _peak_rows_of(task_id, sel)
+    _, rows, wavelength, selection, _, _, _ = await _peak_rows_of(task_id, sel)
     return {
         "columns": list(COLUMNS), "rows": rows, "wavelength": wavelength, "selection": selection,
     }
@@ -3213,7 +3213,7 @@ async def task_peaks(task_id: int, sel: str | None = Query(None)):
 async def task_peaks_csv(task_id: int, sel: str | None = Query(None)):
     from dara.export.peak_list import peak_csv_bytes
 
-    task, rows, _, selection, _, _ = await _peak_rows_of(task_id, sel)
+    task, rows, _, selection, _, _, _ = await _peak_rows_of(task_id, sel)
     filename = download_name(task_id, task["job"]["name"], "peaks", selection, "csv")
     return _csv_response(peak_csv_bytes(rows), filename)
 
@@ -3256,13 +3256,24 @@ async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrume
     with Scherrer sizes for the constant ``k`` after removing the instrument FWHM chosen by
     ``instrument`` (``_instrument_correction``). ``settings`` holds k, instrument_fwhm,
     instrument_profile and the ``instrument`` block."""
+    k = k if isinstance(k, (int, float)) else 0.89  # direct calls leave the Query default objects
+    instrument_fwhm = instrument_fwhm if isinstance(instrument_fwhm, (int, float)) else None
+    task, reflections, wavelength, selection, document, refinement, _ = await _peak_rows_of(task_id, sel)
+    correction, applied = _instrument_correction(document, instrument, instrument_fwhm)
+    rows = await _observed_rows(task, document, refinement, reflections, wavelength, k, correction)
+    if applied["two_theta_range"]:  # peaks outside the standard's range got the edge value of the curve
+        low, high = applied["two_theta_range"]
+        applied["clamped"] = sum(row["fwhm_deg"] is not None and not low <= row["two_theta_deg"] <= high for row in rows)
+    settings = {"k": k, "instrument_fwhm": instrument_fwhm, "instrument_profile": applied["profile"] or "",
+                "instrument": applied}
+    return task, rows, wavelength, selection, document, refinement, settings
+
+
+async def _observed_rows(task, document, refinement, reflections, wavelength, k=0.89, correction=None):
+    """``peak_list.observed_peak_rows`` of the task's EFLECH peaks with their profile fits (both cached)."""
     from dara.export.peak_list import observed_peak_rows
     from dara.server import quick_refine
 
-    k = k if isinstance(k, (int, float)) else 0.89  # direct calls leave the Query default objects
-    instrument_fwhm = instrument_fwhm if isinstance(instrument_fwhm, (int, float)) else None
-    task, reflections, wavelength, selection, document, refinement = await _peak_rows_of(task_id, sel)
-    correction, applied = _instrument_correction(document, instrument, instrument_fwhm)
     try:
         peaks = await asyncio.to_thread(quick_refine.task_peaks, task["uuid"], document)
         plot_data = refinement.plot_data
@@ -3272,16 +3283,10 @@ async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrume
             list(peaks["2theta"]), wavelength, excluded,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Peak detection of task %s failed", task_id, exc_info=True)
+        logger.warning("Peak detection of task %s failed", task.get("index"), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Peak detection failed: {exc}") from exc
-    rows = observed_peak_rows(peaks, reflections, wavelength=wavelength, profiles=profiles, k=k,
+    return observed_peak_rows(peaks, reflections, wavelength=wavelength, profiles=profiles, k=k,
                               instrument_fwhm=correction)
-    if applied["two_theta_range"]:  # peaks outside the standard's range got the edge value of the curve
-        low, high = applied["two_theta_range"]
-        applied["clamped"] = sum(row["fwhm_deg"] is not None and not low <= row["two_theta_deg"] <= high for row in rows)
-    settings = {"k": k, "instrument_fwhm": instrument_fwhm, "instrument_profile": applied["profile"] or "",
-                "instrument": applied}
-    return task, rows, wavelength, selection, document, refinement, settings
 
 
 _SCHERRER_K = Query(0.89, gt=0, le=2, description="Scherrer constant K (0.89: FWHM-based Scherrer)")
@@ -3320,6 +3325,53 @@ async def task_peaks_measured_csv(
     task, rows, _, selection, _, _, _ = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm, instrument)
     filename = download_name(task_id, task["job"]["name"], "peaks_observed", selection, "csv")
     return _csv_response(peak_csv_bytes(rows, OBSERVED_COLUMNS), filename)
+
+
+async def _rir_of(task_id: int, sel: str | None):
+    """``(task, selection, wavelength, result)``: RIR (I/Ic) semi-quantification of ``sel``
+    (``dara.rir``) from the refined structures and the profile-fitted measured peaks, cached per fit."""
+    from dara.export.peak_list import _label
+    from dara.export.refined_cif import phase_structure
+    from dara.server import quick_refine
+
+    task, reflections, wavelength, selection, document, refinement, meta = await _peak_rows_of(task_id, sel)
+    observed = await _observed_rows(task, document, refinement, reflections, wavelength)
+    structures = {}
+    for name in refinement.lst_data.phases_results:
+        reference = next((cif for cif in meta.get("cifs") or [] if cif_stem(cif) == name), None)
+        try:
+            structures[name] = phase_structure(name, refinement, reference, (meta.get("phases") or {}).get(name))[0]
+        except Exception as exc:  # noqa: BLE001 - reported on the phase's row
+            structures[name] = str(exc) or type(exc).__name__
+    try:
+        result = await asyncio.to_thread(
+            quick_refine.task_rir, task["uuid"], structures, observed, reflections, wavelength,
+            _weight_percent(refinement), {name: _label(name) for name in structures},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("RIR analysis of task %s failed", task_id, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"RIR analysis failed: {exc}") from exc
+    return task, selection, wavelength, result
+
+
+@router.get("/task/{task_id}/rir")
+async def task_rir_quantification(task_id: int, sel: str | None = Query(None)):
+    """Semi-quantitative weight fractions by the reference intensity ratio (I/Ic) method beside the
+    Rietveld ones of ``sel``: ``phases`` (rows of ``columns``), ``complete`` and ``assumptions``."""
+    from dara.rir import RIR_COLUMNS
+
+    _, selection, wavelength, result = await _rir_of(task_id, sel)
+    return {"columns": list(RIR_COLUMNS), **result, "wavelength": wavelength, "selection": selection}
+
+
+@router.get("/task/{task_id}/rir.csv")
+async def task_rir_quantification_csv(task_id: int, sel: str | None = Query(None)):
+    from dara.export.peak_list import peak_csv_bytes
+    from dara.rir import RIR_COLUMNS
+
+    task, selection, _, result = await _rir_of(task_id, sel)
+    filename = download_name(task_id, task["job"]["name"], "rir", selection, "csv")
+    return _csv_response(peak_csv_bytes(result["phases"], RIR_COLUMNS), filename)
 
 
 @router.get("/task/{task_id}/williamson-hall")

@@ -1722,7 +1722,7 @@ def task_peaks(task_uuid: str, document) -> pd.DataFrame:
     )
 
 
-PROFILE_FIT_VERSION = "2"  # bump when peak_profile.fit_peak_profiles changes its results
+PROFILE_FIT_VERSION = "3"  # bump when peak_profile.fit_peak_profiles changes its results
 
 
 def task_profile_fits(task_uuid: str, two_theta, observed, background, positions, wavelength, excluded_ranges=None) -> list[dict]:
@@ -1749,6 +1749,31 @@ def task_profile_fits(task_uuid: str, two_theta, observed, background, positions
     except OSError:
         logger.debug("Could not cache peak profile fits", exc_info=True)
     return results
+
+
+RIR_VERSION = "1"  # bump when dara.rir changes its results
+
+
+def task_rir(task_uuid: str, structures: dict, observed: list[dict], reflections: list[dict], wavelength,
+             rietveld=None, labels=None) -> dict:
+    """``rir.rir_quantification`` of one fit of a task, cached on disk by its inputs (structures,
+    observed peaks, reflections, wavelength, Rietveld fractions), so each selection is computed once."""
+    from dara.rir import rir_quantification
+
+    text = json.dumps(
+        [{name: getattr(value, "as_dict", lambda: value)() for name, value in structures.items()},
+         observed, reflections, wavelength, rietveld, labels], default=str, sort_keys=True)
+    cache = task_cache(task_uuid) / "rir" / f"{_sha1(RIR_VERSION, text)[:16]}.json"
+    try:
+        return json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    result = rir_quantification(structures, observed, reflections, wavelength=wavelength, rietveld=rietveld, labels=labels)
+    try:
+        _atomic_write(cache, json.dumps(result))
+    except OSError:
+        logger.debug("Could not cache the RIR analysis", exc_info=True)
+    return result
 
 
 def warm_task(record: dict, raw: dict | None) -> None:

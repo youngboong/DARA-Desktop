@@ -36,8 +36,15 @@ def doublet(x, center, height, fwhm, eta, pair):
     return y
 
 
+def doublet_area(height, fwhm, eta, pair):
+    """Integrated area of ``doublet``: the pseudo-Voigt area ``H·w·(η·π/2 + (1 − η)·sqrt(π/(4 ln 2)))``,
+    times 1 + I(Kα2)/I(Kα1) for a lab anode."""
+    area = height * fwhm * (eta * np.pi / 2 + (1 - eta) * np.sqrt(np.pi / (4 * np.log(2))))
+    return area * (1 + KALPHA2_RATIO) if pair is not None else area
+
+
 def _empty(note):
-    return {"two_theta_fit": None, "fwhm_deg": None, "fwhm_esd_deg": None, "eta": None, "fit_note": note}
+    return {"two_theta_fit": None, "fwhm_deg": None, "fwhm_esd_deg": None, "eta": None, "area": None, "fit_note": note}
 
 
 def _fit_cluster(x, net, sigma, peaks, pair, start_fwhm):
@@ -88,7 +95,7 @@ def _fit_cluster(x, net, sigma, peaks, pair, start_fwhm):
             note = "overlapped" if m > 1 else "too weak"
         results.append(_empty(note) if note else {
             "two_theta_fit": float(center), "fwhm_deg": float(width), "fwhm_esd_deg": float(esd),
-            "eta": float(eta), "fit_note": None,
+            "eta": float(eta), "area": float(doublet_area(height, width, eta, pair)), "fit_note": None,
         })
     return results
 
@@ -144,7 +151,7 @@ def fit_peak_profiles(two_theta, observed, background, positions, wavelength, ex
     ``observed − background``, weighted by 1/sqrt(max(observed, 1)).
 
     Each result: ``two_theta_fit``, ``fwhm_deg``, ``fwhm_esd_deg`` (from the Jacobian), ``eta``,
-    ``fit_note`` (``None``, "overlapped", "too weak", "fit failed" or "merged"; the values are
+    ``area`` (integrated net intensity of the fitted Kα1+Kα2 profile, counts·degree), ``fit_note`` (``None``, "overlapped", "too weak", "fit failed" or "merged"; the values are
     then None). Positions closer than one FWHM are one peak: the stronger is fitted, the other
     is "merged".
     The clustering distance starts at 3 × 0.15° and is redone once with the median fitted FWHM
