@@ -5,6 +5,8 @@ import { DownloadOutlined } from '@ant-design/icons';
 import { API, NOT_AVAILABLE, requestJson } from './QuickRefineProgress';
 import ChemicalFormula from './ChemicalFormula';
 import { spacegroupOfPhase } from './versions.mjs';
+import { curveRangeText, curveText, instrumentQuery } from './instrumentCurve.mjs';
+import { FwhmCurveDialog } from './InstrumentFwhmCurve';
 
 const { Text } = Typography;
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <Spin /> });
@@ -15,7 +17,9 @@ const SCHERRER_K = [
   { value: 1, label: 'K = 1.0' },
 ];
 const K_HELP = 'Scherrer constant for the FWHM. 0.89: spherical crystallites (the usual value); 0.94: cubic crystallites; 1.0: no crystallite shape assumed.';
-const INSTRUMENT_HELP = 'FWHM of your instrument at these angles (from a standard such as LaB6 or Si), removed before Scherrer and Williamson–Hall: quadratically for Gaussian-like peaks (η < 0.5), linearly otherwise. Remembered for this instrument profile.';
+const INSTRUMENT_HELP = 'Instrument FWHM removed from each peak before Scherrer and Williamson–Hall: quadratically for Gaussian-like peaks (η < 0.5), linearly otherwise. '
+  + 'Standard curve: the Caglioti curve of a line-broadening standard measured on this instrument profile, taken at each peak\'s angle. '
+  + 'Constant FWHM: one value for all angles, remembered for this profile.';
 const WH_HELP = 'Williamson–Hall: β·cos θ = K·λ/D + ε·4·sin θ, a straight line through the fitted peaks of one phase (β: Kα1 FWHM with the instrument FWHM removed, in radians). Needs 4 or more fitted peaks over at least 30° 2θ.';
 const FIT_NOTE_HELP = {
   merged: 'Found closer than one FWHM to a stronger peak: fitted as that peak, which carries the FWHM',
@@ -25,6 +29,15 @@ const FIT_NOTE_HELP = {
 };
 const QUIET_NOTE = 'Single-peak estimates. The Rietveld size of each phase (instrument-corrected with the instrument profile) is the reported value.';
 const CONSTANT_NOTE = 'The instrument FWHM is one value for all angles, while the instrument broadening varies with angle, so the sizes stay approximate.';
+
+/** Footnote of the instrument correction the server applied (`instrument` block of the response). */
+function correctionNote(applied) {
+  if (applied?.mode === 'constant') return CONSTANT_NOTE;
+  if (applied?.mode !== 'curve') return null;
+  const clamped = applied.clamped > 0
+    ? ` ${applied.clamped} peak${applied.clamped === 1 ? '' : 's'} outside the standard's range use${applied.clamped === 1 ? 's' : ''} the edge value.` : '';
+  return `Instrument broadening removed with the ${applied.standard || 'standard'} curve measured on ${applied.measured_on || 'an unknown date'} (${curveRangeText(applied.two_theta_range)}).${clamped}`;
+}
 
 // Negative values take the minus sign (U+2212), as on the plot axes.
 const fixed = digits => value => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-/, '\u2212'));
@@ -51,13 +64,32 @@ export default function PeakListTab({ taskId, sel, active }) {
   const [k, setK] = React.useState(0.89);
   const [instrument, setInstrument] = React.useState(null);
   const [profile, setProfile] = React.useState(null);
+  // null: the server's default (the profile's curve, else the constant, else none); or 'curve' | 'constant' | 'none'.
+  const [mode, setMode] = React.useState(null);
+  const [applied, setApplied] = React.useState(null); // `instrument` block of the last response
+  const [curve, setCurve] = React.useState(null); // the profile's curve, once a response used it
+  const [curveOpen, setCurveOpen] = React.useState(false);
+  const [reload, setReload] = React.useState(0);
   React.useEffect(() => { if (profile !== null) setInstrument(storedFwhm(profile)); }, [profile]);
   const changeInstrument = value => {
     const next = Number.isFinite(value) && value > 0 ? value : null;
     setInstrument(next);
     if (profile !== null) storeFwhm(profile, next);
   };
-  const query = `sel=${encodeURIComponent(sel)}&k=${k}${instrument ? `&instrument_fwhm=${instrument}` : ''}`;
+  const onResponse = React.useCallback(data => {
+    setProfile(data.instrument_profile ?? '');
+    setApplied(data.instrument || null);
+    if (data.instrument?.mode === 'curve') setCurve(data.instrument);
+  }, []);
+  const curveChanged = stored => {
+    setCurve(null);
+    setMode(previous => (stored || previous === 'curve' ? null : previous));
+    setReload(value => value + 1);
+  };
+  const shownMode = mode ?? applied?.mode ?? (instrument ? 'constant' : 'none');
+  const query = `sel=${encodeURIComponent(sel)}&${instrumentQuery({ k, mode, constant: instrument })}`;
+  // Profiles without a file of their own (synchrotron) cannot carry a curve.
+  const measurable = Boolean(profile) && profile !== 'synchrotron';
   return <>
     <div className="dara-toolbar">
       <div className="dara-toolbar-group">
@@ -70,20 +102,25 @@ export default function PeakListTab({ taskId, sel, active }) {
           <Select size="small" aria-label="Scherrer constant" value={k} onChange={setK} options={SCHERRER_K} style={{ width: 96 }} />
         </Tooltip>
         <label className="dara-toolbar-item">
-          <Tooltip title={INSTRUMENT_HELP}><span>Instrument FWHM (°)</span></Tooltip>
-          <InputNumber size="small" aria-label="Instrument FWHM in degrees" min={0} max={0.5} step={0.005} placeholder="0"
-            value={instrument} onChange={changeInstrument} style={{ width: 80 }} />
+          <Tooltip title={INSTRUMENT_HELP}><span>Instrument broadening</span></Tooltip>
+          <Select size="small" aria-label="Instrument broadening" value={shownMode} onChange={setMode} style={{ width: curve ? 290 : 140 }}
+            options={[...(curve ? [{ value: 'curve', label: `Standard curve (${curveText(curve)})` }] : []),
+              { value: 'constant', label: 'Constant FWHM' }, { value: 'none', label: 'None' }]} />
         </label>
+        {shownMode === 'constant' ? <InputNumber size="small" aria-label="Instrument FWHM in degrees" min={0} max={0.5} step={0.005} placeholder="0"
+          value={instrument} onChange={changeInstrument} addonAfter="°" style={{ width: 110 }} /> : null}
+        {measurable && applied && !curve ? <Button type="link" size="small" onClick={() => setCurveOpen(true)}>Measure with a standard…</Button> : null}
       </div>}
     </div>
-    {view === 'observed' ? <ObservedPeaks taskId={taskId} query={query} corrected={Boolean(instrument)} onProfile={setProfile} active={active} />
-      : view === 'size' ? <WilliamsonHall taskId={taskId} query={query} corrected={Boolean(instrument)} onProfile={setProfile} active={active} />
+    {view === 'observed' ? <ObservedPeaks taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
+      : view === 'size' ? <WilliamsonHall taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
         : <CalculatedReflections taskId={taskId} sel={sel} active={active} />}
+    {measurable ? <FwhmCurveDialog profile={profile} open={curveOpen} onClose={() => setCurveOpen(false)} onChange={curveChanged} /> : null}
   </>;
 }
 
-/** GET `path` while `active`; tells `onProfile` the task's instrument profile. */
-function useSizeRequest(path, active, onProfile) {
+/** GET `path` while `active` (again when `reload` changes); hands each response to `onResponse`. */
+function useSizeRequest(path, active, onResponse, reload) {
   const [body, setBody] = React.useState(null);
   const [error, setError] = React.useState('');
   React.useEffect(() => {
@@ -92,10 +129,10 @@ function useSizeRequest(path, active, onProfile) {
     if (!active) return undefined;
     let current = true;
     requestJson(path)
-      .then(data => { if (current) { setBody(data); onProfile(data.instrument_profile ?? ''); } })
+      .then(data => { if (current) { setBody(data); onResponse(data); } })
       .catch(failure => { if (current) setError(failure.missing ? NOT_AVAILABLE : failure.message); });
     return () => { current = false; };
-  }, [path, active, onProfile]);
+  }, [path, active, onResponse, reload]);
   return [body, error];
 }
 
@@ -103,9 +140,9 @@ const withEsd = (value, esd, digits) => (value == null ? '—'
   : `${Number(value).toFixed(digits)}${esd != null && Number.isFinite(esd) ? ` ± ${Number(esd).toFixed(digits)}` : ''}`);
 
 /** Peaks of the measured pattern (GET /task/{id}/observed-peaks): fitted FWHM, Scherrer size and the assignment to the reflections of the fit. */
-function ObservedPeaks({ taskId, query, corrected, onProfile, active }) {
+function ObservedPeaks({ taskId, query, onResponse, active, reload }) {
   const [filter, setFilter] = React.useState('all');
-  const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onProfile);
+  const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onResponse, reload);
 
   if (error) return <Alert type="error" showIcon message="The observed peaks could not be loaded." description={error} />;
   if (!body) return <div style={{ minHeight: 480, paddingTop: 48, textAlign: 'center' }}><Spin tip="Fitting the peaks of the measured pattern" /></div>;
@@ -114,9 +151,10 @@ function ObservedPeaks({ taskId, query, corrected, onProfile, active }) {
   const unassigned = rows.filter(row => !row.phase).length;
   const shown = filter === 'all' ? rows : rows.filter(row => (filter === 'assigned') === Boolean(row.phase));
   const byNumber = key => (a, b) => (a[key] ?? -Infinity) - (b[key] ?? -Infinity);
+  const corrected = (body.instrument?.mode ?? 'none') !== 'none';
   const sizeTitle = corrected
-    ? <Tooltip title="Scherrer estimate from this peak alone: K·λ / (β·cos θ), β the FWHM with the instrument FWHM removed"><span>Size (nm)</span></Tooltip>
-    : <Tooltip title="No instrument broadening removed: a lower bound. Enter the FWHM of your instrument (from a standard such as LaB6 or Si) to correct it."><span>Size (nm), uncorrected</span></Tooltip>;
+    ? <Tooltip title="Scherrer estimate from this peak alone: K·λ / (β·cos θ), β the FWHM with the instrument FWHM at this angle removed"><span>Size (nm)</span></Tooltip>
+    : <Tooltip title="No instrument broadening removed: a lower bound. Choose a standard curve or a constant instrument FWHM to correct it."><span>Size (nm), uncorrected</span></Tooltip>;
   const columns = [
     { title: '#', dataIndex: 'number', className: 'dara-num', sorter: byNumber('number') },
     { title: '2θ (°)', dataIndex: 'two_theta_deg', className: 'dara-num', sorter: byNumber('two_theta_deg'), render: fixed(3) },
@@ -127,6 +165,8 @@ function ObservedPeaks({ taskId, query, corrected, onProfile, active }) {
       className: 'dara-num', sorter: byNumber('fwhm_deg'),
       render: (value, row) => (value == null ? <Tooltip title={FIT_NOTE_HELP[row.fit_note] || null}><Text type="secondary">{row.fit_note || '—'}</Text></Tooltip>
         : <Tooltip title={row.eta == null ? null : `η = ${Number(row.eta).toFixed(2)} (0 Gaussian, 1 Lorentzian)`}>{withEsd(value, row.fwhm_esd_deg, 3)}</Tooltip>) },
+    ...(corrected ? [{ title: <Tooltip title="Instrument FWHM removed from this peak: the standard curve at its angle, or the constant"><span>Instr. (°)</span></Tooltip>,
+      dataIndex: 'instrument_fwhm_deg', className: 'dara-num', render: fixed(3) }] : []),
     { title: 'Phase', key: 'phase', sorter: (a, b) => Number(Boolean(a.phase)) - Number(Boolean(b.phase)) || String(a.phase_label).localeCompare(String(b.phase_label)),
       render: (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>) },
     { title: <Tooltip title="Indices of the nearest reflection, in the database setting"><span>hkl</span></Tooltip>, dataIndex: 'hkl',
@@ -148,7 +188,7 @@ function ObservedPeaks({ taskId, query, corrected, onProfile, active }) {
       <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
         pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
     </div>
-    <Text className="dara-footnote">Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak). {QUIET_NOTE} {corrected ? CONSTANT_NOTE : null}</Text>
+    <Text className="dara-footnote">Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak). {QUIET_NOTE} {correctionNote(body.instrument)}</Text>
   </>;
 }
 
@@ -157,8 +197,8 @@ const gated = (row, detail, text) => (row.reliable === false && row.intercept !=
   ? <Tooltip title={`${row.note}. ${detail}`}><Text type="secondary">Not reliable</Text></Tooltip> : text);
 
 /** Williamson–Hall fit per phase (GET /task/{id}/williamson-hall) beside the Rietveld size and strain. */
-function WilliamsonHall({ taskId, query, corrected, onProfile, active }) {
-  const [body, error] = useSizeRequest(`/task/${taskId}/williamson-hall?${query}`, active, onProfile);
+function WilliamsonHall({ taskId, query, onResponse, active, reload }) {
+  const [body, error] = useSizeRequest(`/task/${taskId}/williamson-hall?${query}`, active, onResponse, reload);
 
   if (error) return <Alert type="error" showIcon message="The size / strain estimates could not be loaded." description={error} />;
   if (!body) return <div style={{ minHeight: 480, paddingTop: 48, textAlign: 'center' }}><Spin tip="Fitting the peaks of the measured pattern" /></div>;
@@ -191,7 +231,7 @@ function WilliamsonHall({ taskId, query, corrected, onProfile, active }) {
     <div className="dara-wh-grid">
       {plotted.map(entry => <WilliamsonHallPlot key={entry.phase} entry={entry} />)}
     </div>
-    <Text className="dara-footnote">{QUIET_NOTE} {corrected ? CONSTANT_NOTE : null}</Text>
+    <Text className="dara-footnote">{QUIET_NOTE} {correctionNote(body.instrument)}</Text>
   </>;
 }
 

@@ -348,3 +348,28 @@ code {
   font-size: var(--dara-font-12);
   color: var(--dara-text-hint);
 }
+
+/* Term / value pairs of a small report (instrument FWHM curve): two pairs per line. */
+.dara-facts {
+  display: grid;
+  grid-template-columns: repeat(2, max-content minmax(0, 1fr));
+  gap: var(--dara-space-1) var(--dara-space-3);
+  margin: var(--dara-space-2) 0 0;
+  font-size: var(--dara-font-12);
+  font-variant-numeric: tabular-nums;
+}
+
+.dara-facts dt {
+  color: var(--dara-text-hint);
+}
+
+.dara-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A quiet text link inside a toolbar (opens a dialog). */
+.dara-toolbar .ant-btn-link.ant-btn-sm {
+  padding: 0;
+  height: auto;
+}

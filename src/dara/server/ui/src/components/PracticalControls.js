@@ -154,7 +154,7 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
         const body = await response.json();
         if (!response.ok) throw new Error(body.detail || 'Calibration status unavailable');
         setJob(body);
-        if (body.status === 'done') done.current(body.result);
+        if (body.status === 'done') done.current(body.result, body.fwhm_curve);
       } catch (e) { setError(e.message); setJob(null); }
     }, 5000);
     return () => clearTimeout(timer);
@@ -192,7 +192,10 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
       {fit ? <Alert type="success" showIcon message={`Saved and selected: ${result.label}`}
         description={<>DetW {fit.detw_start} → {fit.detw} mm · Rwp {fit.rwp_start.toFixed(2)} → {fit.rwp.toFixed(2)} %<br />
           Apparent crystallite size of the standard: {fit.apparent_size_nm ? `${Math.round(fit.apparent_size_nm)} nm` : 'not determined'}.
-          A small size means instrument broadening is still missing from the profile.</>} /> : null}
+          A small size means instrument broadening is still missing from the profile.<br />
+          {job.fwhm_curve ? (job.fwhm_curve.usable
+            ? `Instrument FWHM curve from the same pattern: stored (${job.fwhm_curve.peak_count} peaks, RMS ${Number(job.fwhm_curve.rms_deg).toFixed(4)}°).`
+            : `Instrument FWHM curve not stored: ${job.fwhm_curve.reason}.`) : null}</>} /> : null}
       {fit?.at_scan_edge ? <Alert type="warning" showIcon style={{ marginTop: 8 }}
         message="DetW hit the end of the scanned range"
         description="The best fit may lie outside the range. Check that the pattern is a well-crystallised standard (Si, LaB6) and that the profile's other datasheet values are right." /> : null}

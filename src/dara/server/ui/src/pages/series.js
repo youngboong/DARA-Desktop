@@ -135,6 +135,9 @@ function SeriesDetail({ id }) {
   const { done, total } = progress(items);
   const completedIds = taskIds(items, { completedOnly: true });
   const compareIds = completedIds.slice(0, MAX_COMPARE);
+  // The series variable goes along, so the comparison map can use it as its y axis.
+  const valueOf = new Map(items.map((item, index) => [item.task_id, axis.values[index]]));
+  const compareValues = axis.usesVariable ? `&values=${compareIds.map(id => valueOf.get(id)).join(',')}${axis.title ? `&unit=${encodeURIComponent(axis.title)}` : ''}` : '';
   const allIds = taskIds(items).slice(0, 50);
 
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -151,7 +154,7 @@ function SeriesDetail({ id }) {
       <Space wrap>
         <Button icon={<TableOutlined />} href={`${URL}/tasks/table.csv?ids=${allIds.join(',')}`}>Export CSV</Button>
         <Button icon={<LineChartOutlined />} disabled={completedIds.length < 2}
-          href={completedIds.length >= 2 ? `/compare?tasks=${compareIds.join(',')}` : undefined}>Compare patterns</Button>
+          href={completedIds.length >= 2 ? `/compare?tasks=${compareIds.join(',')}${compareValues}` : undefined}>Compare patterns</Button>
       </Space>
     </div>
     <div>
