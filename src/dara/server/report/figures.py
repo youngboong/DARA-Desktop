@@ -117,10 +117,12 @@ def fit_figure(
     counts_like: bool | None = None,
     phase_labels: dict[str, str] | None = None,
     hkl_labels: bool = False,
+    annotations=None,
 ) -> bytes:
     """Render the refinement fit as PNG or SVG bytes (deterministic for equal input).
 
     ``hkl_labels`` writes the Miller indices on the strongest reflections of each phase.
+    ``annotations``: the analyst's plot labels (``{two_theta, intensity, text}``), written as plain text.
     """
     if fmt not in {"png", "svg"}:
         raise ValueError(f"Unsupported figure format: {fmt}")
@@ -227,6 +229,14 @@ def fit_figure(
                     color="black", annotation_clip=True,
                 )
             ax_main.margins(y=0.14)  # room for the labels above the tallest peak
+
+        for note in annotations or ():
+            # Plain text: a "$" would start matplotlib mathtext.
+            ax_main.annotate(
+                str(note["text"]).replace("$", r"\$"), (float(note["two_theta"]), float(note["intensity"])),
+                xytext=(0, 3), textcoords="offset points", ha="center", va="bottom",
+                fontsize=FONT_SIZE - 1, color="black", annotation_clip=True,
+            )
 
         for axis in (ax_main, ax_ticks, ax_diff):
             for start, end in spans:

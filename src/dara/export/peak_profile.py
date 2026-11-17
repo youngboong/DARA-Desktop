@@ -44,7 +44,8 @@ def doublet_area(height, fwhm, eta, pair):
 
 
 def _empty(note):
-    return {"two_theta_fit": None, "fwhm_deg": None, "fwhm_esd_deg": None, "eta": None, "area": None, "fit_note": note}
+    return {"two_theta_fit": None, "two_theta_esd_deg": None, "fwhm_deg": None, "fwhm_esd_deg": None, "eta": None,
+            "area": None, "fit_note": note}
 
 
 def _fit_cluster(x, net, sigma, peaks, pair, start_fwhm):
@@ -94,7 +95,8 @@ def _fit_cluster(x, net, sigma, peaks, pair, start_fwhm):
         elif height <= 0 or not np.isfinite(esd) or esd > MAX_RELATIVE_ESD * width:
             note = "overlapped" if m > 1 else "too weak"
         results.append(_empty(note) if note else {
-            "two_theta_fit": float(center), "fwhm_deg": float(width), "fwhm_esd_deg": float(esd),
+            "two_theta_fit": float(center), "two_theta_esd_deg": float(errors[4 * i]),
+            "fwhm_deg": float(width), "fwhm_esd_deg": float(esd),
             "eta": float(eta), "area": float(doublet_area(height, width, eta, pair)), "fit_note": None,
         })
     return results
@@ -150,7 +152,8 @@ def fit_peak_profiles(two_theta, observed, background, positions, wavelength, ex
     """Kα1 FWHM of each peak at ``positions`` (same order) from pseudo-Voigt fits of
     ``observed − background``, weighted by 1/sqrt(max(observed, 1)).
 
-    Each result: ``two_theta_fit``, ``fwhm_deg``, ``fwhm_esd_deg`` (from the Jacobian), ``eta``,
+    Each result: ``two_theta_fit`` (Kα1 position) with ``two_theta_esd_deg``, ``fwhm_deg``,
+    ``fwhm_esd_deg`` (e.s.d. from the Jacobian), ``eta``,
     ``area`` (integrated net intensity of the fitted Kα1+Kα2 profile, counts·degree), ``fit_note`` (``None``, "overlapped", "too weak", "fit failed" or "merged"; the values are
     then None). Positions closer than one FWHM are one peak: the stronger is fitted, the other
     is "merged".

@@ -373,3 +373,25 @@ code {
   padding: 0;
   height: auto;
 }
+
+/* RIR cross-check under the phase table: a quiet disclosure aligned with the table. */
+.dara-rir > .ant-collapse-item > .ant-collapse-header {
+  padding: var(--dara-space-2) 0 !important;
+}
+
+.dara-rir > .ant-collapse-item > .ant-collapse-content > .ant-collapse-content-box {
+  padding: 0 0 var(--dara-space-2) !important;
+}
+
+.dara-rir details summary {
+  cursor: pointer;
+}
+
+/* Plot annotations: the inline label editor over the plot. */
+.dara-annotation-editor {
+  position: absolute;
+  z-index: 5;
+  display: flex;
+  gap: var(--dara-space-1);
+  transform: translate(-50%, -100%);
+}

@@ -243,6 +243,8 @@ def observed_peak_rows(peaks, reflections: list[dict], *, wavelength, profiles=N
             "fwhm_esd_deg": None if fit.get("fwhm_esd_deg") is None else round(fit["fwhm_esd_deg"], 4),
             "eta": None if eta is None else round(eta, 3),
             "area": None if fit.get("area") is None else round(fit["area"], 3),  # for the RIR analysis; not a column
+            # Kα1 profile-fit position and its e.s.d. for the cell refinement; not columns
+            "two_theta_fit": fit.get("two_theta_fit"), "two_theta_esd_deg": fit.get("two_theta_esd_deg"),
             "fit_note": fit.get("fit_note") if profiles is not None else "not fitted",
             "instrument_fwhm_deg": round(b, 4) if b else None,
             "phase": None, "phase_label": None, "hkl": None, "delta_two_theta_deg": None,

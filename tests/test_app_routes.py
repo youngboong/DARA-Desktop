@@ -64,4 +64,5 @@ def test_optional_router_list_names_all_modules():
         "dara.server.retry_router",
         "dara.server.quick_rank_router",
         "dara.server.structure_library_router",
+        "dara.server.cell_refinement_router",
     }

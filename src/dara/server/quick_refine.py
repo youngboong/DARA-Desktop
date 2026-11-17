@@ -1722,7 +1722,7 @@ def task_peaks(task_uuid: str, document) -> pd.DataFrame:
     )
 
 
-PROFILE_FIT_VERSION = "3"  # bump when peak_profile.fit_peak_profiles changes its results
+PROFILE_FIT_VERSION = "4"  # bump when peak_profile.fit_peak_profiles changes its results
 
 
 def task_profile_fits(task_uuid: str, two_theta, observed, background, positions, wavelength, excluded_ranges=None) -> list[dict]:

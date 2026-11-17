@@ -308,20 +308,140 @@ function attachAnchorEditing(gd, editRef) {
   };
 }
 
+// Text labels of the analyst (see plotAnnotations.mjs), while `annotateRef.current` is set:
+// `{offset, ids, onAdd(x, intensity, px, py), onEdit(id, px, py), onMove(id, x, intensity)}`, where
+// the labels are the layout annotations from index `offset` on, in the order of `ids`. A click on
+// the main panel adds a label (a drag there still draws the zoom box); a label is dragged to move
+// it or clicked to edit it. Pixel positions are relative to the plot div.
+function attachAnnotating(gd, annotateRef) {
+  let drag = null;
+  let press = null;
+  let frame = null;
+
+  const panelAt = (clientX, clientY) => {
+    const full = gd._fullLayout;
+    if (!full?.xaxis || !full?.yaxis) return null;
+    const rect = gd.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const { xaxis: xa, yaxis: ya } = full;
+    if (px < xa._offset || px > xa._offset + xa._length || py < ya._offset || py > ya._offset + ya._length) return null;
+    return { full, px, py };
+  };
+  const hitLabel = (annotate, clientX, clientY) => annotate.ids.findIndex((_, i) => {
+    const element = gd.querySelector(`.annotation[data-index="${annotate.offset + i}"]`);
+    const box = element?.getBoundingClientRect();
+    return Boolean(box && box.width && clientX >= box.left && clientX <= box.right && clientY >= box.top && clientY <= box.bottom);
+  });
+  // Axis value (log10 on a log axis) and data intensity of a pixel row of the main panel.
+  const yAt = (full, py) => full.yaxis.p2l(py - full.yaxis._offset);
+  const intensity = (full, value) => (full.yaxis.type === 'log' ? 10 ** value : value);
+
+  const draw = () => {
+    frame = null;
+    if (drag?.to) Plotly.relayout(gd, { [`annotations[${drag.index}].x`]: drag.to.x, [`annotations[${drag.index}].y`]: drag.to.y });
+  };
+  function onMove(event) {
+    if (!drag) return;
+    event.preventDefault();
+    if (!drag.moved && Math.abs(event.clientX - drag.clientX) < CLICK_SLOP_PX && Math.abs(event.clientY - drag.clientY) < CLICK_SLOP_PX) return;
+    drag.moved = true;
+    const full = gd._fullLayout;
+    const rect = gd.getBoundingClientRect();
+    const px = event.clientX - rect.left - drag.dx;
+    const py = event.clientY - rect.top - drag.dy;
+    drag.to = { x: full.xaxis.p2l(px - full.xaxis._offset), y: yAt(full, py) };
+    if (frame === null) frame = window.requestAnimationFrame(draw);
+  }
+  function onUp(event) {
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('mouseup', onUp, true);
+    if (frame !== null) { window.cancelAnimationFrame(frame); frame = null; }
+    const current = drag;
+    drag = null;
+    const annotate = annotateRef.current;
+    if (!current || !annotate) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (current.moved && current.to) annotate.onMove(current.id, current.to.x, intensity(gd._fullLayout, current.to.y));
+    else annotate.onEdit(current.id, current.anchor.px, current.anchor.py);
+  }
+  function onPressUp(event) {
+    window.removeEventListener('mouseup', onPressUp, true);
+    const start = press;
+    press = null;
+    const annotate = annotateRef.current;
+    if (!start || !annotate || event.button !== 0) return;
+    if (Math.abs(event.clientX - start.clientX) >= CLICK_SLOP_PX || Math.abs(event.clientY - start.clientY) >= CLICK_SLOP_PX) return;
+    const at = panelAt(start.clientX, start.clientY);
+    if (!at) return;
+    const x = at.full.xaxis.p2l(at.px - at.full.xaxis._offset);
+    annotate.onAdd(x, intensity(at.full, yAt(at.full, at.py)), at.px, at.py);
+  }
+
+  const onDown = event => {
+    const annotate = annotateRef.current;
+    if (!annotate || event.button !== 0 || event.shiftKey) return;
+    const index = hitLabel(annotate, event.clientX, event.clientY);
+    if (index >= 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      const full = gd._fullLayout;
+      const shown = full.annotations?.[annotate.offset + index];
+      const rect = gd.getBoundingClientRect();
+      const anchor = shown ? { px: full.xaxis._offset + full.xaxis.l2p(shown.x), py: full.yaxis._offset + full.yaxis.l2p(shown.y) }
+        : { px: event.clientX - rect.left, py: event.clientY - rect.top };
+      drag = { id: annotate.ids[index], index: annotate.offset + index, clientX: event.clientX, clientY: event.clientY,
+        dx: event.clientX - rect.left - anchor.px, dy: event.clientY - rect.top - anchor.py, anchor, moved: false };
+      window.addEventListener('mousemove', onMove, true);
+      window.addEventListener('mouseup', onUp, true);
+      return;
+    }
+    // Not stopped: a drag from here still draws Plotly's zoom box; only a click adds a label.
+    if (panelAt(event.clientX, event.clientY)) {
+      press = { clientX: event.clientX, clientY: event.clientY };
+      window.addEventListener('mouseup', onPressUp, true);
+    }
+  };
+  const onHover = event => {
+    const annotate = annotateRef.current;
+    const layer = gd.querySelector('.nsewdrag');
+    if (!layer || drag || !annotate) return;
+    layer.style.cursor = hitLabel(annotate, event.clientX, event.clientY) >= 0 ? 'move'
+      : panelAt(event.clientX, event.clientY) ? 'text' : '';
+  };
+
+  gd.addEventListener('mousedown', onDown, true);
+  gd.addEventListener('mousemove', onHover);
+  return () => {
+    drag = null;
+    press = null;
+    if (frame !== null) window.cancelAnimationFrame(frame);
+    window.removeEventListener('mousemove', onMove, true);
+    window.removeEventListener('mouseup', onUp, true);
+    window.removeEventListener('mouseup', onPressUp, true);
+    gd.removeEventListener('mousedown', onDown, true);
+    gd.removeEventListener('mousemove', onHover);
+  };
+}
+
 /**
  * Plotly scatter plot with the DARA navigation. `xBounds` is the measured 2θ range that zoom
  * and pan stay inside (default: the extent of the plotted data). `anchorEdit` turns on background
  * curve editing: `{anchors, curveOf(anchors, xs?), blocked(x), onChange, onAdd, onRemove, onSelect}`
  * (`curveOf` without `xs` gives the curve on the plotted 2θ grid; `blocked(x)` is true where no
  * anchor may be added). The curve and anchors are the traces with meta 'bg-curve' / 'bg-anchors'.
+ * `annotate` turns on label editing (see attachAnnotating).
  */
-export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, anchorEdit = null, ...props }) {
+export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, anchorEdit = null, annotate = null, ...props }) {
   const detach = React.useRef(null);
   const graph = React.useRef(null);
   const boundsRef = React.useRef(xBounds);
   boundsRef.current = xBounds;
   const editRef = React.useRef(anchorEdit);
   editRef.current = anchorEdit;
+  const annotateRef = React.useRef(annotate);
+  annotateRef.current = annotate;
   React.useEffect(() => () => { if (detach.current) detach.current(); }, []);
   // Every click event carries `cursorX`, the 2θ under the mouse (see cursorTwoTheta).
   const handleClick = onClick ? event => onClick({
@@ -332,7 +452,8 @@ export default function RefinementPlotly({ onInitialized, onClick, xBounds = nul
     graph.current = gd;
     const detachNavigation = attachNavigation(gd, boundsRef);
     const detachEditing = attachAnchorEditing(gd, editRef);
-    detach.current = () => { detachNavigation(); detachEditing(); };
+    const detachAnnotating = attachAnnotating(gd, annotateRef);
+    detach.current = () => { detachNavigation(); detachEditing(); detachAnnotating(); };
     if (onInitialized) onInitialized(figure, gd);
   }} />;
 }

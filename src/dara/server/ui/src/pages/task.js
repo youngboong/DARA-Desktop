@@ -1,8 +1,8 @@
 import React from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
-import { Alert, Badge, Button, Checkbox, Col, Descriptions, Divider, Dropdown, Grid, List, message, Modal, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownOutlined, DownloadOutlined, EllipsisOutlined, InfoCircleOutlined, LineChartOutlined, SearchOutlined } from '@ant-design/icons';
+import { Alert, Badge, Button, Checkbox, Col, Descriptions, Divider, Dropdown, Grid, Input, List, message, Modal, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownOutlined, DownloadOutlined, EditOutlined, EllipsisOutlined, InfoCircleOutlined, LineChartOutlined, SearchOutlined } from '@ant-design/icons';
 import Loadable from 'react-loadable'
 import parse from 'html-react-parser';
 import { gofTone, peakCountTone, toneColor } from '../components/statusTone.mjs';
@@ -28,6 +28,9 @@ import FitCompare from '../components/FitCompare';
 import StructureRefineDrawer, { StructureResults } from '../components/StructureRefineDrawer';
 import { structurePhases } from '../components/structureModel.mjs';
 import PeakListTab from '../components/PeakListTab';
+import RirSemiQuant from '../components/RirSemiQuant';
+import useTaskAnnotations from '../components/useTaskAnnotations';
+import { cleanAnnotationText, newAnnotationId, plotAnnotations, removeAnnotation, upsertAnnotation } from '../components/plotAnnotations.mjs';
 import InternalStandardCard from '../components/InternalStandardCard';
 import BackgroundEditor, { BackgroundCurvePanel } from '../components/BackgroundEditor';
 import { addAnchor, anchorError, anchorLabel, curveWarnings, fitSeries, pchip, removeAnchor, seedAnchors } from '../components/backgroundAnchors.mjs';
@@ -234,6 +237,24 @@ function PlotSwitch({ label, ariaLabel = label, help, checked, onChange }) {
   </label>;
 }
 
+/** Inline text field of a plot label at (px, py) of the plot: Enter or leaving the field saves, Esc cancels. */
+function AnnotationEditor({ editor, onCommit, onCancel, onDelete }) {
+  const [text, setText] = React.useState(editor.text);
+  const done = React.useRef(false);
+  const finish = action => { if (!done.current) { done.current = true; action(); } };
+  return <div className="dara-annotation-editor" style={{ left: editor.px, top: editor.py - 4 }}>
+    <Input size="small" autoFocus value={text} maxLength={120} placeholder="Label text" aria-label="Annotation text" style={{ width: 220 }}
+      onChange={event => setText(event.target.value)}
+      onKeyDown={event => {
+        if (event.key === 'Enter') { event.preventDefault(); finish(() => onCommit(text)); }
+        if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); finish(onCancel); }
+      }}
+      onBlur={() => finish(() => onCommit(text))} />
+    {onDelete ? <Tooltip title="Delete this label"><Button size="small" danger icon={<DeleteOutlined />} aria-label="Delete label"
+      onMouseDown={event => event.preventDefault()} onClick={() => finish(onDelete)} /></Tooltip> : null}
+  </div>;
+}
+
 const RefinementPlot = React.forwardRef(function RefinementPlot({
   task_id, plot_id, excludedRanges = [], peaks = [], onPeakClick, previewSticks = null, onGroups, title = null, phaseColor = null, phaseLegend = null,
   // Background curve editing: {anchors, selected, onChange, onAdd, onRemove, onSelect, blocked(x)} or null.
@@ -256,6 +277,11 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   const [yRange, setYRange] = React.useState(null);
   const [xRange, setXRange] = React.useState(null);
   const [fitY, setFitY] = React.useState(true);
+  // The analyst's text labels: one list per task, drawn on every fit and version of it.
+  const [annotations, saveAnnotations] = useTaskAnnotations(task_id);
+  const [showAnnotations, setShowAnnotations] = React.useState(true);
+  const [annotating, setAnnotating] = React.useState(false);
+  const [labelEditor, setLabelEditor] = React.useState(null); // {id | null, x, intensity, px, py, text}
   const lastLegendKey = React.useRef(null);
   const sameLegendClicked = React.useRef(false);
   // Cursor readout written straight to the DOM, so hovering never re-renders the plot.
@@ -371,7 +397,9 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   [editing, grid, anchorKey, anchorEdit?.onChange]);
   const excludedKey = JSON.stringify(excludedRanges);
   const peaksKey = JSON.stringify(peaks);
+  const labelsShown = (showAnnotations || annotating) && annotations.length > 0;
   const layout = React.useMemo(() => (view ? { ...view.layout, autosize: true,
+    annotations: [...(view.layout.annotations || []), ...(labelsShown ? plotAnnotations(annotations, { scale }) : [])],
     shapes: [...(view.layout.shapes || []), ...excludedRanges.flatMap(([x0, x1]) => [
       { type: 'rect', xref: 'x', yref: 'y domain', x0, x1, y0: 0, y1: 1, fillcolor: 'rgba(130,130,130,0.15)', line: { width: 0 }, layer: 'below' },
       { type: 'rect', xref: 'x2', yref: 'y2 domain', x0, x1, y0: 0, y1: 1, fillcolor: 'rgba(130,130,130,0.15)', line: { width: 0 }, layer: 'below' },
@@ -379,7 +407,30 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     dragmode: NAVIGATION_DRAGMODE,
     uirevision: `${task_id}-${plot_id}-${resetKey}` } : null),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [view, excludedKey, peaksKey, task_id, plot_id, resetKey]);
+  [view, excludedKey, peaksKey, task_id, plot_id, resetKey, annotations, labelsShown, scale]);
+  // Label editing (RefinementPlotly attachAnnotating): the labels follow the view's own annotations.
+  const annotationOffset = view?.layout?.annotations?.length || 0;
+  const annotate = annotating && !compact && !anchorEdit ? {
+    offset: annotationOffset, ids: annotations.map(item => item.id),
+    onAdd: (x, intensity, px, py) => setLabelEditor({ id: null, x, intensity, px, py, text: '' }),
+    onEdit: (id, px, py) => setLabelEditor({ ...annotations.find(item => item.id === id), px, py }),
+    onMove: (id, x, intensity) => {
+      const item = annotations.find(entry => entry.id === id);
+      if (item) saveAnnotations(upsertAnnotation(annotations, { ...item, two_theta: Number(x.toFixed(4)), intensity: Number(intensity.toFixed(2)) }));
+    },
+  } : null;
+  const commitLabel = text => {
+    const editor = labelEditor;
+    setLabelEditor(null);
+    const clean = cleanAnnotationText(text);
+    if (!editor) return;
+    if (editor.id && !clean) { saveAnnotations(removeAnnotation(annotations, editor.id)); return; }
+    if (!clean || (editor.id && clean === editor.text)) return;
+    const next = upsertAnnotation(annotations, editor.id ? { id: editor.id, two_theta: editor.two_theta, intensity: editor.intensity, text: clean }
+      : { id: newAnnotationId(), two_theta: Number(editor.x.toFixed(4)), intensity: Number(Math.max(editor.intensity, 0).toFixed(2)), text: clean });
+    if (next) saveAnnotations(next);
+    else message.warning('A task holds at most 50 labels.');
+  };
   // Ranges are React state: Plotly's own reset/autoscale buttons would only
   // restore the state they were last given, so Reset zoom replaces them.
   const config = React.useMemo(() => ({ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG,
@@ -414,7 +465,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     return false;
   };
   const handleClick = event => {
-    if (!onPeakClick) return;
+    if (!onPeakClick || annotate) return;
     const peak = peakFromPlotClick(plot, event);
     if (peak !== null) onPeakClick(peak, Boolean(event.event?.shiftKey));
   };
@@ -463,6 +514,11 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
         <PlotSwitch label="Bragg" ariaLabel="Bragg positions" help="Bragg positions" checked={showReflections} onChange={value => { setShowReflections(value); setYRange(null); }} />
         <PlotSwitch label="hkl labels" help="Miller indices of the strongest reflections of the shown phases; zoom in to label more" checked={hklLabels} onChange={value => { setHklLabels(value); setYRange(null); }} />
         <PlotSwitch label="Markers" ariaLabel="Peak markers" help="Unexplained-peak and diagnostic markers" checked={showDiagnostics} onChange={setShowDiagnostics} />
+        {annotations.length ? <PlotSwitch label="Labels" ariaLabel="Show annotations" help="Your text labels on this task's plot (all its fits and versions)" checked={labelsShown}
+          onChange={value => { setShowAnnotations(value); if (!value) { setAnnotating(false); setLabelEditor(null); } }} /> : null}
+        {anchorEdit ? null : <Tooltip title="Annotate: click the pattern to add a text label; drag a label to move it, click it to edit or delete it. Peak clicks pause meanwhile.">
+          <Button size="small" type={annotating ? 'primary' : 'default'} icon={<EditOutlined />} aria-label="Annotate" aria-pressed={annotating}
+            onClick={() => { setAnnotating(value => !value); setLabelEditor(null); setShowAnnotations(true); }} /></Tooltip>}
       </div>
       {onDisplayChange ? <div className="dara-toolbar-group" aria-label="Display treatment of the observed pattern">
         <Tooltip title="Applied to the observed trace on screen only: the fit, the residual and the tables use the measured data">
@@ -492,9 +548,14 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       {wavelength > 0 ? <span className="dara-readout-value">d <b data-k="d">–</b> Å</span> : null}
       <span className="dara-readout-value"><span data-k="n">I</span> <b data-k="i">–</b></span>
     </div>
-    <div ref={containerRef} style={{ width: '100%' }}>
-    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config} anchorEdit={anchorEditing}
+    {annotate ? <div className="dara-footnote" style={{ marginBottom: 4 }}>
+      Annotating: click the pattern to add a label · drag a label to move it · click a label to edit or delete it · peak clicks are paused.</div> : null}
+    <div ref={containerRef} style={{ width: '100%', position: 'relative' }}>
+    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config} anchorEdit={anchorEditing} annotate={annotate}
       {...plotHandlers} useResizeHandler style={{ height, width: '100%' }} />
+    {labelEditor && annotate ? <AnnotationEditor key={`${labelEditor.id}-${labelEditor.px}-${labelEditor.py}`} editor={labelEditor} onCommit={commitLabel}
+      onCancel={() => setLabelEditor(null)}
+      onDelete={labelEditor.id ? () => { setLabelEditor(null); saveAnnotations(removeAnnotation(annotations, labelEditor.id)); } : null} /> : null}
     </div>
   </>;
 });
@@ -1515,6 +1576,7 @@ function TaskDetail({ data, task_id, onDelete }) {
                   rowActions={quickShown && !quickCheck ? rowActions : null} />
                 {currentSel === 'best' ? <KnownPhaseNotes data={data} /> : null}
                 <FitCautions cautions={displayedResult.cautions} style={{ margin: '12px 0' }} />
+                <RirSemiQuant taskId={task_id} sel={currentSel} />
               </> },
               { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel={currentSel} active={fitTab === 'peaks' && !versionPending} /> },
               ...(structurePhases(displayedResult.phase_details).length ? [{ key: 'structure', label: 'Structure',
