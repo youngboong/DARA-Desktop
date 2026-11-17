@@ -164,3 +164,19 @@ import { legendRowCount, LEGEND_ROW_PX } from '../src/dara/server/ui/src/compone
   }
   console.log('legend rows reserve bottom margin ok');
 }
+
+import { withTreatedObserved } from '../src/dara/server/ui/src/components/refinementPlotState.mjs';
+{
+  const traces = [
+    { x: [1, 2, 3], y: [5, 6, 5], name: 'Observed', type: 'scatter' },
+    { x: [1, 2, 3], y: [5, 5, 5], name: 'Calculated', type: 'scatter' },
+    { x: [1, 2, 3], y: [0, 1, 0], name: 'Difference', meta: 'difference' },
+  ];
+  const treated = withTreatedObserved(traces, { intensity: [4, 5, 4] }, 'Observed (smoothed)');
+  assert.deepEqual(treated[0].y, [4, 5, 4]);
+  assert.equal(treated[0].name, 'Observed (smoothed)');
+  assert.equal(treated[2], traces[2]); // the residual stays the measured one
+  assert.equal(withTreatedObserved(traces, { intensity: [1] }, 'x'), traces); // other grid: unchanged
+  assert.equal(withTreatedObserved(traces, null, 'x'), traces);
+  console.log('treated observed trace ok');
+}

@@ -1722,6 +1722,35 @@ def task_peaks(task_uuid: str, document) -> pd.DataFrame:
     )
 
 
+PROFILE_FIT_VERSION = "2"  # bump when peak_profile.fit_peak_profiles changes its results
+
+
+def task_profile_fits(task_uuid: str, two_theta, observed, background, positions, wavelength, excluded_ranges=None) -> list[dict]:
+    """``peak_profile.fit_peak_profiles`` of one fit of a task, cached on disk by its inputs (the
+    fit's curves, the peak positions, wavelength and excluded ranges), so the peak table and the
+    Williamson-Hall view of one selection fit the peaks once."""
+    from dara.export.peak_profile import fit_peak_profiles
+
+    arrays = [np.ascontiguousarray(values, dtype=float) for values in (two_theta, observed, background, positions)]
+    digest = hashlib.sha1()
+    for values in arrays:
+        digest.update(values.tobytes())
+        digest.update(b"\0")
+    key = _sha1(PROFILE_FIT_VERSION, digest.hexdigest(), json.dumps(wavelength, default=str),
+                json.dumps(excluded_ranges or [], default=str))
+    cache = task_cache(task_uuid) / "profiles" / f"{key[:16]}.json"
+    try:
+        return json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    results = fit_peak_profiles(*arrays, wavelength, excluded_ranges)
+    try:
+        _atomic_write(cache, json.dumps(results))
+    except OSError:
+        logger.debug("Could not cache peak profile fits", exc_info=True)
+    return results
+
+
 def warm_task(record: dict, raw: dict | None) -> None:
     """Pre-decode the document and pre-compute the observed peaks (best effort)."""
 

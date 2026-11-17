@@ -3183,7 +3183,7 @@ async def _selected_fit(task_id: int, sel: str | None):
 
 
 async def _peak_rows_of(task_id: int, sel: str | None):
-    """``(task, rows, wavelength, selection, document)`` of the peak list of one selection."""
+    """``(task, rows, wavelength, selection, document, refinement)`` of the peak list of one selection."""
     task, document, refinement, meta, selection = await _selected_fit(task_id, sel)
     try:
         rows = peak_table(document, refinement, meta["cifs"])
@@ -3191,7 +3191,7 @@ async def _peak_rows_of(task_id: int, sel: str | None):
         logger.warning("Peak list of task %s failed", task_id, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Peak list failed: {exc}") from exc
     wavelength = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
-    return task, rows, wavelength, selection, document
+    return task, rows, wavelength, selection, document, refinement
 
 
 @router.get("/task/{task_id}/peaks")
@@ -3200,7 +3200,7 @@ async def task_peaks(task_id: int, sel: str | None = Query(None)):
     or ``version:<n>`` (default: the adopted fit)."""
     from dara.export.peak_list import COLUMNS
 
-    _, rows, wavelength, selection, _ = await _peak_rows_of(task_id, sel)
+    _, rows, wavelength, selection, _, _ = await _peak_rows_of(task_id, sel)
     return {
         "columns": list(COLUMNS), "rows": rows, "wavelength": wavelength, "selection": selection,
     }
@@ -3210,46 +3210,146 @@ async def task_peaks(task_id: int, sel: str | None = Query(None)):
 async def task_peaks_csv(task_id: int, sel: str | None = Query(None)):
     from dara.export.peak_list import peak_csv_bytes
 
-    task, rows, _, selection, _ = await _peak_rows_of(task_id, sel)
+    task, rows, _, selection, _, _ = await _peak_rows_of(task_id, sel)
     filename = download_name(task_id, task["job"]["name"], "peaks", selection, "csv")
     return _csv_response(peak_csv_bytes(rows), filename)
 
 
-async def _measured_peak_rows_of(task_id: int, sel: str | None):
-    """``(task, rows, wavelength, selection)``: EFLECH peaks of the measured pattern (the cached
-    peaks of quick-refine diagnostics), each assigned to the nearest reflection of ``sel``."""
+async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrument_fwhm=None):
+    """``(task, rows, wavelength, selection, document, refinement)``: EFLECH peaks of the measured
+    pattern (the cached peaks of quick-refine diagnostics) with the Kα1 FWHM of a pseudo-Voigt fit
+    of each (cached per fit), each assigned to the nearest reflection of ``sel``, with Scherrer
+    sizes for the constant ``k`` and the instrument FWHM ``instrument_fwhm`` (°)."""
     from dara.export.peak_list import observed_peak_rows
     from dara.server import quick_refine
 
-    task, reflections, wavelength, selection, document = await _peak_rows_of(task_id, sel)
+    k = k if isinstance(k, (int, float)) else 0.89  # direct calls leave the Query default objects
+    instrument_fwhm = instrument_fwhm if isinstance(instrument_fwhm, (int, float)) else None
+    task, reflections, wavelength, selection, document, refinement = await _peak_rows_of(task_id, sel)
     try:
         peaks = await asyncio.to_thread(quick_refine.task_peaks, task["uuid"], document)
+        plot_data = refinement.plot_data
+        excluded = ((document.search_kwargs or {}).get("refinement_params") or {}).get("excluded_ranges")
+        profiles = await asyncio.to_thread(
+            quick_refine.task_profile_fits, task["uuid"], plot_data.x, plot_data.y_obs, plot_data.y_bkg,
+            list(peaks["2theta"]), wavelength, excluded,
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("Peak detection of task %s failed", task_id, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Peak detection failed: {exc}") from exc
-    return task, observed_peak_rows(peaks, reflections, wavelength=wavelength), wavelength, selection
+    rows = observed_peak_rows(peaks, reflections, wavelength=wavelength, profiles=profiles, k=k,
+                              instrument_fwhm=instrument_fwhm)
+    return task, rows, wavelength, selection, document, refinement
+
+
+_SCHERRER_K = Query(0.89, gt=0, le=2, description="Scherrer constant K (0.89: FWHM-based Scherrer)")
+_INSTRUMENT_FWHM = Query(None, ge=0, le=0.5, description="Instrument FWHM (°) removed before Scherrer / Williamson-Hall")
+
+
+def _size_settings(document, k, instrument_fwhm) -> dict:
+    return {
+        "k": k if isinstance(k, (int, float)) else 0.89,
+        "instrument_fwhm": instrument_fwhm if isinstance(instrument_fwhm, (int, float)) else None,
+        "instrument_profile": str((document.search_kwargs or {}).get("instrument_profile") or ""),
+    }
 
 
 @router.get("/task/{task_id}/observed-peaks")
-async def task_peaks_measured(task_id: int, sel: str | None = Query(None)):
-    """Peaks of the measured pattern (EFLECH), each assigned to the nearest reflection of ``sel``."""
+async def task_peaks_measured(
+    task_id: int, sel: str | None = Query(None), k: float = _SCHERRER_K, instrument_fwhm: float | None = _INSTRUMENT_FWHM,
+):
+    """Peaks of the measured pattern (EFLECH) with their fitted Kα1 FWHM and Scherrer size, each
+    assigned to the nearest reflection of ``sel``."""
     from dara.export.peak_list import OBSERVED_COLUMNS
 
-    _, rows, wavelength, selection = await _measured_peak_rows_of(task_id, sel)
+    _, rows, wavelength, selection, document, _ = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm)
     return {
         "columns": list(OBSERVED_COLUMNS), "rows": rows, "wavelength": wavelength,
         "selection": selection,
         "unassigned": sum(row["phase"] is None for row in rows),
+        **_size_settings(document, k, instrument_fwhm),
     }
 
 
 @router.get("/task/{task_id}/observed-peaks.csv")
-async def task_peaks_measured_csv(task_id: int, sel: str | None = Query(None)):
+async def task_peaks_measured_csv(
+    task_id: int, sel: str | None = Query(None), k: float = _SCHERRER_K, instrument_fwhm: float | None = _INSTRUMENT_FWHM,
+):
     from dara.export.peak_list import OBSERVED_COLUMNS, peak_csv_bytes
 
-    task, rows, _, selection = await _measured_peak_rows_of(task_id, sel)
+    task, rows, _, selection, _, _ = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm)
     filename = download_name(task_id, task["job"]["name"], "peaks_observed", selection, "csv")
     return _csv_response(peak_csv_bytes(rows, OBSERVED_COLUMNS), filename)
+
+
+@router.get("/task/{task_id}/williamson-hall")
+async def task_williamson_hall(
+    task_id: int, sel: str | None = Query(None), k: float = _SCHERRER_K, instrument_fwhm: float | None = _INSTRUMENT_FWHM,
+):
+    """Williamson-Hall fit (β·cos θ against 4·sin θ) per phase of ``sel`` from the fitted FWHM of
+    its assigned measured peaks, with the Rietveld crystallite size and microstrain for comparison."""
+    from dara.export.peak_list import williamson_hall
+
+    _, rows, wavelength, selection, document, refinement = await _measured_peak_rows_of(task_id, sel, k, instrument_fwhm)
+    settings = _size_settings(document, k, instrument_fwhm)
+    try:
+        details = _phase_refinement_details(refinement)
+    except Exception:  # noqa: BLE001 - the comparison values are an addition
+        logger.debug("Rietveld size/strain of task %s unavailable", task_id, exc_info=True)
+        details = {}
+    phases = williamson_hall(rows, wavelength=wavelength, k=settings["k"], instrument_fwhm=settings["instrument_fwhm"])
+    for entry in phases:
+        detail = details.get(entry["phase"]) or {}
+        grain = next(iter(detail.get("grain_sizes") or []), None) or {}
+        strain = (detail.get("size_strain") or {}).get("microstrain_percent") or {}
+        entry["rietveld"] = {
+            "size_nm": grain.get("value"), "size_esd_nm": grain.get("esd"),
+            "strain_percent": strain.get("value"), "strain_esd_percent": strain.get("esd"),
+        }
+    return {"phases": phases, "wavelength": wavelength, "selection": selection, **settings}
+
+
+def _treatment_of(kalpha2, smooth, wavelength) -> tuple[bool, int | None]:
+    """Validated ``(kalpha2, window)`` of the display-treatment query (422 when not offered)."""
+    from dara.export.pattern_treatment import SMOOTH_WINDOWS, kalpha_pair
+
+    kalpha2 = kalpha2 is True  # direct calls leave the Query default objects
+    window = smooth if isinstance(smooth, int) and smooth else None
+    if window is not None and window not in SMOOTH_WINDOWS:
+        raise HTTPException(status_code=422, detail="smooth is an odd number of points from 5 to 25")
+    if kalpha2 and kalpha_pair(wavelength) is None:
+        raise HTTPException(status_code=422, detail="Kα2 stripping is offered only for a lab anode wavelength")
+    return kalpha2, window
+
+
+async def _treated_fit_pattern(task_id: int, sel, kalpha2, smooth):
+    """``(task, wavelength, selection, (kalpha2, window), x, treated observed, background)`` on
+    the fit grid of ``sel``."""
+    from dara.export.pattern_treatment import treat
+
+    task, document, refinement, _, selection = await _selected_fit(task_id, sel)
+    wavelength = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
+    kalpha2, window = _treatment_of(kalpha2, smooth, wavelength)
+    plot_data = refinement.plot_data
+    x = np.asarray(plot_data.x, dtype=float)
+    background = np.asarray(plot_data.y_bkg, dtype=float)
+    observed = treat(x, plot_data.y_obs, wavelength, kalpha2=kalpha2, window=window, background=background)
+    return task, wavelength, selection, (kalpha2, window), x, observed, background
+
+
+@router.get("/task/{task_id}/pattern-treated")
+async def task_pattern_treated(
+    task_id: int, sel: str | None = Query(None), kalpha2: bool = False, smooth: int | None = Query(None),
+):
+    """Observed pattern of ``sel`` on its fit grid with the display treatments (Kα2 stripped,
+    then Savitzky-Golay smoothed). Display only: the fit and the residual use the measured data."""
+    from dara.export.pattern_treatment import treatment_text
+
+    _, _, selection, (kalpha2, window), x, observed, _ = await _treated_fit_pattern(task_id, sel, kalpha2, smooth)
+    return {
+        "two_theta": x.tolist(), "intensity": observed.tolist(),
+        "treatment": treatment_text(kalpha2, window), "selection": selection,
+    }
 
 
 @router.get("/task/{task_id}/pattern.xy")
@@ -3257,11 +3357,39 @@ async def task_pattern_xy(
     task_id: int,
     kind: str = Query("measured", pattern="^(measured|background_subtracted)$"),
     sel: str | None = Query(None),
+    kalpha2: bool = False,
+    smooth: int | None = Query(None),
 ):
-    """Measured pattern, or the observed minus the refined background of ``sel`` (fit range)."""
+    """Measured pattern, or the observed minus the refined background of ``sel`` (fit range).
+
+    With ``kalpha2``/``smooth`` the observed pattern of ``sel`` (fit range) as the fit plot
+    displays it: Kα2 stripped (of the signal above the refined background) and/or smoothed."""
     from dara.export.pattern_data import wavelength_text, xy_bytes
 
     kind = kind if isinstance(kind, str) else "measured"  # direct calls leave the Query default object
+    if kalpha2 is True or (isinstance(smooth, int) and smooth):
+        from dara.export.pattern_treatment import KALPHA2_RATIO, treatment_suffix
+
+        task, wavelength, selection, (kalpha2, window), angles, intensities, background = await _treated_fit_pattern(
+            task_id, sel, kalpha2, smooth,
+        )
+        if kind != "measured":
+            intensities = intensities - background
+        treatment = ", ".join(
+            ([f"Ka2 stripped (Rachinger, I(Ka2)/I(Ka1) = {KALPHA2_RATIO})"] if kalpha2 else [])
+            + ([f"smoothed (Savitzky-Golay, order 2, {window} points)"] if window else [])
+        )
+        name = task["job"]["name"]
+        short = ("measured" if kind == "measured" else "bgsub") + treatment_suffix(kalpha2, window)
+        header = (
+            f"DARA {kind.replace('_', '-')} pattern, {treatment}; display treatment only, the fit uses the "
+            f"measured data | task {task_id}: {name} | fit range of {selection} | wavelength {wavelength_text(wavelength)}"
+        )
+        return Response(
+            content=xy_bytes(angles, intensities, header),
+            media_type="text/plain; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{download_name(task_id, name, short, selection, "xy")}"'},
+        )
     if kind == "measured":
         from dara.server import review_router
 
@@ -3371,6 +3499,13 @@ async def delete_result(task_id: int):
     return {"message": "deleted", "task_id": task_id}
 
 
+def _plot_meta(wavelength_angstrom: float, spec) -> dict:
+    """Plot ``layout.meta``: the Kα1 wavelength, and whether Kα2 stripping is offered (lab anode)."""
+    from dara.export.pattern_treatment import kalpha_pair
+
+    return {"wavelength_angstrom": round(wavelength_angstrom, 6), "kalpha2": kalpha_pair(spec) is not None}
+
+
 @lru_cache(maxsize=24)
 def _plot_json(uuid: str, idx: int | None) -> str:
     """Build an immutable completed-result plot once per server process."""
@@ -3399,7 +3534,7 @@ def _plot_json(uuid: str, idx: int | None) -> str:
         from dara.search.candidate_cost import wavelength_angstrom
 
         spec = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
-        figure.update_layout(meta={"wavelength_angstrom": round(wavelength_angstrom(spec), 6)})
+        figure.update_layout(meta=_plot_meta(wavelength_angstrom(spec), spec))
     except Exception:
         logger.debug("Plot wavelength unavailable", exc_info=True)
     return figure.to_json()
@@ -3418,7 +3553,7 @@ def _version_plot_json(uuid: str, number: int) -> str:
         with get_result_store() as result_store:
             stored = result_store.query_one({"uuid": uuid})
         spec = (((stored or {}).get("output") or {}).get("search_kwargs") or {}).get("wavelength", "Cu")
-        figure.update_layout(meta={"wavelength_angstrom": round(wavelength_angstrom(spec), 6)})
+        figure.update_layout(meta=_plot_meta(wavelength_angstrom(spec), spec))
     except Exception:
         logger.debug("Plot wavelength unavailable", exc_info=True)
     return figure.to_json()

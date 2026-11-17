@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, selectionQuery, levelRank, overallAlertType, overallColor, reasonsText,
-  missingCell, patternHref, screeningTags, unexplainedSummary, unexplainedTooltipLines, verdictColor,
+  missingCell, patternFiles, patternHref, screeningTags, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, verdictColor,
 } from '../src/dara/server/ui/src/components/confidence.mjs';
 
 // --- levels ------------------------------------------------------------------
@@ -193,5 +193,15 @@ assert.equal(patternHref('/api', 3, 'pattern.csv', undefined), '/api/task/3/patt
 assert.equal(patternHref('/api', 3, 'pattern.csv', 'best'), '/api/task/3/pattern.csv?sel=best');
 assert.equal(patternHref('/api', 3, 'pattern.xy?kind=background_subtracted', 2), '/api/task/3/pattern.xy?kind=background_subtracted&sel=2');
 assert.equal(patternHref('/api', 3, 'pattern.csv', 'version:4'), '/api/task/3/pattern.csv?sel=version%3A4');
+
+// Display treatments: the treated download appears only while one is on.
+assert.equal(treatmentQuery({ kalpha2: false, smooth: 0 }), '');
+assert.equal(treatmentQuery({ kalpha2: true, smooth: 11 }), 'kalpha2=1&smooth=11');
+assert.equal(patternFiles({ kalpha2: false, smooth: 0 }).length, 3);
+const treatedFile = patternFiles({ kalpha2: false, smooth: 7 }).at(-1);
+assert.equal(treatedFile.label, 'Measured pattern as displayed (.xy)');
+assert.equal(patternHref('/api', 3, treatedFile.path, 'best'), '/api/task/3/pattern.xy?kind=measured&smooth=7&sel=best');
+assert.equal(treatedObservedName({ kalpha2: true, smooth: 11 }), 'Observed (Kα2 stripped, smoothed)');
+assert.equal(treatedObservedName({ kalpha2: true, smooth: 0 }), 'Observed (Kα2 stripped)');
 
 console.log('confidence UI tests passed');

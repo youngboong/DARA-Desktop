@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from dara.export.peak_list import OBSERVED_COLUMNS, observed_peak_rows, peak_rows
+from dara.export.peak_profile import fit_peak_profiles
 from dara.server import api_router, quick_refine, review_router
 from test_peak_list import PHASE, _refinement
 
@@ -60,6 +61,8 @@ def loaded(monkeypatch):
 
     monkeypatch.setattr(review_router, "_load_completed_task", load)
     monkeypatch.setattr(quick_refine, "task_peaks", lambda uuid, document: _frame([29.36, 44.0], [50.0, 10.0]))
+    # the profile fits without the on-disk cache (the cache lives next to the server's database)
+    monkeypatch.setattr(quick_refine, "task_profile_fits", lambda uuid, *args: fit_peak_profiles(*args))
     return refinement
 
 

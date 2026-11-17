@@ -78,6 +78,18 @@ function intensityStats(plot, isShown, xRange) {
  * Plot title with the pattern name: the server titles the figure after BGMN's working file
  * (`xrd_data.xy (Rwp=2.96%)`), so the name part is replaced and the Rwp kept.
  */
+/**
+ * Traces with the observed pattern replaced by a display-treated one (`intensity` on the same 2θ
+ * grid) and renamed `name`. The difference trace keeps the measured residual. Unchanged when
+ * `treated` is null or its length does not match the observed trace.
+ */
+export function withTreatedObserved(data, treated, name) {
+  if (!treated?.intensity) return data;
+  const index = data.findIndex(trace => !trace.meta && trace.name === 'Observed');
+  if (index < 0 || numbers(data[index].x).length !== treated.intensity.length) return data;
+  return data.map((trace, i) => (i === index ? { ...trace, x: numbers(trace.x), y: treated.intensity, name } : trace));
+}
+
 export function patternTitle(title, name) {
   const text = typeof title === 'string' ? title : title?.text;
   if (!name || typeof text !== 'string') return title;

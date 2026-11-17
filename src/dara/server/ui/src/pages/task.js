@@ -1,12 +1,12 @@
 import React from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
-import { Alert, Badge, Button, Col, Descriptions, Divider, Dropdown, Grid, List, message, Modal, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Badge, Button, Checkbox, Col, Descriptions, Divider, Dropdown, Grid, List, message, Modal, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownOutlined, DownloadOutlined, EllipsisOutlined, InfoCircleOutlined, LineChartOutlined, SearchOutlined } from '@ant-design/icons';
 import Loadable from 'react-loadable'
 import parse from 'html-react-parser';
 import { gofTone, peakCountTone, toneColor } from '../components/statusTone.mjs';
-import { buildRefinementView, exclusionViewRange, isTraceSelected, legendKey } from '../components/refinementPlotState.mjs';
+import { buildRefinementView, exclusionViewRange, isTraceSelected, legendKey, withTreatedObserved } from '../components/refinementPlotState.mjs';
 import { viewChangeFromRelayout } from '../components/plotNavigation.mjs';
 import { NAVIGATION_CONFIG, NAVIGATION_DRAGMODE } from '../components/usePlotView';
 import { formatParameterWithEsd, latticeParameterRows, latticeStateNote } from '../components/latticeParameters.mjs';
@@ -19,7 +19,7 @@ import { TaskProgress } from '../components/PracticalControls';
 import ChemicalFormula from '../components/ChemicalFormula';
 import FitCautions from '../components/FitCautionsPanel';
 import { cautionSortValue, cautionTagColor, cautionTooltip, countCautions } from '../components/fitCautions.mjs';
-import { levelRank, missingCell, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
+import { SMOOTH_WINDOWS, levelRank, missingCell, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
 import { ConfidenceBanner, DisplacementTag, DownloadMenu, OverallTag, ScreeningTags, StateTag, VerdictTag } from '../components/ConfidenceViews';
 import VersionsPanel, { useVersions } from '../components/VersionsPanel';
 import QuickRefineProgress, { API, NOT_AVAILABLE, postJson, requestJson, useQuickRefine } from '../components/QuickRefineProgress';
@@ -232,6 +232,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   anchorEdit = null,
   // Leaves the Phases / Peaks / Structure tabs in view under the workspace plot on a 900 px screen.
   height = 'clamp(440px, 58vh, 1000px)', compact = false,
+  // Display treatment of the observed trace ({kalpha2, smooth}) and its setter; null hides the control.
+  display = null, onDisplayChange = null,
 }, ref) {
   const [plot, setPlot] = React.useState(undefined);
   const [error, setError] = React.useState('');
@@ -300,10 +302,26 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [task_id, plot_id]);
+  // Kα2 stripping / smoothing of the observed trace only (display): the fit, residual and tables stay on the measured data.
+  const kalpha2Offered = Boolean(plot?.layout?.meta?.kalpha2);
+  const shownDisplay = display ? { kalpha2: display.kalpha2 && kalpha2Offered, smooth: display.smooth } : null;
+  const treatment = compact ? '' : treatmentQuery(shownDisplay);
+  const [treated, setTreated] = React.useState(null); // {query, intensity} or {query, error}
+  React.useEffect(() => {
+    if (!treatment || task_id === undefined || plot_id === undefined) return undefined;
+    let active = true;
+    const sel = encodeURIComponent(plot_id === null ? 'best' : String(plot_id));
+    requestJson(`/task/${task_id}/pattern-treated?sel=${sel}&${treatment}`)
+      .then(body => { if (active) setTreated({ query: treatment, intensity: body.intensity }); })
+      .catch(failure => { if (active) setTreated({ query: treatment, error: failure.message || 'Request failed' }); });
+    return () => { active = false; };
+  }, [task_id, plot_id, treatment]);
+  const shownTreated = treatment && treated?.query === treatment && !treated.error ? treated : null;
   // react-plotly redraws (a full Plotly.react, 100-500 ms) whenever data, layout or config is a
   // new object, so they are rebuilt only when what they show changes, not on every page render.
   // Legend formulas from the CIFs (NH4H2PO4, not the file stem's PH6NO4); trace order is unchanged.
-  const labeled = plot ? (phaseLegend || (d => d))(colorPhaseTraces(relabelPhaseTraces(plot.data), phaseColor)) : null;
+  const legendLabeled = plot ? (phaseLegend || (d => d))(colorPhaseTraces(relabelPhaseTraces(plot.data), phaseColor)) : null;
+  const labeled = legendLabeled && shownTreated ? withTreatedObserved(legendLabeled, shownTreated, treatedObservedName(shownDisplay)) : legendLabeled;
   // The label and colour functions only rename and recolour phase traces: this key describes their
   // output. It reads the colours from phaseColor, because Plotly normalizes the colours of drawn traces in place.
   const labelKey = (labeled || []).map((trace, index) => [trace?.name, phaseColor && ['phase-profile', 'reflection'].includes(plot.data[index]?.meta)
@@ -312,7 +330,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis,
   }) : null),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [plot, labelKey, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis]);
+  [plot, labelKey, shownTreated, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis]);
   // The edited curve and its anchors are two extra traces; without editing the key is constant, so
   // the plot is not redrawn. During a drag RefinementPlotly restyles them directly.
   const editing = Boolean(anchorEdit);
@@ -429,11 +447,22 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       <Tooltip title="Fit the intensity axis to the visible 2θ range (F)"><Text>Auto-Y</Text></Tooltip><Switch aria-label="Auto-Y" checked={fitY} onChange={value => { setFitY(value); setYRange(null); }} />
       <Tooltip title="Miller indices of the strongest reflections of the shown phases; zoom in to label more"><Text>hkl labels</Text></Tooltip><Switch aria-label="hkl labels" checked={hklLabels} onChange={value => { setHklLabels(value); setYRange(null); }} />
       {wavelength > 0 ? <><Tooltip title="d-spacing axis (Å, Kα1) along the top of the pattern"><Text>d axis</Text></Tooltip><Switch aria-label="d axis" checked={dAxis} onChange={setDAxis} /></> : null}
+      {onDisplayChange ? <Space size={6} className="dara-plot-display" aria-label="Display treatment of the observed pattern">
+        <Text type="secondary">Display</Text>
+        {kalpha2Offered ? <Tooltip title="Rachinger correction: removes the Kα2 component, I(Kα2)/I(Kα1) = 0.5">
+          <Checkbox checked={display.kalpha2} onChange={event => onDisplayChange({ ...display, kalpha2: event.target.checked })}>Strip Kα2</Checkbox></Tooltip> : null}
+        <Tooltip title="Savitzky–Golay smoothing (order 2); window in points"><Text>Smooth</Text></Tooltip>
+        <Select aria-label="Smoothing window" value={display.smooth} onChange={value => onDisplayChange({ ...display, smooth: value })} style={{ width: 72 }}
+          options={SMOOTH_WINDOWS.map(points => ({ value: points, label: points ? String(points) : 'Off' }))} />
+      </Space> : null}
       <Button onClick={resetView}>Reset zoom</Button>
       <Tooltip title={`Left-drag to zoom into a box (2θ only while Auto-Y is on), Shift- or right-drag to pan 2θ, mouse wheel to zoom 2θ at the cursor, double-click or Reset zoom to show the whole pattern. Zoom and pan stop at the measured range. Click a phase in the legend to show its profile and Bragg positions; hover for 2θ, d-spacing and hkl. The lower panel shows observed − calculated.${onPeakClick ? ' Click a missing-peak marker or an observed point to search references for that peak (Shift+click to select several).' : ''}`}>
         <InfoCircleOutlined aria-label="Plot navigation help" style={{ color: 'var(--dara-text-hint)' }} />
       </Tooltip>
     </Space>}
+    {treatment ? <div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>
+      {treated?.query === treatment && treated.error ? `The treated pattern could not be loaded (${treated.error}); the measured pattern is shown. ` : ''}
+      Display only: the fit, the residual and the tables use the measured data.</Text></div> : null}
     <div ref={readoutRef} className="dara-readout" aria-label="Cursor position">
       <span className="dara-readout-hint">Hover the plot to read 2θ, d and intensity</span>
       <span className="dara-readout-value">2θ <b data-k="x">–</b>°</span>
@@ -787,6 +816,7 @@ function TaskDetail({ data, task_id, onDelete }) {
     }
   }, [plot_id]);
   const [previewSel, setPreviewSel] = React.useState(undefined); // fit drawn on the page (undefined: the adopted one)
+  const [display, setDisplay] = React.useState({ kalpha2: false, smooth: 0 }); // display treatment of the fit plot's observed trace
   const [phaseSignal, setPhaseSignal] = React.useState(0); // opens Select phases… from the Refine menu
   const store = useVersions(task_id);
   const columns = useDescriptionColumns();
@@ -1411,7 +1441,7 @@ function TaskDetail({ data, task_id, onDelete }) {
               getView={() => plotRef.current?.getViewRange?.() || null}
               onSubmit={(background, label) => runQuick({ phases: [], background, origin: 'background', label })} />
           </> : null}
-          {displayedResult ? <DownloadMenu taskId={task_id} selection={currentSel} label="Download this fit"
+          {displayedResult ? <DownloadMenu taskId={task_id} selection={currentSel} label="Download this fit" treatment={display}
             blocked={quickCheck ? REFINE_ALL_FIRST : null} reportBlocked={reportBlocked} /> : null}
           {compareFromFit ? <Tooltip title="Compare this fit with its base; A and B can be changed in the comparison">
             <Button onClick={() => setCompare(compareFromFit)}>Compare…</Button>
@@ -1452,7 +1482,7 @@ function TaskDetail({ data, task_id, onDelete }) {
         <RefinementPlot ref={plotRef} task_id={task_id} plot_id={versionPending ? undefined : plot_id} title={data.task_label}
           excludedRanges={[...excludedRanges, ...(versionData?.background?.excluded_ranges || [])]}
           peaks={peaks} previewSticks={preview?.sticks || null} onGroups={setPhaseGroups} phaseColor={phaseColor} phaseLegend={phaseLegend}
-          onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} />
+          onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} display={display} onDisplayChange={setDisplay} />
         {displayedResult ? <>
           <Tabs activeKey={fitTab === 'structure' && !structurePhases(displayedResult.phase_details).length ? 'phases' : fitTab} onChange={setFitTab} destroyInactiveTabPane
             items={[

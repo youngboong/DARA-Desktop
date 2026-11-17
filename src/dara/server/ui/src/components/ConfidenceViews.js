@@ -3,8 +3,8 @@ import { Alert, Button, Checkbox, Dropdown, Space, Tag, Tooltip } from 'antd';
 import { DownloadOutlined, DownOutlined } from '@ant-design/icons';
 import { FormulaText } from './ChemicalFormula';
 import {
-  EXPORT_FORMATS, PATTERN_FILES, displacementTag, evidenceLines, exportHref, figureHref, overallAlertType, patternHref,
-  overallColor, overallShortLabel, reasonsText, screeningTags, verdictColor,
+  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, overallAlertType, patternHref,
+  overallColor, overallShortLabel, patternFiles, reasonsText, screeningTags, verdictColor,
 } from './confidence.mjs';
 
 import { stateLabel } from './resultsList.mjs';
@@ -84,10 +84,11 @@ export function ScreeningTags({ candidateSummary }) {
  * One "Download" dropdown for a result selection: report, figure (PNG/SVG), export for other
  * programs, plus `extraItems` (`{key, label, onClick?}`). `selection` undefined = the adopted fit.
  * `blocked` (a reason) disables the whole menu, e.g. for a quick check; `reportBlocked` only the report.
+ * `treatment` (`{kalpha2, smooth}` of the fit plot) adds the measured pattern as displayed to Pattern data.
  */
 const HKL_KEY = 'dara-figure-hkl';
 
-export function DownloadMenu({ taskId, selection, size, blocked = null, reportBlocked = null, extraItems = [], label = 'Download' }) {
+export function DownloadMenu({ taskId, selection, size, blocked = null, reportBlocked = null, extraItems = [], label = 'Download', treatment = null }) {
   const [hkl, setHkl] = React.useState(() => { try { return window.localStorage.getItem(HKL_KEY) === '1'; } catch (e) { return false; } });
   const toggleHkl = () => setHkl(on => { try { window.localStorage.setItem(HKL_KEY, on ? '0' : '1'); } catch (e) { /* private mode */ } return !on; });
   const items = [
@@ -97,7 +98,7 @@ export function DownloadMenu({ taskId, selection, size, blocked = null, reportBl
     { key: 'svg', label: <a href={figureHref(API, taskId, 'svg', selection, hkl)}>Figure (SVG)</a> },
     { key: 'export', label: 'Export for…', children: EXPORT_FORMATS.map(format => ({
       key: `export:${format.key}`, label: <a href={exportHref(API, taskId, format.key, selection)}>{format.label}</a> })) },
-    { key: 'pattern', label: 'Pattern data', children: PATTERN_FILES.map(file => ({
+    { key: 'pattern', label: 'Pattern data', children: patternFiles(treatment).map(file => ({
       key: `pattern:${file.key}`, label: <a href={patternHref(API, taskId, file.path, selection)}>{file.label}</a> })) },
     ...extraItems.map(({ onClick, ...item }) => item),
     { type: 'divider' },

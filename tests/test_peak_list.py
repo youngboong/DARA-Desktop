@@ -13,10 +13,14 @@ FWHM = 0.30
 
 
 def _refinement(angles, intensities=None, *, phases=None):
-    """Fake refinement: one Gaussian of FWHM 0.30 degrees per reflection angle."""
+    """Fake refinement: one Cu Kα1+Kα2 doublet of Gaussians of FWHM 0.30 degrees per reflection angle."""
     x = np.arange(10.0, 80.0, 0.01)
     sigma = FWHM / (2 * np.sqrt(2 * np.log(2)))
-    curve = sum(np.exp(-0.5 * ((x - angle) / sigma) ** 2) * 100 for angle in angles)
+    alpha2 = [np.degrees(2 * np.arcsin(np.sin(np.radians(angle / 2)) * 1.544426 / 1.540598)) for angle in angles]
+    curve = sum(
+        (np.exp(-0.5 * ((x - angle) / sigma) ** 2) + 0.5 * np.exp(-0.5 * ((x - shifted) / sigma) ** 2)) * 100
+        for angle, shifted in zip(angles, alpha2)
+    )
     peaks = pd.DataFrame(
         {
             "2theta": angles,

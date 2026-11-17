@@ -182,6 +182,30 @@ export const PATTERN_FILES = [
   { key: 'fit', label: 'Fit curves (CSV)', path: 'pattern.csv' },
 ];
 
+/** Smoothing windows (points) offered for the displayed observed pattern; 0 = off. */
+export const SMOOTH_WINDOWS = [0, 5, 7, 9, 11, 15, 21, 25];
+
+/** Query of a display treatment `{kalpha2, smooth}` (`kalpha2=1&smooth=11`); '' when none is on. */
+export function treatmentQuery(display) {
+  const parts = [];
+  if (display?.kalpha2) parts.push('kalpha2=1');
+  if (display?.smooth) parts.push(`smooth=${display.smooth}`);
+  return parts.join('&');
+}
+
+/** Legend name of the treated observed trace: "Observed (Kα2 stripped, smoothed)". */
+export function treatedObservedName(display) {
+  const parts = [display?.kalpha2 ? 'Kα2 stripped' : null, display?.smooth ? 'smoothed' : null].filter(Boolean);
+  return parts.length ? `Observed (${parts.join(', ')})` : 'Observed';
+}
+
+/** `PATTERN_FILES` plus the measured pattern as displayed when a display treatment is on. */
+export function patternFiles(display) {
+  const query = treatmentQuery(display);
+  return query ? [...PATTERN_FILES, { key: 'treated', label: 'Measured pattern as displayed (.xy)', path: `pattern.xy?kind=measured&${query}` }]
+    : PATTERN_FILES;
+}
+
 export function patternHref(api, taskId, path, selection) {
   const sel = selection === 'best' || selection === null ? 'best'
     : (Number.isInteger(selection) && selection >= 0) || /^version:[1-9]\d{0,5}$/.test(String(selection)) ? String(selection) : null;
