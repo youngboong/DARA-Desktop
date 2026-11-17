@@ -89,6 +89,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Type: filesandordirs; Name: "{app}\python"
 Type: filesandordirs; Name: "{app}\src\dara\server"
 Type: filesandordirs; Name: "{app}\scripts"
+Type: filesandordirs; Name: "{app}\tools\rsync"
 
 [Files]
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

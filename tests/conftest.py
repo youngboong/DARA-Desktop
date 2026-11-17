@@ -21,6 +21,16 @@ def _private_structure_caches(tmp_path_factory):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_rsync(monkeypatch):
+    """COD downloads in tests never start a real rsync (tests that want one inject a fake)."""
+    from dara import structure_library
+
+    monkeypatch.delenv("DARA_RSYNC", raising=False)
+    monkeypatch.setattr(structure_library, "BUNDLED_RSYNC", structure_library.Path(__file__).parent / "no-such-rsync.exe")
+    monkeypatch.setattr(structure_library, "_rsync_failed", False)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_document_cache():
     """Decoded task documents are cached by task uuid; tests reuse uuids with other documents."""
     from dara.server import quick_refine

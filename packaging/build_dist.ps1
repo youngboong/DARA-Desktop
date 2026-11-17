@@ -23,6 +23,25 @@ $WebView2Sha256  = '90778deb1b77e36292828b4b5833c9255c27533f40e0ddd55891ae718944
 $InnoVersion     = '6.7.4'
 $InnoSha256      = 'a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c'
 $InnoUrl         = 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe'  # linked from jrsoftware.org/isdl.php
+# rsync for the COD structure download (src\dara\structure_library.py): MSYS2 packages from
+# repo.msys2.org/msys/x86_64, SHA-256 checked against msys.db on 2026-11-17.
+$MsysPackages = [ordered]@{
+    'rsync-3.5.2-2'          = 'e27c183d8af0ed250dc7502ba3b4aebe5c32086c4252fe4f16a4cff328c8e803'
+    'msys2-runtime-3.6.12-1' = 'c0dbaa624e29be6d08cf5c65609dca6c749431109e4572bf446a3ca9b4c4fd7c'
+    'libxxhash-0.8.4-1'      = 'ba784ad117626401cd5d3ec0cf70399f9de72a63755f96c28fa2032303f9c330'
+    'popt-1.19-1'            = 'b402bd1d03815c5e28b7ab415d8e20f487eff2460ae0271a99674eeb0d77194f'
+    'libzstd-1.5.7-1'        = '5e370b2e725a0a7e5ff58d84653c9a0cd5a10b9cfe930f2d949a28ad2a11c1f2'
+    'liblz4-1.11.1-1'        = 'b35db1392281429746698daaee05934d3eaa437a585f723b1723bca409189742'
+    'libopenssl-4.1.0-1'     = '71f093de4a002913f39783b79d18da33b63ce8baf825434218cc1d8bd40304fb'
+    'libiconv-1.19-1'        = '0fa55ea2a6ccf97cf8c58b24b2615815e15e16e6e4e888091c263c2c83c5313d'
+    'libidn2-2.3.8-1'        = '55e0de96b893e9f67f14a4283d411fc2a45d7b59333bc16e2a9b16e5bfc9282f'
+    'libunistring-1.4.2-1'   = 'bcd04706d95b5e7127d39834565bceed6b400192f5fb51599745aba28d5da018'
+    'libintl-0.22.5-1'       = '336d66b9d95cf9c1804958f8e260762a3e83bf158ed5981f783bc772a31073cf'
+}
+# rsync.exe and its DLL import closure (read from the PE import tables of these versions, no delay
+# loads); update together with the packages. gcc-libs, msys-ssl and msys-charset are not needed.
+$RsyncFiles = @('rsync.exe', 'msys-2.0.dll', 'msys-crypto-4.dll', 'msys-iconv-2.dll', 'msys-idn2-0.dll', 'msys-intl-8.dll',
+                'msys-lz4-1.dll', 'msys-popt-0.dll', 'msys-unistring-5.dll', 'msys-xxhash-0.dll', 'msys-zstd-1.dll')
 
 $Root     = Split-Path -Parent $PSScriptRoot
 $Dist     = Join-Path $Root 'dist'
@@ -64,6 +83,67 @@ function Assert-Signed {
 function Get-FolderMB {
     param([string]$Path)
     return [math]::Round(((Get-ChildItem -LiteralPath $Path -Recurse -File -Force | Measure-Object -Sum Length).Sum / 1MB), 1)
+}
+
+function Install-BundledRsync {
+    # Unpacks the pinned MSYS2 packages into $Destination: rsync.exe, its DLLs, licence texts, README.txt.
+    param([string]$Destination)
+    # bsdtar of Windows 11 reads .tar.zst (libzstd); Git's GNU tar may have no zstd.
+    $tar = Join-Path $env:WINDIR 'System32\tar.exe'
+    if (Test-Path -LiteralPath $Destination) { Remove-Item -LiteralPath $Destination -Recurse -Force }
+    [void](New-Item -ItemType Directory -Force -Path $Destination)
+    $readme = @(
+        'rsync for DARA Desktop',
+        '',
+        'DARA runs rsync.exe as a separate program to download COD crystal structures',
+        '(rsync://www.crystallography.net/cif/) for the structure library, and falls back to HTTP',
+        'when rsync cannot connect. The files in this folder are unmodified binaries of the MSYS2',
+        'project (https://www.msys2.org/) for x86_64. rsync and the MSYS2 runtime are licensed under',
+        'the GNU General Public License version 3 or later; the libraries under the licences named',
+        'below. The licence texts the packages include are in licenses\<package>\; the others are',
+        'published at the upstream address. The complete corresponding source code of each package',
+        'is available from the MSYS2 package repository at the "source" address below and from upstream.',
+        '')
+    foreach ($name in $MsysPackages.Keys) {
+        $pkg = Join-Path $BuildDir "downloads\$name-x86_64.pkg.tar.zst"
+        Get-VerifiedDownload -Url "https://repo.msys2.org/msys/x86_64/$name-x86_64.pkg.tar.zst" -Path $pkg -Sha256 $MsysPackages[$name]
+        $tree = Join-Path $BuildDir "msys2\$name"
+        if (Test-Path -LiteralPath $tree) { Remove-Item -LiteralPath $tree -Recurse -Force }
+        [void](New-Item -ItemType Directory -Force -Path $tree)
+        & $tar -xf $pkg -C $tree
+        if ($LASTEXITCODE -ne 0) { throw "$tar could not unpack $pkg (it needs zstd support, as in Windows 11)." }
+        $info = @{}
+        foreach ($line in Get-Content -LiteralPath (Join-Path $tree '.PKGINFO')) {
+            if ($line -match '^(\w+) = (.*)$') { $info[$Matches[1]] = @($info[$Matches[1]] | Where-Object { $_ }) + $Matches[2] }
+        }
+        $shipped = @($RsyncFiles | Where-Object { Test-Path -LiteralPath (Join-Path $tree "usr\bin\$_") })
+        foreach ($file in $shipped) { Copy-Item -LiteralPath (Join-Path $tree "usr\bin\$file") -Destination $Destination }
+        $licences = @(Get-ChildItem -LiteralPath (Join-Path $tree 'usr\share') -Recurse -File -ErrorAction SilentlyContinue | Where-Object {
+            $_.FullName -like (Join-Path $tree 'usr\share\licenses\*') -or ($_.FullName -like (Join-Path $tree 'usr\share\doc\*') -and $_.Name -match '^COPYING|LICENSE') })
+        if ($licences) {
+            $licenceDir = Join-Path $Destination "licenses\$($info.pkgname)"
+            [void](New-Item -ItemType Directory -Force -Path $licenceDir)
+            foreach ($file in $licences) { Copy-Item -LiteralPath $file.FullName -Destination $licenceDir }
+        }
+        $readme += @(
+            "$($info.pkgname) $($info.pkgver)",
+            "  licence:  $($info.license -join ', ')",
+            "  files:    $(if ($shipped) { $shipped -join ', ' } else { '(none)' })$(if ($licences) { "; licenses\$($info.pkgname)\" })",
+            "  upstream: $($info.url)",
+            "  binary:   https://repo.msys2.org/msys/x86_64/$name-x86_64.pkg.tar.zst",
+            "  source:   https://repo.msys2.org/msys/sources/$($info.pkgbase)-$($info.pkgver).src.tar.zst",
+            '')
+        Remove-Item -LiteralPath $tree -Recurse -Force
+    }
+    $missing = @($RsyncFiles | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Destination $_)) })
+    if ($missing) { throw "The MSYS2 packages did not provide $($missing -join ', ')." }
+    [System.IO.File]::WriteAllLines((Join-Path $Destination 'README.txt'), [string[]]$readme)
+    # Self-check: every DLL rsync loads is present (a missing one fails before main).
+    $probe = Invoke-Native -FilePath (Join-Path $Destination 'rsync.exe') -Arguments @('--version') -Quiet
+    if ($probe.ExitCode -ne 0 -or ($probe.Lines -join ' ') -notmatch 'rsync\s+version') {
+        $probe.Lines | Select-Object -Last 10 | Write-Host
+        throw "The bundled rsync.exe does not start (exit code $($probe.ExitCode))."
+    }
 }
 
 function Get-InstallerDefines {
@@ -137,6 +217,8 @@ if ($check.ExitCode -ne 0 -or ($check.Lines | Select-Object -Last 1) -ne $expect
     $check.Lines | Select-Object -Last 20 | Write-Host
     throw "Import check failed: dara must load from $expected."
 }
+Write-Phase 'Bundling rsync (MSYS2) for the COD download'
+Install-BundledRsync -Destination (Join-Path $App 'tools\rsync')
 
 # ---- 2. DARA.exe (C# WinForms + WebView2, compiled with the csc.exe that ships with Windows) ----
 Write-Phase "Building DARA.exe (WebView2 SDK $WebView2Version)"

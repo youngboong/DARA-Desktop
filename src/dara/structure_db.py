@@ -614,6 +614,13 @@ class CODDatabase(StructureDatabase):
         return "cod"
 
     @staticmethod
+    def read_cod_file(path: Path, cod_id: str) -> Cif:
+        """Parse a downloaded COD file; ``str()`` of the result is what the cache stores."""
+        cif = Cif.from_file(path)
+        cif.filename = str(cod_id)
+        return cif
+
+    @staticmethod
     def _download_cod(cod_id: str, max_attempts: int = 3) -> Cif:
         """Download a COD file from its ID."""
         COD_URL = "https://www.crystallography.net/cod/{cod_id}.cif"
@@ -631,12 +638,10 @@ class CODDatabase(StructureDatabase):
                     ) as temp_file:
                         temp_file.write(response.content)
                         temp_path = Path(temp_file.name)
-                    cif = Cif.from_file(temp_path)
+                    return CODDatabase.read_cod_file(temp_path, cod_id)
                 finally:
                     if temp_path is not None:
                         temp_path.unlink(missing_ok=True)
-                cif.filename = str(cod_id)
-                return cif
             except Exception as exc:
                 if _is_not_found_error(exc):
                     logger.error("COD %s does not exist on the server: %s", cod_id, exc)

@@ -31,16 +31,31 @@ import argparse
 import hashlib
 import itertools
 import json
+import logging
 import os
+import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from pathlib import Path
+
+logger = logging.getLogger("dara.structure_library")  # also under "python -m"
 
 PACKS_FILE = Path(__file__).parent / "data" / "structure_packs.json"
 FORMAT_VERSION = 1
 EXIT_DONE, EXIT_ERROR, EXIT_PARTIAL = 0, 1, 2
 COD_CHUNK = 40
+# COD's bulk channel; layout cif/<d1>/<d2d3>/<d4d5>/<7-digit id>.cif
+COD_RSYNC_URL = "rsync://www.crystallography.net/cif/"
+# ids per rsync call: each call spends about 4.5 s connecting (measured 2026-11-17), so 300 ids keep
+# the measured 19 files/s; progress comes every ~16 s like an HTTP step, cancel is polled meanwhile
+RSYNC_CHUNK = 300
+RSYNC_TIMEOUT_S = 900  # whole call; a stalled transfer already ends after --timeout=60
+RSYNC_ENV_VAR = "DARA_RSYNC"
+# packaged app: <app>/src/dara/structure_library.py -> <app>/tools/rsync/rsync.exe
+BUNDLED_RSYNC = Path(__file__).resolve().parents[2] / "tools" / "rsync" / "rsync.exe"
+_rsync_failed = False  # rsync failed outright once: HTTP only for the rest of this process
 MP_CHUNK = 200
 STICK_CHUNK = 64
 STICK_WAVELENGTH = "Cu"
@@ -203,7 +218,7 @@ def estimate(pack_ids=(), elements=(), data: dict | None = None) -> dict:
             "sticks": round(sticks * m["stick_disk_kb"] / 1024, 1),
         },
         "minutes": {
-            "cod": round(cod / m["cod_per_s"] / 60, 1),
+            "cod": round(cod / (m["cod_rsync_per_s"] if rsync_executable() else m["cod_per_s"]) / 60, 1),
             "mp": round(mp / m["mp_per_s"] / 60 + m["mp_index_s"] / 60, 1),
             "sticks": round(sticks * m["stick_s_per_cif"] / workers / 60, 1),
         },
@@ -278,11 +293,80 @@ def _check_cancel(cancel_file):
         raise Cancelled()
 
 
-def _download_cod(ids, progress: Progress, cancel_file, chunk_size: int | None = None) -> tuple[int, int]:
-    """Fetch missing COD CIFs with the search's own polite downloader. Returns (failed, done).
+def rsync_executable() -> str | None:
+    """rsync for COD downloads: ``$DARA_RSYNC``, else the app's bundled one; never one from PATH."""
+    configured = os.environ.get(RSYNC_ENV_VAR, "").strip()
+    for path in ([Path(configured).expanduser()] if configured else []) + [BUNDLED_RSYNC]:
+        if path.is_file():
+            return str(path)
+    return None
 
-    Cancel and progress are checked every ``chunk_size`` ids (default ``COD_CHUNK``).
+
+def _rsync_cod(exe: str, ids, folder: Path, cancel_file=None) -> set[str] | None:
+    """Fetch ``ids`` with one rsync call and cache them exactly as the HTTP download does.
+
+    Returns the ids now cached (the others are for HTTP), or ``None`` when rsync failed
+    outright (no connection, timeout, cannot start). A cancel kills rsync and raises ``Cancelled``.
     """
+    from dara.structure_db import CODDatabase, atomic_write_text
+
+    paths = {i: f"{i[0]}/{i[1:3]}/{i[3:5]}/{i}.cif" for i in ids if len(i) == 7 and i.isdigit()}
+    if not paths:
+        return set()
+    with tempfile.TemporaryDirectory(prefix="dara-rsync-", ignore_cleanup_errors=True) as work:
+        Path(work, "list.txt").write_text("\n".join(paths.values()) + "\n", encoding="ascii")
+        # MSYS rsync reads "C:\..." as a remote host: only relative paths, cwd = the work folder
+        command = [exe, "--no-relative", "--files-from=list.txt", "--timeout=60", "--contimeout=15",
+                   COD_RSYNC_URL, "out/"]
+        with open(Path(work, "stderr.txt"), "w+b") as stderr:  # a file: a full pipe would block rsync
+            try:
+                process = subprocess.Popen(command, cwd=work, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                           stderr=stderr, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except OSError as exc:
+                logger.warning("rsync failed (cannot start: %s); downloading COD over HTTP instead.", exc)
+                return None
+            deadline = time.monotonic() + RSYNC_TIMEOUT_S
+            try:
+                while True:
+                    try:
+                        code = process.wait(timeout=0.5)
+                        break
+                    except subprocess.TimeoutExpired:
+                        _check_cancel(cancel_file)
+                        if time.monotonic() > deadline:
+                            logger.warning("rsync failed (timed out); downloading COD over HTTP instead.")
+                            return None
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
+            if code not in (0, 23, 24):  # 23/24: some files missing or vanished
+                stderr.seek(0)
+                detail = stderr.read().decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
+                logger.warning("rsync failed (exit %d: %s); downloading COD over HTTP instead.", code, detail[0])
+                return None
+        cached = set()
+        for cod_id in paths:
+            raw = Path(work, "out", f"{cod_id}.cif")
+            if not raw.is_file():
+                continue
+            try:
+                atomic_write_text(folder / f"{cod_id}.cif", str(CODDatabase.read_cod_file(raw, cod_id)))
+            except Exception as exc:  # noqa: BLE001 - unreadable: HTTP gets its own try
+                logger.warning("COD %s from rsync is not readable: %s", cod_id, exc)
+                continue
+            cached.add(cod_id)
+        return cached
+
+
+def _download_cod(ids, progress: Progress, cancel_file, chunk_size: int | None = None) -> tuple[int, int]:
+    """Fetch missing COD CIFs (rsync when available, else the search's polite HTTP downloader).
+
+    Returns (failed, done). Progress comes every ``RSYNC_CHUNK`` ids per rsync call (cancel is
+    polled while it runs) and every ``chunk_size`` ids (default ``COD_CHUNK``) over HTTP. Ids
+    rsync did not deliver go to HTTP (which remembers the ones the server does not have).
+    """
+    global _rsync_failed
     from dara.structure_db import CODDatabase, _is_not_found_error, atomic_write_text, cod_cache_dir
 
     folder = cod_cache_dir()
@@ -307,9 +391,25 @@ def _download_cod(ids, progress: Progress, cancel_file, chunk_size: int | None =
 
     db._download_cod = fetch
     step = chunk_size or COD_CHUNK
-    for start in range(0, len(missing), step):
+    exe = rsync_executable()
+    queue, http = list(missing), []
+    while queue or http:
         _check_cancel(cancel_file)
-        chunk = missing[start : start + step]
+        if not http and exe and not _rsync_failed:
+            chunk, queue = queue[:RSYNC_CHUNK], queue[RSYNC_CHUNK:]
+            cached = _rsync_cod(exe, chunk, folder, cancel_file)
+            if cached is None:
+                _rsync_failed = True
+                queue = chunk + queue
+                continue
+            http = [i for i in chunk if i not in cached]
+            nbytes += sum((folder / f"{i}.cif").stat().st_size for i in cached)
+            done += len(cached)
+            progress.emit("cod", done, total, nbytes, f"{len(cached)} downloaded with rsync in this step")
+            continue
+        if not http:
+            http, queue = queue, []
+        chunk, http = http[:step], http[step:]
         cifs, bad = db._fetch_many(chunk, folder)
         failed += len(bad) - len([i for i in bad if i in not_found])
         nbytes += sum((folder / f"{i}.cif").stat().st_size for i in cifs if (folder / f"{i}.cif").is_file())

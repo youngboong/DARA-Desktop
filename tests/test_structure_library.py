@@ -416,3 +416,137 @@ def test_download_killed_after_cancel_is_reported_as_cancelled(tmp_path, monkeyp
         assert job["exit_code"] == 2 and job["last"]["phase"] == "cancelled"
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# rsync channel
+# --------------------------------------------------------------------------- #
+RAW_COD = "#------------------------------------------------------------------------------\r\n#$Date$\r\n" + CIF.replace("\n", "\r\n")
+
+
+def _fake_rsync(monkeypatch, tmp_path, calls, deliver=lambda cod_id: True, returncode=0, after=None, hang=False):
+    """``DARA_RSYNC`` points at a dummy file; ``subprocess.Popen`` plays rsync from its list file."""
+    import subprocess
+
+    exe = tmp_path / "rsync.exe"
+    exe.write_text("")
+    monkeypatch.setenv("DARA_RSYNC", str(exe))
+
+    class Process:
+        def __init__(self, command, cwd, stderr, **kwargs):
+            assert command[0] == str(exe) and command[-2:] == [lib.COD_RSYNC_URL, "out/"]
+            assert not any(":\\" in arg or ":/" in arg for arg in command[1:-2] + command[-1:])  # relative only
+            rel = Path(cwd, "list.txt").read_text(encoding="ascii").split()
+            calls.append(rel)
+            out = Path(cwd, "out")
+            out.mkdir()
+            for path in rel:
+                cod_id = Path(path).stem
+                assert path == f"{cod_id[0]}/{cod_id[1:3]}/{cod_id[3:5]}/{cod_id}.cif"
+                if deliver(cod_id):
+                    (out / f"{cod_id}.cif").write_bytes(RAW_COD.encode())
+            stderr.write(b"@ERROR: fake failure\n")
+            if after:
+                after()
+            self.returncode = None if hang else returncode
+            self.killed = False
+
+        def wait(self, timeout=None):
+            if self.returncode is None and not self.killed:
+                raise subprocess.TimeoutExpired("rsync", timeout)
+            return self.returncode
+
+        def poll(self):
+            return None if self.killed else self.returncode
+
+        def kill(self):
+            self.killed = True
+            calls.append("killed")
+
+    monkeypatch.setattr(subprocess, "Popen", Process)
+
+
+class _Response:
+    content = RAW_COD.encode()
+
+    def raise_for_status(self):
+        pass
+
+
+def test_rsync_delivers_everything_and_caches_what_http_would(caches, monkeypatch):
+    http_calls, rsync_calls = [], []
+    monkeypatch.setattr(structure_db.requests, "get", lambda url, timeout: http_calls.append(url) or _Response())
+    assert lib.download(["recommended"], [], ["cod"], sticks=False, data=DATA) == lib.EXIT_DONE
+    by_http = {p.name: p.read_bytes() for p in (caches / "cod").glob("*.cif")}
+    assert len(by_http) == 6 and len(http_calls) == 6
+
+    monkeypatch.setenv("DARA_COD_CACHE_DIR", str(caches / "cod-rsync"))
+    http_calls.clear()
+    _fake_rsync(monkeypatch, caches, rsync_calls)
+    assert lib.download(["recommended"], [], ["cod"], sticks=False, data=DATA) == lib.EXIT_DONE
+    by_rsync = {p.name: p.read_bytes() for p in (caches / "cod-rsync").glob("*.cif")}
+    assert http_calls == [] and len(rsync_calls) == 1
+    assert by_rsync == by_http  # same cache content whatever the channel
+
+
+def test_ids_rsync_did_not_deliver_go_to_http_and_404s_are_remembered(caches, monkeypatch):
+    import requests
+
+    http_calls, rsync_calls = [], []
+
+    def fetch(cod_id):
+        http_calls.append(cod_id)
+        if cod_id == "1000010":
+            error = requests.HTTPError("404")
+            error.response = type("R", (), {"status_code": 404})()
+            raise error
+        return CIF
+
+    monkeypatch.setattr(structure_db.CODDatabase, "_download_cod", staticmethod(fetch))
+    _fake_rsync(monkeypatch, caches, rsync_calls, deliver=lambda i: i not in ("1000007", "1000010"), returncode=23)
+    assert lib.download(["recommended"], [], ["cod"], sticks=False, data=DATA) == lib.EXIT_DONE
+    assert sorted(http_calls) == ["1000007", "1000010"] and len(rsync_calls) == 1
+    assert lib.status(["recommended"], [], DATA)["cod"] == {"total": 6, "cached": 5, "unavailable": 1}
+
+
+def test_rsync_that_cannot_connect_is_dropped_for_the_run_with_one_warning(caches, monkeypatch, caplog):
+    http_calls, rsync_calls = [], []
+    monkeypatch.setattr(lib, "RSYNC_CHUNK", 2)
+    monkeypatch.setattr(structure_db.CODDatabase, "_download_cod", staticmethod(_fake_download(http_calls)))
+    _fake_rsync(monkeypatch, caches, rsync_calls, deliver=lambda i: False, returncode=10)
+    with caplog.at_level("WARNING", logger="dara.structure_library"):
+        assert lib.download(["recommended"], [], ["cod"], sticks=False, data=DATA) == lib.EXIT_DONE
+        assert lib.download([], ["Fe", "O"], ["cod"], sticks=False, data=DATA) == lib.EXIT_DONE
+    assert len(rsync_calls) == 1 and len(http_calls) == 7  # everything by HTTP, rsync tried once
+    assert len([r for r in caplog.records if "rsync failed" in r.getMessage()]) == 1
+
+
+def test_cancel_stops_between_rsync_steps(caches, monkeypatch):
+    cancel, rsync_calls = caches / "cancel.flag", []
+    monkeypatch.setattr(lib, "RSYNC_CHUNK", 2)
+    _fake_rsync(monkeypatch, caches, rsync_calls, after=lambda: cancel.write_text("stop"))
+    stream = io.StringIO()
+    code = lib.download(["recommended"], [], ["cod"], sticks=False, cancel_file=str(cancel),
+                        progress=lib.Progress(True, stream), data=DATA)
+    assert code == lib.EXIT_PARTIAL and _lines(stream)[-1]["phase"] == "cancelled"
+    assert len(rsync_calls) == 1 and len(list((caches / "cod").glob("*.cif"))) == 2
+    assert not list((caches / "cod").glob("*.tmp"))
+
+
+def test_cancel_kills_a_running_rsync_and_caches_nothing_of_its_step(caches, monkeypatch):
+    cancel, rsync_calls = caches / "cancel.flag", []
+    _fake_rsync(monkeypatch, caches, rsync_calls, after=lambda: cancel.write_text("stop"), hang=True)
+    code = lib.download(["recommended"], [], ["cod"], sticks=False, cancel_file=str(cancel), data=DATA)
+    assert code == lib.EXIT_PARTIAL and rsync_calls[-1] == "killed"
+    assert not list((caches / "cod").glob("*.cif"))
+
+
+def test_estimate_uses_the_rsync_rate_only_when_rsync_is_available(caches, monkeypatch):
+    data = json.loads(json.dumps(DATA))
+    data["measured"]["cod_rsync_per_s"] = 8.0
+    assert lib.rsync_executable() is None
+    assert lib.estimate(["recommended"], [], data)["minutes"]["cod"] == round(6 / 4.0 / 60, 1)
+    _fake_rsync(monkeypatch, caches, [])
+    assert lib.rsync_executable() == str(caches / "rsync.exe")
+    assert lib.estimate(["recommended"], [], data)["minutes"]["cod"] == round(6 / 8.0 / 60, 1)
+    assert lib.load_packs()["measured"]["cod_rsync_per_s"] > lib.load_packs()["measured"]["cod_per_s"]
