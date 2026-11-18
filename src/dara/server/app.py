@@ -24,7 +24,7 @@ from dara.server.update_router import router as update_router
 from dara.server.annotations_router import router as annotations_router
 from dara.server import identification_router
 from dara.server.setting import get_dara_server_settings
-from dara.server.worker import worker_process
+from dara.server.worker import mark_running_jobs_as_fizzled, worker_process
 
 try:
     multiprocessing.set_start_method("spawn")
@@ -87,6 +87,7 @@ async def launch_worker_process(app: FastAPI):
 
         ensure_bgmn_env(Path(__file__).resolve().parents[1] / "bgmn" / "BGMNwin")
         quick_refine.recover_interrupted()
+        mark_running_jobs_as_fizzled(identification=True)  # left RUNNING by a stopped server
     except Exception:
         logging.getLogger("dara.server.app").debug("Quick-refine start-up failed", exc_info=True)
     stop_event = multiprocessing.Event()

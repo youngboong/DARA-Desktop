@@ -245,14 +245,21 @@ def get_all_pending_jobs(sort_by_submitted_time=False):
         return [job["uuid"] for job in jobs]
 
 
-def mark_running_jobs_as_fizzled():
-    """Mark all running jobs as fizzled."""
+def mark_running_jobs_as_fizzled(identification: bool = False):
+    """Mark all running jobs as fizzled. Identification tasks are computed by the server, not by
+    this worker: they are left alone (the worker starts while the server already takes requests)
+    and ``identification=True`` (the server's start-up) marks only those."""
+    from dara.server.identification_router import is_identification
+
     with get_worker_store() as worker_store:
         running_jobs = list(worker_store.query(criteria={"status": "RUNNING"})) + list(worker_store.query(criteria={"status": "CANCELLING"}))
         for job in running_jobs:
+            if is_identification(job) != identification:
+                continue
             job["status"] = "FIZZLED"
             job["end_time"] = datetime.now(tz=timezone.utc)
-            job["error"] = "Unexpected shutdown of the worker process."
+            job["error"] = ("The server stopped before the identification finished." if identification
+                            else "Unexpected shutdown of the worker process.")
             worker_store.update(job)
             logger.warning(
                 f"Job {job['uuid']} marked as fizzled due to previous shutdown."

@@ -29,7 +29,8 @@ ASSIGN_WINDOW_DEG = 0.1
 ASSUMPTIONS = [
     "All phases are crystalline and identified (Chung's normalised RIR method); amorphous or unidentified "
     "phases make every fraction too high.",
-    "I/Ic is calculated from the refined structure: kinematic integrated intensity |F|²·m·LP/(V²·ρ) of the "
+    "I/Ic is calculated from the phase's structure (refined, or for an identification result the reference "
+    "structure at its matched lattice): kinematic integrated intensity |F|²·m·LP/(V²·ρ) of the "
     "strongest line relative to corundum 113 (Hubbard & Snyder 1988), Bragg-Brentano LP without monochromator, "
     "no thermal motion (B = 0), anomalous dispersion from International Tables.",
     "The measured line intensity is the area of the pseudo-Voigt Kα1+Kα2 profile fit; a phase whose strongest "

@@ -3,6 +3,7 @@
 import asyncio
 import io
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -92,6 +93,8 @@ def test_identification_task_and_its_result_tools(server):
         assert zno["rir_weight_percent"] == pytest.approx(30, abs=4)
         assert rutile["rir_weight_percent"] == pytest.approx(70, abs=4)
         assert payload["peak_counts"]["unexplained"] == 0 and payload["explained"] > 0.5
+        assert payload["capabilities"]["report"] and payload["capabilities"]["figure"]
+        assert payload["capabilities"]["table_csv"] is False
 
         plot = json.loads((await api_router.plot(task_id, None, None)).body)
         assert [trace["name"] for trace in plot["data"][:2]] == ["Observed", "Background"]
@@ -156,12 +159,11 @@ def test_identification_task_and_its_result_tools(server):
         return asyncio.run(identification_router.refuse_refinement_tools(request, passed))
 
     for path in ("versions", "versions/1", "fit-compare", "fit-curves", "structure-sites", "quick-refine",
-                 "internal-standard", "refine-selected", "report", "report.zip", "figure.png", "export/cif",
-                 "download", "table.csv"):
+                 "internal-standard", "refine-selected", "export/cif", "download", "table.csv"):
         response = guard(path)
         assert response.status_code == 409 and b"identification" in response.body, path
     for path in ("", "plot", "peaks", "observed-peaks.csv", "rir", "williamson-hall", "cell-refinement",
-                 "pattern.xy", "annotations", "refine"):
+                 "pattern.xy", "annotations", "refine", "report", "report.zip", "figure.png", "figure.svg"):
         assert guard(path) == "passed", path
     assert asyncio.run(api_router.delete_result(task_id))["message"] == "deleted"
     with pytest.raises(HTTPException) as info:
@@ -227,3 +229,78 @@ def test_residual_endpoint_reuses_the_finished_job(monkeypatch):
     with pytest.raises(HTTPException) as info:
         asyncio.run(router_module.quick_ranking_residual("job1", request))
     assert info.value.status_code == 404
+
+
+def test_identification_report_figure_and_bundle(server):
+    import zipfile
+
+    from dara.server import annotations_router, review_router
+
+    async def scenario():
+        task_id = (await _create(server))["wf_id"]
+        await annotations_router.save_annotations(task_id, annotations_router.AnnotationsUpdate(
+            annotations=[{"id": "a1", "two_theta": 36.25, "intensity": 900.0, "text": "ZnO 101 marker"}]))
+        html = (await review_router.download_report(task_id, None, False, None, True)).body.decode()
+        figure = (await review_router.download_figure(task_id, "svg", None, False, 600, 170, None, True)).body.decode()
+        bundle = (await review_router.download_report_bundle(task_id, None, False, None, False)).body
+        return html, figure, bundle
+
+    html, figure, bundle = asyncio.run(scenario())
+    headings = re.findall(r"<h2>\d+\. ([^<]+)</h2>", html)
+    assert headings == ["Summary", "Experimental and methods", "Results", "Assessment", "Limitations", "References"]
+    assert "XRD phase identification" in html and "search-match" in html and "no structure was refined" in html
+    assert "Search-match statistics." in html and "Semi-quantitative phase analysis." in html
+    assert "wt% (RIR)" in html and "I/Ic" in html and "Crystallite size, Scherrer (nm)" in html
+    assert "COD&nbsp;9004178" in html and "COD&nbsp;9007432" in html
+    assert "Hubbard" in html and "Chung" in html and "Patterson" in html and "Crystallography Open Database" in html
+    assert "lower bounds" in html  # no instrument FWHM curve: the Scherrer sizes are not corrected
+    assert "Every observed peak is assigned" in html
+    assert html.index("Y. Fei") < html.index("Gražulis")  # DARA is reference 1, as in the Rietveld report
+    assert "reference structure at its matched lattice" in html  # the RIR assumption fits this result
+    for rietveld_only in ("Rwp", "GOF", "Fit statistics", "Phase verdicts", "Mass balance", "± esd", "Difference"):
+        assert rietveld_only not in html, rietveld_only
+    assert "ZnO 101 marker" in html and "<svg" in html  # the report figure carries the annotation
+    assert "ZnO 101 marker" in figure and "Difference" not in figure and "Calculated" not in figure
+    names = zipfile.ZipFile(io.BytesIO(bundle)).namelist()
+    assert any(n.endswith(".docx") for n in names) and any(n.endswith((".pdf", ".html")) for n in names)
+
+
+def test_le_bail_legend_marks_the_other_weights_relative():
+    from types import SimpleNamespace
+
+    from dara.plot import visualize
+
+    x = np.linspace(20, 30, 50)
+    result = SimpleNamespace(
+        plot_data=SimpleNamespace(x=x, y_obs=x * 0 + 5, y_calc=x * 0 + 5, y_bkg=x * 0 + 1,
+                                  structs={"A_1_(cod_1)": x * 0 + 2, "B_2_(cod_2)": x * 0 + 2}),
+        peak_data=pd.DataFrame({"phase": ["A_1_(cod_1)", "B_2_(cod_2)"], "2theta": [22.0, 25.0], "intensity": [1.0, 1.0],
+                                "h": [1, 1], "k": [0, 1], "l": [0, 0]}),
+        get_phase_weights=lambda: {"A_1_(cod_1)": 1.0},  # B is a Le Bail phase: no weight
+    )
+    names = [trace.name for trace in visualize(result=result).data if trace.name]
+    assert any(name.endswith("(100.00 wt%, relative)") for name in names)
+    result.get_phase_weights = lambda: {"A_1_(cod_1)": 0.25, "B_2_(cod_2)": 0.75}
+    names = [trace.name for trace in visualize(result=result).data if trace.name]
+    assert any(name.endswith("(25.00 wt%)") for name in names) and not any("relative" in name for name in names)
+
+
+def test_worker_start_leaves_a_running_identification_to_the_server(server):
+    from datetime import datetime, timezone
+
+    from dara.server.utils import get_worker_store
+    from dara.server.worker import add_task_record, mark_running_jobs_as_fizzled
+
+    now = datetime.now(timezone.utc)
+    ident = add_task_record({"uuid": "u-ident", "status": "RUNNING", "submitted_time": now, "job": {
+        "name": "a.xy", "metadata": {"submission_settings": {"analysis_mode": "identification"}}}})
+    search = add_task_record({"uuid": "u-search", "status": "RUNNING", "submitted_time": now, "job": {"name": "b.xy"}})
+
+    def status(index):
+        with get_worker_store() as store:
+            return store.query_one({"index": index})["status"]
+
+    mark_running_jobs_as_fizzled()  # the worker's start-up, while the server computes the identification
+    assert status(ident) == "RUNNING" and status(search) == "FIZZLED"
+    mark_running_jobs_as_fizzled(identification=True)  # the server's own start-up
+    assert status(ident) == "FIZZLED"

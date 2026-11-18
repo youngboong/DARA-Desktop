@@ -1802,7 +1802,7 @@ def task_profile_fits(task_uuid: str, two_theta, observed, background, positions
     return results
 
 
-RIR_VERSION = "1"  # bump when dara.rir changes its results
+RIR_VERSION = "2"  # bump when dara.rir changes its results
 
 
 def task_rir(task_uuid: str, structures: dict, observed: list[dict], reflections: list[dict], wavelength,

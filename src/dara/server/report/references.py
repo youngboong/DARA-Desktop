@@ -61,6 +61,28 @@ REFERENCES: dict[str, dict] = {
         ),
         "doi": "10.1107/S0365110X65001081",
     },
+    "hubbard_snyder": {
+        "text": (
+            "C. R. Hubbard, R. L. Snyder, \"RIR - Measurement and use in quantitative XRD\", "
+            "Powder Diffr. 3 (1988) 74–77."
+        ),
+        "doi": "10.1017/S0885715600013257",
+    },
+    "chung": {
+        "text": (
+            "F. H. Chung, \"Quantitative interpretation of X-ray diffraction patterns of mixtures. "
+            "I. Matrix-flushing method for quantitative multicomponent analysis\", J. Appl. Cryst. 7 "
+            "(1974) 519–525."
+        ),
+        "doi": "10.1107/S0021889874010375",
+    },
+    "patterson": {
+        "text": (
+            "A. L. Patterson, \"The Scherrer formula for X-ray particle size determination\", "
+            "Phys. Rev. 56 (1939) 978–982."
+        ),
+        "doi": "10.1103/PhysRev.56.978",
+    },
     "toby": {
         "text": (
             "B. H. Toby, \"R factors in Rietveld analysis: How good is good enough?\", "

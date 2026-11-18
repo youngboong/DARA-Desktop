@@ -389,6 +389,7 @@ ANALYSIS_MODES = {
     "elemental": "Elemental (phases of the listed elements)",
     "known_mixture": "Known mixture (phases of the listed precursors)",
     "selected_phases": "Selected phases",
+    "identification": "Identification (search-match, no refinement)",
 }
 LATTICE_SYMBOLS = {
     "a": "a", "b": "b", "c": "c", "alpha": "α", "beta": "β", "gamma": "γ",
@@ -1338,6 +1339,246 @@ def _build_report_html(
         ))
         + "</p>"
     )
+
+    # ---- 6 user notes and references ----------------------------------------------------
+    notes = (review.get("notes") or "").strip()
+    if notes:
+        parts.append(numbering.h2("User review notes") + f'<div class="notes">{escape(notes)}</div>')
+    parts.append(
+        numbering.h2("References") + citations.render_html().replace("<ol>", '<ol class="refs">', 1)
+    )
+    return H.page(f"DARA report — {name}", H.formulas_in_text("".join(parts)))
+
+
+# ---------------------------------------------------------------------------
+# identification result (search-match without refinement)
+# ---------------------------------------------------------------------------
+
+IDENTIFICATION_FIGURE_CAPTION = (
+    "Figure 1. Observed (red circles) and background (grey) intensities with the calculated reflections "
+    "of each identified phase as sticks at their matched positions and heights, and their positions "
+    "(vertical bars). No calculated pattern was refined. Shaded intervals were excluded."
+)
+SCHERRER_CORRECTION = {
+    "curve": "after removing the instrument FWHM of the profile's FWHM curve{standard}",
+    "constant": "after removing a constant instrument FWHM of {fwhm}°",
+    "none": "without removing the instrument broadening (no instrument FWHM given), so they are lower bounds",
+}
+
+
+def _scherrer_text(scherrer: dict) -> str:
+    """How the Scherrer sizes were corrected for the instrument (``/observed-peaks`` settings)."""
+    instrument = scherrer.get("instrument") or {}
+    mode = instrument.get("mode") if instrument.get("mode") in SCHERRER_CORRECTION else "none"
+    standard = instrument.get("standard")
+    return SCHERRER_CORRECTION[mode].format(
+        standard=f" (measured on {standard})" if standard else "", fwhm=scherrer.get("instrument_fwhm"),
+    ) + f"; K = {scherrer.get('k', 0.89):g}"
+
+
+def build_identification_report_html(
+    task_id: int, task: dict, document, review: dict, *, observed: list[dict], scherrer: dict,
+    rir: dict, hkl_labels: bool = False,
+) -> str:
+    """Report of an identification result: the classical search-match outcome (phases with their
+    reference lines, semi-quantification by RIR, Scherrer sizes), without any Rietveld section.
+
+    ``observed``: ``peak_list.observed_peak_rows`` of the task; ``scherrer``: their settings
+    (``k``, ``instrument_fwhm``, ``instrument``); ``rir``: the ``/rir`` result.
+    """
+    from dara.plot import display_formulas_scope
+    from dara.server.display_formula import document_display_formulas
+
+    with display_formulas_scope(document_display_formulas(document)):
+        return _build_identification_html(
+            task_id, task, document, review, observed=observed, scherrer=scherrer, rir=rir,
+            hkl_labels=hkl_labels,
+        )
+
+
+def _build_identification_html(task_id, task, document, review, *, observed, scherrer, rir, hkl_labels):
+    from dara.export.peak_list import ASSIGN_TOLERANCE_DEG
+    from dara.server.api_router import _counts_like, _spacegroup_symbol
+    from dara.xrd import get_xrdml_metadata
+
+    fit = document.final_result
+    search_settings = document.search_kwargs or {}
+    excluded_ranges = (search_settings.get("refinement_params") or {}).get("excluded_ranges")
+    name = task.get("job", {}).get("name") or f"Task {task_id}"
+    citations = Citations()
+    numbering = _Numbering()
+    phases = document.phases
+    rir_rows = {row["phase"]: row for row in rir.get("phases") or []}
+    symbols = {p["name"]: _spacegroup_symbol(p["spacegroup"]) if p.get("spacegroup") else None for p in phases}
+
+    def short_name(phase: str) -> str:
+        return _plain_name(phase, symbols.get(phase))
+
+    sizes: dict[str, list[float]] = {}
+    for row in observed:
+        if row.get("phase") and row.get("size_nm"):
+            sizes.setdefault(row["phase"], []).append(float(row["size_nm"]))
+    unexplained = [row for row in observed if not row.get("phase")]
+    scherrer_text = _scherrer_text(scherrer)
+
+    # ---- title and byline -------------------------------------------------------------
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    parts = [
+        f'<h1>XRD phase identification — <span class="fn">{H.wbr_after_underscores(str(name))}</span></h1>',
+        f'<p class="byline">Task {task_id} · {today} · DARA {escape(_dara_version())}</p>',
+    ]
+
+    # ---- 1 summary ----------------------------------------------------------------------
+    parts.append(numbering.h2("Summary"))
+    listed = []
+    for phase in phases:
+        weight = _finite((rir_rows.get(phase["name"]) or {}).get("weight_percent_rir"))
+        amount = f"{weight:.1f} wt% by RIR" if weight is not None else "not quantified"
+        listed.append(f"{escape(short_name(phase['name']))} ({amount})")
+    listing = listed[0] if len(listed) == 1 else ", ".join(listed[:-1]) + " and " + listed[-1]
+    parts.append(
+        f"<p>Identified phases: {listing}. {len(observed) - len(unexplained)} of {len(observed)} observed "
+        "peaks are assigned to reflections of these phases. The phases were identified by search-match "
+        "without Rietveld refinement, so the amounts are semi-quantitative.</p>"
+    )
+
+    # ---- 2 experimental and methods ------------------------------------------------------
+    parts.append(numbering.h2("Experimental and methods"))
+    radiation, wavelength = _radiation(search_settings)
+    recorded = (
+        f"recorded with {radiation} radiation (λ = {wavelength:.6f} Å)" if radiation and wavelength
+        else "recorded (radiation and wavelength not recorded)"
+    )
+    tmin, tmax, points, _ = _data_description(fit)
+    dara_ref = citations.cite("dara")  # numbered first, as in the Rietveld report
+    sources, user_cifs, _ = _database_sources(document, task, _phase_sources([p["name"] for p in phases]))
+    databases = []
+    if "cod" in sources:
+        databases.append(f"the Crystallography Open Database (COD) {citations.cite('cod')}")
+    if "mp" in sources:
+        databases.append(f"the Materials Project {citations.cite('mp')}")
+    if user_cifs:
+        databases.append("user-supplied CIF files")
+    profile = search_settings.get("instrument_profile") or NOT_RECORDED
+    text = [
+        f"The powder X-ray diffraction pattern ({escape(str(name))}) was {recorded}. ",
+        f"Data from {tmin}° to {tmax}° 2θ ({points} points) were analysed{_excluded_clause(excluded_ranges)}. ",
+        f"Phases were identified by search-match with DARA {escape(_dara_version())} {dara_ref} "
+        "without refinement: for each accepted reference structure a lattice scale, a 2θ shift and an "
+        "intensity scale were fitted to the background-subtracted pattern; no structure was refined. ",
+    ]
+    if databases:
+        text.append(
+            f"Reference structures came from {' and '.join(databases)} and were processed with pymatgen "
+            f"{citations.cite('pymatgen')}. "
+        )
+    text += [
+        f"Observed peaks were located with the instrument profile “{escape(str(profile))}”, fitted with "
+        f"pseudo-Voigt profiles and assigned to the nearest reflection within {ASSIGN_TOLERANCE_DEG:g}° 2θ. ",
+        "Weight fractions were estimated by the reference intensity ratio (RIR) method, with I/Ic calculated "
+        f"from the reference structures {citations.cite('hubbard_snyder')} and normalised to the identified "
+        f"phases {citations.cite('chung')}. ",
+        f"Crystallite sizes are Scherrer estimates {citations.cite('patterson')} from the Kα1 FWHM of the "
+        f"assigned peaks, {escape(scherrer_text)}.",
+    ]
+    parts.append("<p>" + "".join(text) + "</p>")
+    metadata = None
+    xrdml = getattr(getattr(document, "xrd_data", None), "xrdml_dict", None)
+    if xrdml:
+        try:
+            metadata = get_xrdml_metadata(xrdml)
+        except Exception:
+            metadata = None
+    parts.append(_conditions_table(numbering, document=document, search_settings=search_settings, metadata=metadata))
+
+    # ---- 3 results ----------------------------------------------------------------------
+    parts.append(numbering.h2("Results"))
+    try:
+        figure = H.embed_svg(
+            fit_figure(
+                fit, fmt="svg", width_mm=170, excluded_ranges=excluded_ranges,
+                counts_like=_counts_like(document), hkl_labels=hkl_labels, annotations=task.get("annotations"),
+            ),
+            "Observed pattern and background with the reference lines of the identified phases",
+        )
+        caption = IDENTIFICATION_FIGURE_CAPTION + (HKL_CAPTION if hkl_labels else "")
+        parts.append(f"<figure>{figure}<figcaption>{escape(caption)}</figcaption></figure>")
+    except Exception:  # noqa: BLE001 - the report is written without the figure
+        logger.warning("Identification figure failed", exc_info=True)
+    parts.append(H.table(
+        ["Phase", "Strong peaks matched", "Score", "Lattice change (%)", "2θ shift (°)", "Observed peaks assigned"],
+        [
+            [
+                _name_html(p["name"]), f"{p['matched']} of {p['expected']}", f"{p['score']:.3f}",
+                _signed(100 * (p["lattice_scale"] - 1), 2), _signed(p["shift"], 2),
+                str(sum(row.get("phase") == p["name"] for row in observed)),
+            ]
+            for p in phases
+        ],
+        caption=numbering.caption("Search-match statistics."), align="cccccc", nowrap="-nnnnn", compact=True,
+    ))
+    rows = []
+    for p in phases:
+        entry = rir_rows.get(p["name"]) or {}
+        weight, ratio = _finite(entry.get("weight_percent_rir")), _finite(entry.get("rir"))
+        values = sizes.get(p["name"]) or []
+        if len(values) > 1:
+            size = f"{np.mean(values):.0f}{THIN}±{THIN}{np.std(values, ddof=1):.0f} ({len(values)})"
+        else:
+            size = f"{values[0]:.0f} (1)" if values else "—"
+        rows.append([
+            _name_html(p["name"]),
+            _spacegroup_cell({"spacegroup_symbol": symbols.get(p["name"]), "spacegroup_number": p.get("spacegroup")}),
+            f"{weight:.1f}" if weight is not None else "—", f"{ratio:.2f}" if ratio is not None else "—",
+            size, _reference_cell(p["name"]),
+        ])
+    parts.append(H.table(
+        ["Phase", "Space group", "wt% (RIR)", "I/Ic", "Crystallite size, Scherrer (nm)", "Reference"], rows,
+        caption=numbering.caption("Semi-quantitative phase analysis."), align="cccccc", nowrap="--nnnn",
+    ))
+    parts.append(
+        '<p class="note">RIR weight fractions are normalised to the identified phases. Crystallite size: '
+        "mean ± standard deviation of the Scherrer sizes of the assigned peaks (their number in brackets), "
+        f"{escape(scherrer_text)}. A dash means the quantity could not be determined.</p>"
+    )
+    parts.extend(
+        f'<p class="note">{escape(short_name(phase))}: {escape(str(entry["note"]))}</p>'
+        for phase, entry in rir_rows.items() if entry.get("note")
+    )
+
+    # ---- 4 assessment -------------------------------------------------------------------
+    parts.append(numbering.h2("Assessment"))
+    parts.append(numbering.h3("Unexplained peaks"))
+    if unexplained:
+        strongest = max((float(row["intensity"]) for row in observed), default=0.0) or 1.0
+        parts.append("<p>Observed peaks not assigned to a reflection of the identified phases.</p>")
+        parts.append(H.table(
+            ["2θ (°)", "d (Å)", "% of strongest", "Profile fit"],
+            [
+                [
+                    f"{row['two_theta_deg']:.2f}", f"{row['d_angstrom']:.4f}" if row.get("d_angstrom") else "—",
+                    f"{100 * float(row['intensity']) / strongest:.1f}", escape(row.get("fit_note") or "fitted"),
+                ]
+                for row in unexplained
+            ],
+            caption=numbering.caption("Unassigned observed peaks."), align="cccc", nowrap="nnnn", compact=True,
+        ))
+    else:
+        parts.append("<p>Every observed peak is assigned to a reflection of the identified phases.</p>")
+
+    # ---- 5 limitations ------------------------------------------------------------------
+    parts.append(numbering.h2("Limitations"))
+    limits = [str(item) for item in rir.get("assumptions") or []]
+    limits.append(f"Crystallite sizes are Scherrer estimates from single peaks, {scherrer_text}; "
+                  "strain broadening is not separated.")
+    if unexplained:
+        limits.append(
+            f"{len(unexplained)} observed peak{'s are' if len(unexplained) != 1 else ' is'} not assigned: "
+            "a phase may be missing, and the fractions of the identified phases are then too high."
+        )
+    if not rir.get("complete", True):
+        limits.append("Not every phase could be quantified; the fractions shown are relative to the quantified phases.")
+    parts.append("<ul>" + "".join(f"<li>{escape(item)}</li>" for item in limits) + "</ul>")
 
     # ---- 6 user notes and references ----------------------------------------------------
     notes = (review.get("notes") or "").strip()

@@ -240,9 +240,20 @@ def _public_settings(value):
     return value
 
 
-def _render_report(task_id: int, task: dict, document, selection, review: dict, hkl: bool = False) -> str:
+async def _render_report(task_id: int, task: dict, document, selection, review: dict, hkl: bool = False) -> str:
     # Local import lets the application register this router without import cycles.
     from dara.server.report.builder import build_report_html
+
+    if getattr(document, "analysis_mode", None) == "identification":  # search-match result, no refinement
+        from dara.server.api_router import _measured_peak_rows_of, _rir_of
+        from dara.server.report.builder import build_identification_report_html
+
+        _resolve(document, selection, task)  # only the result itself ("best") exists
+        _, observed, *_, scherrer = await _measured_peak_rows_of(task_id, None)
+        rir = (await _rir_of(task_id, None))[3]
+        return build_identification_report_html(
+            task_id, task, document, review, observed=observed, scherrer=scherrer, rir=rir, hkl_labels=hkl,
+        )
 
     if _is_version_selection(selection):
         number = versions.parse_selection(selection)[1]
@@ -294,7 +305,7 @@ async def download_report(
     review = _review_metadata(task)
     selection = _report_selection(idx, best, review, sel)
     _refuse_quick_check(task, selection)
-    html = _render_report(task_id, task, document, selection, review, hkl is True)
+    html = await _render_report(task_id, task, document, selection, review, hkl is True)
     filename = download_name(
         task_id, task["job"]["name"], "report", _download_selection(selection), "html"
     )
@@ -336,7 +347,7 @@ async def download_report_bundle(
     review = _review_metadata(task)
     selection = _report_selection(idx, best, review, sel)
     _refuse_quick_check(task, selection)
-    html = _render_report(task_id, task, document, selection, review, hkl is True)
+    html = await _render_report(task_id, task, document, selection, review, hkl is True)
     try:
         refinement, meta = _resolve(document, selection, task)
         figure_png = fit_figure(

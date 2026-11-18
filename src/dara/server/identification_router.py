@@ -34,11 +34,11 @@ WAIT_S = 6.0
 MAX_PHASES = known_phases.MAX_KNOWN_FORMULAS  # the Known-phase refinement of "Refine with Rietveld"
 _FINISHING: set = set()  # running finishers (kept referenced)
 # Tools that need a Rietveld fit (versions, quick-refine with its background / structure / Le Bail
-# editors, fit comparison, internal standard, report, exports, retry): 409 for an identification task.
+# editors, fit comparison, internal standard, refinement exports, retry): 409 for an identification task.
 _REFINEMENT_ONLY = re.compile(
     r"^/api/task/(\d+)/(?:versions(?:/.*)?|structure-sites|fit-curves|fit-compare|quick-refine|"
-    r"internal-standard|refine-selected|phase-options|candidate-comparison|peak-candidates|report|"
-    r"report\.zip|figure\.\w+|export/.*|download|table\.csv|retry|retry-plan)$"
+    r"internal-standard|refine-selected|phase-options|candidate-comparison|peak-candidates|"
+    r"export/.*|download|table\.csv|retry|retry-plan)$"
 )
 
 
@@ -239,6 +239,9 @@ async def identification_payload(job: dict, document) -> dict:
         "instrument_profile_details": metadata.get("instrument_profile_details"),
         "display_formulas": cif_display_formulas(document.input_cifs),
         "internal_standard": None,
+        # Download menu items of this result kind (the refinement-only ones answer 409)
+        "capabilities": {"report": True, "report_bundle": True, "figure": True, "table_csv": False,
+                         "result_archive": False},
     }
 
 

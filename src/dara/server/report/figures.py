@@ -1,4 +1,8 @@
-"""Publication-style Rietveld fit figure (observed, calculated, background, ticks, difference)."""
+"""Publication-style Rietveld fit figure (observed, calculated, background, ticks, difference).
+
+A fit without a calculated curve (an identification result) shows the observed pattern, the
+background and each phase's reference lines as sticks on the background, with no difference panel.
+"""
 
 from __future__ import annotations
 
@@ -132,13 +136,12 @@ def fit_figure(
     data = refinement.plot_data
     x = np.asarray(data.x, dtype=float)
     observed = np.asarray(data.y_obs, dtype=float)
-    calculated = np.asarray(data.y_calc, dtype=float)
+    calculated = None if data.y_calc is None else np.asarray(data.y_calc, dtype=float)
     background = np.asarray(data.y_bkg, dtype=float)
     finite_x = x[np.isfinite(x)]
     if finite_x.size < 2 or float(finite_x.max()) <= float(finite_x.min()):
         raise ValueError("The refinement has no usable 2θ range to plot")
     low, high = float(finite_x.min()), float(finite_x.max())
-    difference = observed - calculated
 
     names = list(refinement.lst_data.phases_results)
     labels = {name: (phase_labels or {}).get(name) or _default_label(name) for name in names}
@@ -178,12 +181,11 @@ def fit_figure(
         figure = Figure(figsize=(width_in, width_in * HEIGHT_RATIO), layout="constrained")
         FigureCanvasAgg(figure)
         rows = max(len(names), 1)
-        grid = figure.add_gridspec(
-            3, 1, height_ratios=[6.0, max(0.5, 0.42 * rows), 1.7], hspace=0.04
-        )
+        ratios = [6.0, max(0.5, 0.42 * rows)] + ([1.7] if calculated is not None else [])
+        grid = figure.add_gridspec(len(ratios), 1, height_ratios=ratios, hspace=0.04)
         ax_main = figure.add_subplot(grid[0])
         ax_ticks = figure.add_subplot(grid[1], sharex=ax_main)
-        ax_diff = figure.add_subplot(grid[2], sharex=ax_main)
+        ax_diff = figure.add_subplot(grid[2], sharex=ax_main) if calculated is not None else None
 
         # Usual Rietveld-plot style: observed red open circles, calculated black line,
         # difference blue line, reflection positions as vertical bars.
@@ -191,10 +193,21 @@ def fit_figure(
             x, observed, linestyle="none", marker="o", markersize=1.6, markeredgewidth=0.35,
             markerfacecolor="none", markeredgecolor="#d62728", label="Observed", zorder=3,
         )
-        ax_main.plot(x, calculated, color="black", lw=0.7, label="Calculated", zorder=4)
         ax_main.plot(x, background, color="#7f7f7f", lw=0.6, label="Background", zorder=2)
-        ax_diff.plot(x, difference, color="#1f77b4", lw=0.6, label="Difference", zorder=3)
-        ax_diff.axhline(0.0, color="#7f7f7f", lw=0.5, ls="--", zorder=1)
+        if calculated is not None:
+            ax_main.plot(x, calculated, color="black", lw=0.7, label="Calculated", zorder=4)
+            ax_diff.plot(x, observed - calculated, color="#1f77b4", lw=0.6, label="Difference", zorder=3)
+            ax_diff.axhline(0.0, color="#7f7f7f", lw=0.5, ls="--", zorder=1)
+        else:  # reference lines at their matched positions and net heights, standing on the background
+            import pandas as pd
+
+            frame = pd.DataFrame(refinement.peak_data)
+            for index, name in enumerate(names):
+                lines = frame[frame["phase"] == name]
+                tt = lines["2theta"].to_numpy(dtype=float)
+                base = np.interp(tt, x, background)
+                ax_main.vlines(tt, base, base + lines["intensity"].to_numpy(dtype=float),
+                               color=colors[index], lw=0.6, zorder=3)
 
         for index, name in enumerate(names):
             positions = reflections.get(name)
@@ -219,7 +232,7 @@ def fit_figure(
             # Vertical labels are about one line high wide: keep them that far apart (no overlap).
             axis_points = width_in * 72 * 0.86
             min_gap = (high - low) * label_size * 1.25 / axis_points
-            top = np.fmax(observed, calculated)
+            top = observed if calculated is None else np.fmax(observed, calculated)
             for position, text in _hkl_labels(refinement, names, low, high, min_gap):
                 near = np.abs(x - position) <= min_gap
                 height = float(top[near].max()) if near.any() else float(np.interp(position, x, top))
@@ -244,7 +257,7 @@ def fit_figure(
                 bbox={"boxstyle": "square,pad=0.2", "fc": "white", "ec": "#c9cdc6", "lw": 0.4, "alpha": 0.85}, zorder=6,
             )
 
-        for axis in (ax_main, ax_ticks, ax_diff):
+        for axis in (ax for ax in (ax_main, ax_ticks, ax_diff) if ax is not None):
             for start, end in spans:
                 axis.axvspan(start, end, color="#d9d9d9", alpha=0.6, lw=0, zorder=0)
         ax_main.tick_params(axis="x", labelbottom=False)
@@ -253,9 +266,13 @@ def fit_figure(
         ax_main.set_ylabel(
             "Intensity (counts)" if counts_like is not False else "Intensity (a.u.)"
         )
-        ax_diff.set_ylabel("Difference")
-        ax_diff.set_xlabel("2θ (°)")
-        ax_diff.margins(y=0.05)
+        if ax_diff is not None:
+            ax_diff.set_ylabel("Difference")
+            ax_diff.set_xlabel("2θ (°)")
+            ax_diff.margins(y=0.05)
+        else:
+            ax_ticks.tick_params(axis="x", labelbottom=True, length=2.5)
+            ax_ticks.set_xlabel("2θ (°)")
         if not hkl_labels:
             ax_main.margins(y=0.05)
 
@@ -267,6 +284,8 @@ def fit_figure(
             Line2D([], [], color="#1f77b4", lw=0.6),
         ]
         legend_labels = ["Observed", "Calculated", "Background", "Difference"]
+        if calculated is None:
+            handles, legend_labels = [handles[0], handles[2]], ["Observed", "Background"]
         if spans:
             handles.append(Patch(facecolor="#d9d9d9", alpha=0.6, lw=0))
             legend_labels.append(EXCLUDED_LABEL)

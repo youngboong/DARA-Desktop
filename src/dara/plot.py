@@ -204,6 +204,8 @@ def visualize(
         weight_fractions = result.get_phase_weights()
     except (TypeError, ValueError, ZeroDivisionError):
         weight_fractions = {}
+    # a phase without a weight (Le Bail) leaves the others' fractions relative to each other
+    relative = ", relative" if weight_fractions and len(weight_fractions) < len(plot_data.structs) else ""
 
     peak_data = result.peak_data
     max_y = max(np.array(result.plot_data.y_obs) + np.array(result.plot_data.y_bkg))
@@ -216,7 +218,7 @@ def visualize(
         color = (phase_colors or {}).get(phase_name, colormap[i % len(colormap)])
 
         label = phase_display_name(phase_name)
-        name = (f"{label} ({weight_fractions[phase_name] * 100:.2f} wt%)"
+        name = (f"{label} ({weight_fractions[phase_name] * 100:.2f} wt%{relative})"
                 if phase_name in weight_fractions else label)
         fig.add_trace(
             go.Scatter(
