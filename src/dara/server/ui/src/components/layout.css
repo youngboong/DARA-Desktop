@@ -440,3 +440,20 @@ code {
   gap: var(--dara-space-3);
   width: 100%;
 }
+
+/* Identification result: the one summary line under the title. */
+.dara-ident-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dara-space-1) var(--dara-space-3);
+  color: var(--dara-text-secondary);
+}
+
+.dara-ident-summary .dara-ident-mode {
+  margin: 0;
+}
+
+.dara-ident-summary .dara-ident-open {
+  color: var(--dara-review);
+}

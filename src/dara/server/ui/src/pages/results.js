@@ -7,7 +7,7 @@ import { parseComparisonTaskIds } from '../components/patternComparison.mjs';
 import { runAfterSuccess } from '../components/submitHelpers.mjs';
 import { retryTask } from '../components/ResultWorkflows';
 import { API as URL } from '../components/QuickRefineProgress';
-import { adoptedLabel, adoptedRwp, formatFixed, phasesLabel, phasesTooltip, stateLabel, tasksQuery } from '../components/resultsList.mjs';
+import { adoptedLabel, adoptedRwp, fitTaskIds, formatFixed, isIdentificationEntry, phasesLabel, phasesTooltip, stateLabel, tasksQuery } from '../components/resultsList.mjs';
 import { overallColor, overallLabel, overallShortLabel } from '../components/confidence.mjs';
 import { StateTag } from '../components/ConfidenceViews';
 import ChemicalFormula from '../components/ChemicalFormula';
@@ -159,6 +159,8 @@ function ResultsPage({ location }) {
         return (
           <Tooltip title={<div style={{ whiteSpace: 'pre-line' }}>{phasesTooltip(entry.summary)}</div>}>
             <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {/* Phases accepted from a search-match without refinement: no Rwp, amounts by RIR. */}
+              {isIdentificationEntry(entry) ? <Tag style={{ marginInlineEnd: 6 }}>Identification</Tag> : null}
               {labels.slice(0, 3).map((item, index) => <React.Fragment key={index}>{index ? ', ' : ''}<ChemicalFormula formula={item} /></React.Fragment>)}
               {hidden > 0 ? `, … (+${hidden})` : ''}
             </span>
@@ -183,12 +185,12 @@ function ResultsPage({ location }) {
       fixed: 'right',
       render: (_, entry) => (
         <Space>
-          <Tooltip title="Download (ZIP)">
+          <Tooltip title={isIdentificationEntry(entry) ? 'An identification has no fit files: open the task for its downloads' : 'Download (ZIP)'}>
             <Button
               icon={<DownloadOutlined />}
               aria-label={`Download task ${entry.fw_id}`}
-              href={`${URL}/task/${entry.fw_id}/download`}
-              disabled={entry.state !== 'COMPLETED'}
+              href={isIdentificationEntry(entry) ? undefined : `${URL}/task/${entry.fw_id}/download`}
+              disabled={entry.state !== 'COMPLETED' || isIdentificationEntry(entry)}
             />
           </Tooltip>
           {/* Rerun, retry and delete share one row menu, away from Download. */}
@@ -216,6 +218,8 @@ function ResultsPage({ location }) {
       ),
     }
   ]
+  // The table export needs a fit: identification tasks among the listed rows are left out.
+  const exportable = fitTaskIds(selectedTaskIds, data?.tasks || []);
 
   return (
     <Layout hasSider={false} title="Results">
@@ -246,11 +250,13 @@ function ResultsPage({ location }) {
               href={selectedTaskIds.length >= 2 ? `/compare?tasks=${selectedTaskIds.join(',')}` : undefined}
             >Compare selected ({selectedTaskIds.length})</Button></span>
           </Tooltip>
-          <Button
-            icon={<TableOutlined />}
-            disabled={!selectedTaskIds.length}
-            href={selectedTaskIds.length ? `${URL}/tasks/table.csv?ids=${selectedTaskIds.join(',')}` : undefined}
-          >Export table ({selectedTaskIds.length})</Button>
+          <Tooltip title={exportable.skipped.length ? `${exportable.skipped.length} identification task${exportable.skipped.length === 1 ? '' : 's'} (no fit) left out of the table` : null}>
+            <span><Button
+              icon={<TableOutlined />}
+              disabled={!exportable.ids.length}
+              href={exportable.ids.length ? `${URL}/tasks/table.csv?ids=${exportable.ids.join(',')}` : undefined}
+            >Export table ({exportable.ids.length})</Button></span>
+          </Tooltip>
         </div>
         {
           data.tasks ? (

@@ -2,12 +2,13 @@ import React, { useEffect, useRef, useState } from 'react';
 import Loadable from 'react-loadable';
 import styled from 'styled-components';
 import { Button, Progress, Spin, Switch, Table, Tag, Tooltip } from 'antd';
-import { ArrowLeftOutlined, CloseOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, CloseOutlined, PlusOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import ChemicalFormula from './ChemicalFormula';
 import { progressPercent } from './structureLibrary.mjs';
 import {
-  MAX_REFINE, SORTERS, assignColors, defaultSelection, overlayTraces, percent, pollDelay, poolText, progressText,
-  rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, toggleKey,
+  MAX_REFINE, SORTERS, assignColors, defaultSelection, nextMatches, overlayTraces, percent, pollDelay, poolText, progressText,
+  rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, toggleKey, unexplainedMarkers, unexplainedStatus,
+  windowRange, withResidualProfile, zoomWindow,
 } from './quickRanking.mjs';
 
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <div className="dara-qr-plot-area" /> });
@@ -29,6 +30,8 @@ export function useQuickRanking(buildRequest) {
   const [focused, setFocused] = useState(null);
   const [theoretical, setTheoretical] = useState(false);
   const [refining, setRefining] = useState(false);
+  const [identifying, setIdentifying] = useState(false);
+  const [residual, setResidual] = useState(null); // {key, data} | {key, error} of the current selection
   const run = useRef(0);
   const job = useRef(null);
   const scroll = useRef(0);
@@ -91,9 +94,39 @@ export function useQuickRanking(buildRequest) {
 
   useEffect(() => () => { run.current += 1; cancelJob(job.current); }, []);
 
+  // What is left after the selected phases: unexplained peaks and the best matches for them.
+  // Debounced; answered in well under a second from the finished job's pool.
+  const jobId = state.status === 'done' ? state.data?.job_id : null;
+  const selectionKey = selected.join('|');
+  useEffect(() => {
+    if (!jobId || !selected.length) { setResidual(null); return undefined; }
+    const key = `${jobId}|${selectionKey}`;
+    let current = true;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(`${URL}/quick-ranking/${jobId}/residual`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected }),
+        });
+        const body = await response.json();
+        if (!response.ok) {
+          throw new Error(response.status === 404 ? 'This search-match has expired: run it again to see what is left.'
+            : response.status === 409 ? 'The search-match is still running.' : body.detail || 'What is left could not be calculated.');
+        }
+        if (current) setResidual({ key, data: body });
+      } catch (error) {
+        if (current) setResidual({ key, error: String(error.message || error) });
+      }
+    }, 250);
+    return () => { current = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, selectionKey]);
+  const residualKey = jobId && selected.length ? `${jobId}|${selectionKey}` : null;
+
   const ranked = state.status === 'done' && state.key === currentKey ? state.data : null;
   return {
-    shown, state, selected, setSelected, colors, focused, setFocused, theoretical, refining, ranked, start, cancel,
+    shown, state, selected, setSelected, colors, focused, setFocused, theoretical, refining, identifying, ranked, start, cancel,
+    // The residual of the current selection (`stale` while the newer one is on its way).
+    residual: residual ? { ...residual, stale: residual.key !== residualKey } : null,
     /** Shows the workspace: the last ranking when its inputs are unchanged, else a new one. */
     open() {
       scroll.current = window.scrollY;
@@ -122,6 +155,15 @@ export function useQuickRanking(buildRequest) {
       }
       if (submitted) setShown(false);
     },
+    /** `onIdentify({referenceIds})` (selection order) saves the identification; resolves to whether it was saved. */
+    async identify(onIdentify) {
+      setIdentifying(true);
+      try {
+        await onIdentify({ referenceIds: [...selected] });
+      } finally {
+        setIdentifying(false);
+      }
+    },
   };
 }
 
@@ -136,6 +178,37 @@ function Suggestion({ combination }) {
 /** "Ia-3 (206)" with the symbol set as a space group; a bare number when there is no symbol. */
 const SpaceGroup = ({ row }) => (row.spacegroup_symbol
   ? <><ChemicalFormula formula={row.spacegroup_symbol} />{` (${row.spacegroup})`}</> : String(row.spacegroup ?? '—'));
+
+/**
+ * What the selected phases leave: the number of unexplained peaks (the selection's status) and the
+ * best matches for the remaining peaks, each with "Add".
+ */
+function ResidualPanel({ residual, rows, selected, setSelected }) {
+  if (!residual) return <section className="dara-qr-left" aria-label="What is left"><p className="dara-qr-left-status is-stale">Checking what is left…</p></section>;
+  if (residual.error) return <section className="dara-qr-left" aria-label="What is left"><p className="dara-qr-empty">{residual.error}</p></section>;
+  const left = residual.data;
+  const open = (left.unexplained_peaks || []).length > 0;
+  const next = nextMatches(left, rows);
+  return <section className="dara-qr-left" aria-label="What is left" aria-busy={residual.stale || undefined}>
+    <Tooltip title={open ? `At ${left.unexplained_peaks.map(peak => `${Number(peak[0]).toFixed(2)}°`).join(', ')} (marked on the plot; click a marker to zoom)` : 'Every peak of the pattern is explained by the selected phases'}>
+      <p className={`dara-qr-left-status${open ? ' is-open' : ''}${residual.stale ? ' is-stale' : ''}`} role="status">{unexplainedStatus(left)}</p>
+    </Tooltip>
+    {open && next.length ? <>
+      <h3>Best matches for the remaining peaks</h3>
+      <ul>{next.map(row => <li key={row.key}>
+        <div className="dara-qr-phase">
+          <div><ChemicalFormula formula={row.formula} /> <span className="meta"><SpaceGroup row={row} /></span></div>
+          <div className="meta">{`${row.sourceLabel} · ${row.peaksText} peaks`}</div>
+        </div>
+        <span className="dara-num">{row.scoreText}</span>
+        <Tooltip title={row.inRanking ? null : 'Not in the ranked list'}>
+          <Button size="small" icon={<PlusOutlined />} disabled={!row.inRanking || selected.includes(row.key) || selected.length >= MAX_REFINE}
+            onClick={() => setSelected([...selected, row.key])}>Add</Button>
+        </Tooltip>
+      </li>)}</ul>
+    </> : null}
+  </section>;
+}
 
 /** The last ranking on the Run card, when its inputs are still the form's. */
 export function QuickRankingSummary({ quick }) {
@@ -160,7 +233,8 @@ const Workspace = styled.section`
   }
   .dara-qr-title { flex: 1 1 320px; min-width: 0; }
   .dara-qr-title h1 { margin: 0; font-size: var(--dara-font-20); font-weight: 600; line-height: 28px; }
-  .dara-qr-title h1:focus { outline: none; }
+  /* Focused on open so screen readers start here; it is not a control, so no focus ring. */
+  .dara-qr-title h1:focus, .dara-qr-title h1:focus-visible { outline: none !important; }
   .dara-qr-context { margin: 0; color: var(--dara-text-secondary); font-size: var(--dara-font-12); overflow-wrap: anywhere; }
   .dara-qr-context > span + span::before { content: ' · '; }
   .dara-qr-note { margin: 8px 0 12px; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
@@ -207,6 +281,14 @@ const Workspace = styled.section`
   .dara-qr-suggest { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dara-border-strong); }
   .dara-qr-suggest p { margin: 0 0 8px; }
   .dara-qr-limit { margin: 8px 0 0; color: var(--dara-review); }
+  .dara-qr-left { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dara-border-strong); }
+  .dara-qr-left-status { margin: 0 0 8px; font-weight: 600; }
+  .dara-qr-left-status.is-open { color: var(--dara-review); }
+  .dara-qr-left-status.is-stale { opacity: 0.6; }
+  .dara-qr-left h3 { margin: 0 0 4px; font-size: var(--dara-font-12); font-weight: 400; color: var(--dara-text-secondary); }
+  .dara-qr-left li { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .dara-qr-plot-tools { display: inline-flex; align-items: center; gap: 12px; }
+  .dara-qr-plot-tools label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   @media (max-width: 1079px) {
     .dara-qr-body { grid-template-columns: minmax(0, 1fr); }
   }
@@ -217,10 +299,12 @@ const Workspace = styled.section`
  * pattern with reference sticks of the selected and the focused candidate, the candidate table and
  * the selected phases. `onRefine` submits a Known-phase refinement of the selected structures.
  */
-export default function QuickRankingWorkspace({ quick, context, onRefine, alert }) {
-  const { state, selected, setSelected, focused, setFocused, colors } = quick;
+export default function QuickRankingWorkspace({ quick, context, onRefine, onIdentify, alert }) {
+  const { state, selected, setSelected, focused, setFocused, colors, residual } = quick;
   const heading = useRef(null);
   useEffect(() => { heading.current?.focus(); }, []);
+  const [showResidual, setShowResidual] = useState(false);
+  const [zoom, setZoom] = useState({ range: null, revision: 0 }); // a click on an unexplained-peak marker zooms there
 
   const data = state.status === 'done' ? state.data : null;
   const rows = rankingRows(data);
@@ -272,6 +356,27 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, alert 
   ];
 
   const canRefine = selected.length > 0 && !over && !!data;
+  const left = residual?.data || null;
+  // 2 % of the strongest net intensity: the markers sit just above the axis, inside the plot area.
+  const markerLevel = 0.02 * Math.max(0, ...((data?.profile?.net || []).filter(Number.isFinite)));
+  const bounds = data?.profile ? [data.profile.two_theta?.[0], data.profile.two_theta?.slice(-1)[0]] : null;
+  // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
+  const traces = data ? [...overlayTraces(showResidual && left ? withResidualProfile(data, left) : data, showResidual && left ? [] : selected, colors, focused),
+    ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, markerLevel)] : [])] : [];
+  // A click on an unexplained-peak marker zooms there. The hovered point can be the pattern's (closest
+  // in 2-D), so a click within 0.3° of a marker, by the 2θ under the mouse, counts as well.
+  const onPlotClick = event => {
+    const point = event?.points?.find(item => item.data?.meta === 'unexplained');
+    const near = (left?.unexplained_peaks || []).map(peak => Number(peak[0]))
+      .filter(x => Number.isFinite(event?.cursorX) && Math.abs(x - event.cursorX) <= 0.3)
+      .sort((x, y) => Math.abs(x - event.cursorX) - Math.abs(y - event.cursorX))[0];
+    const x = point ? Number(point.x) : near;
+    if (!Number.isFinite(x)) return;
+    const range = zoomWindow(x, bounds);
+    // The intensity axis follows the window, so a small peak fills the plot.
+    const shownProfile = (showResidual && left ? withResidualProfile(data, left) : data).profile;
+    setZoom(previous => ({ range, y: windowRange(shownProfile, range), revision: previous.revision }));
+  };
   let body;
   if (state.status === 'pending') {
     const percentDone = progressPercent(state.progress);
@@ -301,15 +406,23 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, alert 
             ? <><span className="dara-qr-preview-mark" />Preview <b><ChemicalFormula formula={focusedRow.formula} /></b>
               {` · ${focusedRow.sourceLabel}`}{selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
             : 'Click a candidate to preview its reflections; tick it to keep it.'}</span>
-          <span>Measured pattern, background removed</span>
+          <span className="dara-qr-plot-tools">
+            <span>{showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
+            <Tooltip title={selected.length ? 'Show what the selected phases leave unexplained (the residual net pattern)' : 'Select phases first'}>
+              <label><Switch size="small" checked={showResidual && Boolean(left)} disabled={!left} onChange={setShowResidual} aria-label="Show the residual" />Residual</label>
+            </Tooltip>
+            {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
+          </span>
         </div>
-        {data.profile ? <Plot data={overlayTraces(data, selected, colors, focused)} useResizeHandler
-          xBounds={[data.profile.two_theta?.[0], data.profile.two_theta?.slice(-1)[0]]}
+        {data.profile ? <Plot data={traces} useResizeHandler xBounds={bounds} onClick={onPlotClick}
+          onDoubleClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}
           className="dara-qr-plot-area" style={{ width: '100%' }}
           layout={{
-            autosize: true, uirevision: state.key, showlegend: false, hovermode: 'closest',
+            autosize: true, uirevision: `${state.key}-${zoom.revision}`, showlegend: false, hovermode: 'closest',
             margin: { l: 56, r: 12, t: 8, b: 40 }, font: { size: 12 },
-            xaxis: { title: { text: '2θ (°)' } }, yaxis: { title: { text: 'Net intensity' }, rangemode: 'tozero' },
+            xaxis: { title: { text: '2θ (°)' }, ...(zoom.range ? { range: [...zoom.range], autorange: false } : {}) },
+            yaxis: { title: { text: showResidual && left ? 'Residual net intensity' : 'Net intensity' }, rangemode: 'tozero',
+              ...(zoom.range && zoom.y ? { range: [...zoom.y], autorange: false } : {}) },
           }}
           config={{ displaylogo: false, responsive: true }} /> : null}
       </section>
@@ -350,6 +463,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, alert 
               onClick={() => setSelected(selected.filter(key => key !== row.key))} />
           </li>)}</ul>
             : <p className="dara-qr-empty">No phase selected. Tick candidates in the table to draw their sticks on the pattern, then refine them together.</p>}
+          {chosen.length ? <ResidualPanel residual={residual} rows={rows} selected={selected} setSelected={setSelected} /> : null}
           {over ? <p className="dara-qr-limit">{`A refinement takes at most ${MAX_REFINE} phases: remove ${selected.length - MAX_REFINE}.`}</p> : null}
           {data.combination?.length ? <div className="dara-qr-suggest">
             <p>Suggested: <Suggestion combination={data.combination} /></p>
@@ -367,13 +481,18 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, alert 
         <h1 id="dara-qr-title" ref={heading} tabIndex={-1}>Search-match</h1>
         <p className="dara-qr-context">{context.filter(Boolean).map((item, index) => <span key={index}>{item}</span>)}</p>
       </div>
-      <Tooltip title={over ? `At most ${MAX_REFINE} phases per refinement` : 'Known-phase Rietveld refinement of the selected structures'}>
-        <Button type="primary" onClick={() => quick.refine(onRefine)} loading={quick.refining} disabled={!canRefine}>
-          {`Refine selected (${selected.length})`}
+      <Tooltip title={over ? `At most ${MAX_REFINE} phases per refinement` : 'Known-phase Rietveld refinement of the selected structures (minutes)'}>
+        <Button onClick={() => quick.refine(onRefine)} loading={quick.refining} disabled={!canRefine || quick.identifying}>
+          {`Refine with Rietveld (${selected.length})`}
+        </Button>
+      </Tooltip>
+      <Tooltip title={over ? `At most ${MAX_REFINE} phases` : 'Save the selected phases as the result, without refinement'}>
+        <Button type="primary" onClick={() => quick.identify(onIdentify)} loading={quick.identifying} disabled={!canRefine || quick.refining}>
+          Save identification
         </Button>
       </Tooltip>
     </header>
-    <p className="dara-qr-note">A ranked list of candidates, not an identification: each score is the share of the net intensity a structure explains on its own, with no amounts fitted. Refine the selected structures to test them.</p>
+    <p className="dara-qr-note">Each score is the share of the net intensity a structure explains on its own. Save identification gives a result in seconds without refinement (phase list, peak list, semi-quantitative RIR); Refine with Rietveld runs the full quantitative refinement (minutes).</p>
     {alert}
     {body}
   </Workspace>;

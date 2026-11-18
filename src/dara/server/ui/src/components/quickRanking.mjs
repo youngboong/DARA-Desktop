@@ -187,3 +187,52 @@ export function requestKey(entries) {
     name, value && typeof value === 'object' ? `${value.name}|${value.size}|${value.lastModified}` : String(value),
   ]));
 }
+
+// --- what is left after the selected phases (POST /quick-ranking/{job}/residual) -------------
+
+/**
+ * Status of a selection from its residual: the number of unexplained peaks. (The `explained`
+ * share is not a completeness measure: it stays well below 100 % for a complete phase set.)
+ */
+export function unexplainedStatus(residual) {
+  const n = (residual?.unexplained_peaks || []).length;
+  return n ? `${n} unexplained peak${n === 1 ? '' : 's'}` : 'No unexplained peaks';
+}
+
+/** Up to `limit` best matches for the remaining peaks as table rows; `inRanking` when the row can be selected. */
+export function nextMatches(residual, rows = [], limit = 3) {
+  const known = new Set(rows.map(row => row.key));
+  return rankingRows({ ranking: (residual?.next || []).slice(0, limit) }).map(row => ({ ...row, inRanking: known.has(row.key) }));
+}
+
+/** The ranking response with the residual net pattern in place of the measured one (the "what is left" view). */
+export const withResidualProfile = (response, residual) => (residual?.profile?.two_theta?.length ? { ...response, profile: residual.profile } : response);
+
+/**
+ * Quiet markers just above the 2θ axis (at `level`) at the unexplained peaks; `meta: 'unexplained'`
+ * identifies them on click. (On the axis line itself half a marker would be outside the plot area.)
+ */
+export function unexplainedMarkers(peaks, level = 0) {
+  const x = (peaks || []).map(peak => peak[0]).filter(Number.isFinite);
+  return {
+    type: 'scatter', mode: 'markers', name: 'Unexplained peaks', meta: 'unexplained', x, y: x.map(() => level), cliponaxis: false,
+    marker: { symbol: 'triangle-up', size: 9, color: '#874d00', line: { width: 0 } },
+    hovertemplate: 'Unexplained peak %{x:.2f}° 2θ<br>Click to zoom<extra></extra>',
+  };
+}
+
+/** 2θ window of `half` degrees on either side of `x`, kept inside `bounds`. */
+export function zoomWindow(x, bounds, half = 2) {
+  const [lo, hi] = Array.isArray(bounds) && bounds.every(Number.isFinite) ? bounds : [-Infinity, Infinity];
+  return [Math.max(lo, x - half), Math.min(hi, x + half)];
+}
+
+/** Intensity range [0, 1.1 × highest net value] of `profile` inside the 2θ `range` (null when there is none). */
+export function windowRange(profile, range) {
+  let top = -Infinity;
+  (profile?.two_theta || []).forEach((x, i) => {
+    const y = profile.net?.[i];
+    if (x >= range[0] && x <= range[1] && Number.isFinite(y)) top = Math.max(top, y);
+  });
+  return top > 0 ? [0, top * 1.1] : null;
+}

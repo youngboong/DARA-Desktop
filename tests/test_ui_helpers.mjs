@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import {
   cautionSortValue, cautionTagColor, cautionTooltip, cautionsBesideBanner, countCautions, sortCautions,
 } from '../src/dara/server/ui/src/components/fitCautions.mjs';
@@ -127,3 +128,11 @@ import { noFitHints } from '../src/dara/server/ui/src/components/resultsList.mjs
   assert.equal(plain.length, 1, 'only the general note when nothing in the settings stands out');
   console.log('no-fit hints ok');
 }
+
+test('results list: identification tasks are left out of fit-only actions', async () => {
+  const { fitTaskIds, isIdentificationEntry } = await import('../src/dara/server/ui/src/components/resultsList.mjs');
+  const tasks = [{ fw_id: 121, summary: { analysis_mode: 'identification' } }, { fw_id: 120, summary: { analysis_mode: 'known_mixture' } }];
+  assert.equal(isIdentificationEntry(tasks[0]), true);
+  assert.equal(isIdentificationEntry(tasks[1]), false);
+  assert.deepEqual(fitTaskIds([120, 121, 99], tasks), { ids: [120, 99], skipped: [121] });
+});

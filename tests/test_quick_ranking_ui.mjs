@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import test from 'node:test';
 import {
   MAX_REFINE, SORTERS, assignColors, combinationText, defaultSelection, flagTags, latticePercent, overlayTraces, percent,
   pollDelay, poolText, progressText as rankingProgress, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo,
@@ -133,3 +134,34 @@ assert.equal(jobOutcome({ running: true }), null);
 assert.equal(jobOutcome({ running: false, exit_code: 0 }).type, 'success');
 assert.equal(jobOutcome({ running: false, exit_code: 2, last: { message: 'Stopped' } }).text, 'Stopped');
 assert.equal(jobOutcome({ running: false, exit_code: 1 }).type, 'error');
+
+test('residual helpers: status by unexplained peaks, next matches, residual profile, markers, zoom', async () => {
+  const { unexplainedStatus, nextMatches, withResidualProfile, unexplainedMarkers, zoomWindow } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  assert.equal(unexplainedStatus({ unexplained_peaks: [[19.3, 400], [31.5, 1300]] }), '2 unexplained peaks');
+  assert.equal(unexplainedStatus({ unexplained_peaks: [[19.3, 400]] }), '1 unexplained peak');
+  assert.equal(unexplainedStatus({ unexplained_peaks: [] }), 'No unexplained peaks');
+  const residual = { next: [
+    { rank: 1, formula: 'Co3O4', source: 'cod:9005896', spacegroup: 227, spacegroup_symbol: 'Fd-3m', score: 0.2056, matched: 9, expected: 9, lattice_scale: 1 },
+    { rank: 2, formula: 'X', source: 'cod:1', score: 0.1, matched: 1, expected: 2 },
+    { rank: 3, formula: 'Y', source: 'cod:2', score: 0.1, matched: 1, expected: 2 },
+    { rank: 4, formula: 'Z', source: 'cod:3', score: 0.1, matched: 1, expected: 2 }],
+  profile: { two_theta: [10, 11], net: [1, 2] } };
+  const next = nextMatches(residual, [{ key: 'cod:9005896' }]);
+  assert.equal(next.length, 3);
+  assert.deepEqual([next[0].key, next[0].scoreText, next[0].peaksText, next[0].inRanking], ['cod:9005896', '21 %', '9/9', true]);
+  assert.equal(next[1].inRanking, false);
+  assert.deepEqual(withResidualProfile({ profile: { two_theta: [1] }, ranking: [] }, residual).profile, residual.profile);
+  assert.deepEqual(withResidualProfile({ profile: 'p' }, null).profile, 'p');
+  const markers = unexplainedMarkers([[19.3, 400], [31.5, 1300]]);
+  assert.deepEqual([markers.x, markers.y, markers.meta], [[19.3, 31.5], [0, 0], 'unexplained']);
+  assert.deepEqual(unexplainedMarkers([[19.3, 400]], 80).y, [80]);
+  assert.deepEqual(zoomWindow(11, [10, 100]), [10, 13]);
+  assert.deepEqual(zoomWindow(50, [10, 100], 1), [49, 51]);
+});
+
+test('intensity range of a zoom window', async () => {
+  const { windowRange } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  const profile = { two_theta: [10, 11, 12, 13], net: [5, 50, 20, 900] };
+  assert.deepEqual(windowRange(profile, [10.5, 12.5]), [0, 55.00000000000001]);
+  assert.equal(windowRange(profile, [20, 30]), null);
+});

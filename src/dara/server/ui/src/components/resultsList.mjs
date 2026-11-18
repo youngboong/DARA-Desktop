@@ -95,3 +95,15 @@ export function noFitHints(settings = {}, data = {}) {
   hints.push('Very few or very sharp peaks can come from a single crystal, a textured film or the sample holder; those cannot be fitted by a powder phase search.');
   return hints;
 }
+
+/** Whether a results-list entry is an identification (search-match phases, no refinement). */
+export const isIdentificationEntry = entry => entry?.summary?.analysis_mode === 'identification';
+
+/**
+ * Selected task ids for an action that needs a fit (table export): identification tasks among the
+ * `tasks` rows known here are left out. `{ids, skipped}`.
+ */
+export function fitTaskIds(selected = [], tasks = []) {
+  const identification = new Set((tasks || []).filter(isIdentificationEntry).map(entry => entry.fw_id));
+  return { ids: selected.filter(id => !identification.has(id)), skipped: selected.filter(id => identification.has(id)) };
+}

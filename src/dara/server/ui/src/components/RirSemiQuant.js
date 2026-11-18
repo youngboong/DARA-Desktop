@@ -11,7 +11,7 @@ const percent = value => (value == null ? '—' : Number(value).toFixed(1));
 const phaseText = row => { const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg ? `${label} (SG ${sg})` : label; };
 
 /** The RIR table of `sel` (GET /task/{id}/rir), loaded when mounted. */
-function RirTable({ taskId, sel }) {
+function RirTable({ taskId, sel, identification }) {
   const [body, setBody] = React.useState(null);
   const [error, setError] = React.useState('');
   const query = `sel=${encodeURIComponent(sel)}`;
@@ -38,9 +38,10 @@ function RirTable({ taskId, sel }) {
           <Text type="secondary"> · scaled</Text></Tooltip> : null}</span>;
     } },
     { title: 'RIR wt%', dataIndex: 'weight_percent_rir', className: 'dara-num', render: percent },
-    { title: <Tooltip title="Weight fraction of the Rietveld fit (the reported result)"><span>Rietveld wt%</span></Tooltip>,
+    // An identification has no Rietveld fit to compare with.
+    ...(identification ? [] : [{ title: <Tooltip title="Weight fraction of the Rietveld fit (the reported result)"><span>Rietveld wt%</span></Tooltip>,
       dataIndex: 'weight_percent_rietveld', className: 'dara-num', render: percent },
-    { title: <Tooltip title="RIR − Rietveld, in wt%"><span>Δ</span></Tooltip>, dataIndex: 'delta', className: 'dara-num', render: value => signedText(value) },
+    { title: <Tooltip title="RIR − Rietveld, in wt%"><span>Δ</span></Tooltip>, dataIndex: 'delta', className: 'dara-num', render: value => signedText(value) }]),
   ];
   return <>
     {body.complete === false ? <Alert type="warning" showIcon style={{ marginBottom: 8 }}
@@ -62,11 +63,11 @@ function RirTable({ taskId, sel }) {
  * Semi-quantitative RIR (I/Ic) check under the phase table, collapsed: the Rietveld fractions stay
  * the reported result; this is the classical cross-check. Loads when opened.
  */
-export default function RirSemiQuant({ taskId, sel }) {
+export default function RirSemiQuant({ taskId, sel, identification = false }) {
   return <Collapse ghost destroyInactivePanel className="dara-rir">
-    <Collapse.Panel key="rir" header={<span>Semi-quantitative check (RIR, I/Ic) <Text type="secondary" className="dara-footnote" style={{ display: 'inline' }}>
-      beside the Rietveld weight fractions</Text></span>}>
-      <RirTable taskId={taskId} sel={sel} />
+    <Collapse.Panel key="rir" header={<span>{identification ? 'RIR details (I/Ic, lines used)' : 'Semi-quantitative check (RIR, I/Ic)'} {identification ? null
+      : <Text type="secondary" className="dara-footnote" style={{ display: 'inline' }}>beside the Rietveld weight fractions</Text>}</span>}>
+      <RirTable taskId={taskId} sel={sel} identification={identification} />
     </Collapse.Panel>
   </Collapse>;
 }

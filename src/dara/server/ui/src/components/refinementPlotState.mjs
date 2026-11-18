@@ -331,7 +331,8 @@ function curveTop(curves, x, half) {
 function hklAnnotations(plot, data, selection, window, minGap, scale) {
   const reflections = [];
   plot.data.forEach((trace, index) => {
-    if (trace.meta !== 'reflection' || !isTraceSelected(trace, index, selection)) return;
+    // Bragg ticks of a Rietveld fit, or the reference sticks of an identification (same hkl customdata).
+    if (!['reflection', 'reference-sticks'].includes(trace.meta) || !isTraceSelected(trace, index, selection)) return;
     const xs = numbers(trace.x);
     const rows = Array.isArray(trace.customdata) ? trace.customdata : [];
     const color = data[index]?.marker?.color || trace.marker?.color;

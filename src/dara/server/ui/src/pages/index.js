@@ -559,6 +559,67 @@ function Submission() {
   };
   const quick = useQuickRanking(quickRankingRequest);
 
+  // "Save identification": the selected phases as the result, without refinement. Uses the ranking's
+  // pattern and chemistry with the setup's user, sample and instrument; a field the setup has not
+  // filled in yet takes the user back to it, like "Refine with Rietveld".
+  const saveIdentification = async ({ referenceIds: ids }) => {
+    let values;
+    try {
+      values = await form.validateFields(['user', 'instrument_profile', ...(synchrotron ? ['wavelength_sync_a'] : ['wavelength_lab'])]);
+    } catch (error) {
+      const first = (error?.errorFields || [])[0];
+      if (first) {
+        message.error(`Not saved: ${first.errors[0]}`);
+        quick.close(false);
+        form.scrollToField(first.name, { block: 'center' });
+      }
+      return false;
+    }
+    let body;
+    try {
+      body = quickRankingRequest();
+    } catch (error) {
+      setMsg(String(error.message || error));
+      return false;
+    }
+    body.append('user', values.user);
+    const sample = form.getFieldValue('sample');
+    if (sample?.trim()) body.append('sample', sample.trim());
+    body.append('instrument_profile', values.instrument_profile);
+    body.append('reference_ids', JSON.stringify(ids));
+    setMsg(null);
+    const send = async confirmed => {
+      if (confirmed) body.set('confirm_wavelength', 'true');
+      const response = await fetch(`${URL}/identification`, { method: 'POST', body });
+      const data = await response.json().catch(() => ({}));
+      if (response.ok && data.wf_id != null) {
+        runAfterSuccess([
+          () => writeRemembered(browserStorage(), form.getFieldsValue(true), refinementControls),
+          () => { window.location.href = `/task/?id=${data.wf_id}`; },
+        ]);
+        return true;
+      }
+      const mismatch = wavelengthMismatch(data.detail);
+      if (mismatch && !confirmed) {
+        return new Promise(resolve => Modal.confirm({
+          title: 'The selected wavelength differs from the file',
+          content: `${mismatch.filename ? `${mismatch.filename}: ` : ''}${mismatch.message} Save with the selected wavelength anyway?`,
+          okText: 'Save anyway', cancelText: 'Go back and check',
+          onOk: () => send(true).then(resolve, failure => { setMsg(String(failure.message || failure)); resolve(false); }),
+          onCancel: () => resolve(false),
+        }));
+      }
+      setMsg(detailMessage(data.detail, `The identification could not be saved (HTTP ${response.status}).`));
+      return false;
+    };
+    try {
+      return await send(false);
+    } catch (error) {
+      setMsg(String(error.message || error));
+      return false;
+    }
+  };
+
   const onSubmit = async () => {
     let values;
     try {
@@ -718,7 +779,7 @@ function Submission() {
   return (
     <Layout hasSider={false} title="Submit">
       {/* The workspace replaces the setup on screen; the form stays mounted with its file and values. */}
-      {quick.shown ? <QuickRankingWorkspace quick={quick} onRefine={refineRanked} alert={msgAlert}
+      {quick.shown ? <QuickRankingWorkspace quick={quick} onRefine={refineRanked} onIdentify={saveIdentification} alert={msgAlert}
         context={[watchedPattern?.name, elementSummary && `Elements ${elementSummary}`, formulaSummary && `Formulas ${formulaSummary}`,
           <>Radiation {wavelengthSummary}</>, rangeSummary]} /> : null}
       <Container hidden={quick.shown}>
