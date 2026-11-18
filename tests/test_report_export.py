@@ -36,6 +36,24 @@ def test_pdf_is_none_without_a_browser(monkeypatch):
     assert export.html_to_pdf(page("x", "<p>x</p>")) is None
 
 
+def test_pdf_written_after_the_browser_process_returned_is_still_read(monkeypatch):
+    """Edge's launcher exits at once and a child writes the PDF about a second later."""
+    import threading
+    import time
+    from pathlib import Path
+
+    def run(command, **kwargs):
+        target = Path(next(arg for arg in command if arg.startswith("--print-to-pdf=")).split("=", 1)[1])
+        threading.Thread(target=lambda: (time.sleep(0.5), target.write_bytes(b"%PDF-late"))).start()
+
+    monkeypatch.setattr(export, "find_browser", lambda: "browser")
+    monkeypatch.setattr(export.subprocess, "run", run)
+    assert export.html_to_pdf(page("x", "<p>x</p>")) == b"%PDF-late"
+    monkeypatch.setattr(export, "PDF_WAIT_S", 0.5)
+    monkeypatch.setattr(export.subprocess, "run", lambda command, **kwargs: None)
+    assert export.html_to_pdf(page("x", "<p>x</p>")) is None  # nothing written: gives up
+
+
 def test_formulas_in_report_text():
     from dara.server.report.html import formulas_in_text, tidy_formula
 

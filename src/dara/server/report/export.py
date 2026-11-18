@@ -13,8 +13,11 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from html.parser import HTMLParser
 from pathlib import Path
+
+PDF_WAIT_S = 30.0  # longest wait for the PDF after the browser process has returned
 
 _BROWSER_CANDIDATES = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -57,7 +60,17 @@ def html_to_pdf(html: str, timeout: float = 120) -> bytes | None:
             subprocess.run(command, capture_output=True, timeout=timeout, check=False)
         except (OSError, subprocess.TimeoutExpired):
             return None
-        return target.read_bytes() if target.is_file() and target.stat().st_size > 0 else None
+        # Edge's launcher can exit at once while a child writes the PDF about a second later:
+        # wait for the file and for its size to settle before giving up.
+        deadline = time.monotonic() + min(timeout, PDF_WAIT_S)
+        size = -1
+        while time.monotonic() < deadline:
+            current = target.stat().st_size if target.is_file() else 0
+            if current > 0 and current == size:
+                return target.read_bytes()
+            size = current
+            time.sleep(0.3)
+        return None
 
 
 # ---- HTML -> Word ----------------------------------------------------------------------------
