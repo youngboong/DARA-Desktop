@@ -1,6 +1,6 @@
 import React from 'react';
 import { Alert, Button, Checkbox, InputNumber, Radio, Select, Space, Spin, Switch, Table, Tooltip, Typography } from 'antd';
-import { DownloadOutlined, InfoCircleOutlined } from '@ant-design/icons';
+import { DownloadOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
 import Loadable from 'react-loadable';
 import Layout from '../components/Layout';
 import {
@@ -9,6 +9,8 @@ import {
 import { TRAY_LINES } from '../components/composition.mjs';
 import { viewChangeFromRelayout } from '../components/plotNavigation.mjs';
 import { NAVIGATION_CONFIG, NAVIGATION_DRAGMODE, NAVIGATION_HELP } from '../components/usePlotView';
+import { MiddleText } from '../components/ResultColumns';
+import { errorText } from '../components/exportTable';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const Plotly = Loadable({
@@ -28,6 +30,10 @@ const VIEWS = [
   { value: 'difference', label: <Tooltip title="A − k·B: what one pattern has that the other has not"><span>Difference</span></Tooltip> },
 ];
 const shortName = pattern => `#${pattern.task_id} ${pattern.name.length > 40 ? `${pattern.name.slice(0, 38)}…` : pattern.name}`;
+// A series variable with only a few values reads as categories: a linear axis would stretch two
+// rows over -1…11 with empty space between them.
+const FEW_VALUES = 6;
+const finiteOrNull = value => (value === null || value === '' || !Number.isFinite(Number(value)) ? null : Number(value));
 
 function saveText(text, filename) {
   const link = document.createElement('a');
@@ -43,16 +49,22 @@ function MeasuredComparePage({ location }) {
   // A series passes its variable (temperature, time) per task: the map uses it as its y axis.
   const valuesQuery = params.get('values') || '';
   const unit = params.get('unit') || '';
+  // Where the comparison was opened from: a series, or a Results view (its query in `back`).
+  const seriesId = params.get('from') === 'series' ? params.get('id') : null;
+  const backQuery = params.get('back') || '';
+  const initialRange = [finiteOrNull(params.get('xmin')), finiteOrNull(params.get('xmax'))];
   const [patterns, setPatterns] = React.useState([]);
   const [errors, setErrors] = React.useState([]);
   const [loading, setLoading] = React.useState(true);
-  const [view, setView] = React.useState('stack');
-  const [normalize, setNormalize] = React.useState(true);
-  const [sqrt, setSqrt] = React.useState(false);
+  const [attempt, setAttempt] = React.useState(0);
+  // View, normalisation, √I and the 2θ range are kept in the address (a reload or a shared link keeps them).
+  const [view, setView] = React.useState(() => (['stack', 'map', 'difference'].includes(params.get('view')) ? params.get('view') : 'stack'));
+  const [normalize, setNormalize] = React.useState(() => params.get('norm') !== '0');
+  const [sqrt, setSqrt] = React.useState(() => params.get('sqrt') === '1');
   const [offset, setOffset] = React.useState(110);
   const [minimum, setMinimum] = React.useState(null);
   const [maximum, setMaximum] = React.useState(null);
-  const [range, setRange] = React.useState(undefined);
+  const [range, setRange] = React.useState(() => (initialRange[0] !== null && initialRange[1] !== null && initialRange[0] < initialRange[1] ? initialRange : undefined));
   const [viewRevision, setViewRevision] = React.useState(0);
   const [pair, setPair] = React.useState([null, null]); // task ids of A and B
   const [scale, setScale] = React.useState('auto'); // 'auto' or the factor k of B
@@ -63,15 +75,15 @@ function MeasuredComparePage({ location }) {
     setLoading(true);
     setErrors([]);
     setPatterns([]);
-    setRange(undefined);
     Promise.all(ids.map(async taskId => {
       try {
         const response = await fetch(`${URL}/task/${taskId}/pattern`, { signal: controller.signal });
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
-        return { pattern: body };
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : `HTTP ${response.status}`);
+        // Legends, the map and the A/B lists name a pattern by its sample; the file stays in the table.
+        return { pattern: { ...body, file: body.name, name: body.sample || body.name } };
       } catch (error) {
-        return { error: `Task ${taskId}: ${error.message}` };
+        return { error: `Task ${taskId}: ${errorText(error)}` };
       }
     })).then(outcomes => {
       if (controller.signal.aborted) return;
@@ -80,12 +92,24 @@ function MeasuredComparePage({ location }) {
       setErrors(outcomes.filter(item => item.error).map(item => item.error));
       setPair([loaded[0]?.task_id ?? null, loaded[1]?.task_id ?? null]);
       const bounds = measuredAngularBounds(loaded);
-      setMinimum(bounds ? bounds[0] : null);
-      setMaximum(bounds ? bounds[1] : null);
+      setMinimum(range ? range[0] : bounds ? bounds[0] : null);
+      setMaximum(range ? range[1] : bounds ? bounds[1] : null);
       setLoading(false);
     });
     return () => controller.abort();
-  }, [taskQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskQuery, attempt]);
+
+  React.useEffect(() => {
+    const next = new URLSearchParams(window.location.search);
+    const set = (key, value) => (value === null ? next.delete(key) : next.set(key, value));
+    set('view', view === 'stack' ? null : view);
+    set('norm', normalize ? null : '0');
+    set('sqrt', sqrt ? '1' : null);
+    set('xmin', range ? String(Number(Math.min(...range).toFixed(3))) : null);
+    set('xmax', range ? String(Number(Math.max(...range).toFixed(3))) : null);
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}?${next.toString().replace(/%2C/g, ',')}`);
+  }, [view, normalize, sqrt, range]);
 
   const traces = React.useMemo(() => comparisonTraces(patterns, { normalize, offset, sqrt }), [patterns, normalize, offset, sqrt]);
   const seriesValues = React.useMemo(() => {
@@ -133,14 +157,16 @@ function MeasuredComparePage({ location }) {
     } };
   } else if (view === 'map' && map) {
     const rows = map.y.length;
+    const linear = map.numeric && rows > FEW_VALUES;
+    const rowLabels = map.numeric ? map.y.map(value => `${value}${unit ? ` ${unit}` : ''}`) : map.labels;
     plot = { data: [{
-      type: 'heatmap', x: map.x, y: map.numeric ? map.y : map.labels, z: map.z, colorscale: MAP_COLORS, zsmooth: false,
+      type: 'heatmap', x: map.x, y: linear ? map.y : rowLabels, z: map.z, colorscale: MAP_COLORS, zsmooth: false,
       colorbar: { title: { text: intensityTitle, side: 'right' }, thickness: 12, outlinewidth: 0 },
-      hovertemplate: `2θ %{x:.3f}°<br>${map.numeric ? `%{y} ${unit}` : '%{y}'}<br>${intensityTitle} %{z:.4g}<extra></extra>`,
+      hovertemplate: `2θ %{x:.3f}°<br>${linear ? `%{y} ${unit}` : '%{y}'}<br>${intensityTitle} %{z:.4g}<extra></extra>`,
     }], layout: {
       height: Math.max(380, 140 + rows * 28),
       margin: { t: 20, l: map.numeric ? 85 : 260, r: 25, b: 60 },
-      yaxis: { ...AXIS, title: map.numeric ? (unit || 'Series variable') : '', type: map.numeric ? 'linear' : 'category', automargin: true },
+      yaxis: { ...AXIS, title: map.numeric ? (unit || 'Series variable') : '', type: linear ? 'linear' : 'category', automargin: true },
     } };
   } else if (view === 'difference' && difference) {
     plot = { data: [
@@ -162,21 +188,30 @@ function MeasuredComparePage({ location }) {
     ? `The measured 2θ ranges differ: the map shows their common range ${map.grid.range[0].toFixed(2)}–${map.grid.range[1].toFixed(2)}° at the finest step (${map.grid.step.toFixed(4)}°), each pattern interpolated linearly.`
     : null;
 
-  return <Layout hasSider={false} title="Pattern comparison">
+  const crumb = seriesId ? { href: `/series/?id=${encodeURIComponent(seriesId)}`, text: 'Series' }
+    : { href: backQuery ? `/results?${new URLSearchParams(backQuery).toString()}` : '/results', text: 'Results' };
+  const ready = !loading && patterns.length >= 2;
+  return <Layout hasSider={false} title="Compare patterns">
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap align="center"><Typography.Title level={2} style={{ margin: 0, fontSize: 'var(--dara-font-20)', fontWeight: 400 }}><a href="/results">Results</a>{' › '}<span style={{ fontWeight: 600 }}>Compare measured patterns</span></Typography.Title>
-        {patterns.length > 1 ? <Tooltip title={`Original measured patterns, not calculated fits. ${NAVIGATION_HELP} Click a legend item to hide or show a sample. Controls change the view only.`}>
+      <Space wrap align="center"><Typography.Title level={2} style={{ margin: 0, fontSize: 'var(--dara-font-20)', fontWeight: 400 }}><a href={crumb.href}>{crumb.text}</a>{' › '}<span style={{ fontWeight: 600 }}>Compare patterns</span></Typography.Title>
+        {ready ? <Tooltip title={`Original measured patterns, not calculated fits. ${NAVIGATION_HELP} Click a legend item to hide or show a sample. Controls change the view only.`}>
           <InfoCircleOutlined aria-label="About this comparison" style={{ color: 'var(--dara-text-hint)' }} />
         </Tooltip> : null}</Space>
-      {errors.map(error => <Alert key={error} type="error" message={error} showIcon />)}
-      {!loading && patterns.length < 2 && <div className="dara-empty">
+      {loading ? <Spin /> : null}
+      {!loading && patterns.length < 2 ? (errors.length ? <div className="dara-empty" role="alert">
+        <h3>The patterns could not be loaded</h3>
+        <ul className="dara-error-list">{errors.map(error => <li key={error}>{error}</li>)}</ul>
+        <div className="dara-empty-actions"><Button type="primary" icon={<ReloadOutlined />} onClick={() => setAttempt(value => value + 1)}>Retry</Button>
+          <Button href={crumb.href}>{`Back to ${crumb.text}`}</Button></div>
+      </div> : <div className="dara-empty">
         <h3>Nothing to compare yet</h3>
         <p>Select at least two completed tasks in Results to compare their measured patterns.</p>
-        <Space><Button type="primary" href="/results">Go to Results</Button><Button href="/">Submit a pattern</Button></Space>
-      </div>}
-      {(wavelengths.size > 1 || missingRadiation) && patterns.length > 1 && <Alert type="warning" showIcon message="Check the radiation before comparing peak positions." description="The saved analysis wavelengths differ or are not recorded for every sample. Equal 2θ does not imply equal d-spacing when wavelengths differ." />}
-      {patterns.some(pattern => pattern.dropped_points > 0) && <Alert type="warning" showIcon message="Non-finite points were omitted from the comparison view." />}
-      {patterns.length > 0 && <div className="dara-toolbar" style={{ marginBottom: 0 }}>
+        <div className="dara-empty-actions"><Button type="primary" href={crumb.href}>{`Go to ${crumb.text}`}</Button><Button href="/">Submit a pattern</Button></div>
+      </div>) : null}
+      {ready ? errors.map(error => <Alert key={error} type="error" message={error} showIcon />) : null}
+      {ready && (wavelengths.size > 1 || missingRadiation) && patterns.length > 1 && <Alert type="warning" showIcon message="Check the radiation before comparing peak positions." description="The saved analysis wavelengths differ or are not recorded for every sample. Equal 2θ does not imply equal d-spacing when wavelengths differ." />}
+      {ready && patterns.some(pattern => pattern.dropped_points > 0) && <Alert type="warning" showIcon message="Non-finite points were omitted from the comparison view." />}
+      {ready && <div className="dara-toolbar" style={{ marginBottom: 0 }}>
         {patterns.length > 1 ? <div className="dara-toolbar-group">
           <Radio.Group size="small" optionType="button" aria-label="Comparison view" value={view} options={VIEWS}
             onChange={event => { setView(event.target.value); setViewRevision(previous => previous + 1); }} />
@@ -214,9 +249,9 @@ function MeasuredComparePage({ location }) {
       </div>}
       {overlapNote ? <Typography.Text className="dara-footnote">{overlapNote}</Typography.Text> : null}
       {view === 'map' && patterns.length > 1 && !map ? <Alert type="warning" showIcon message="The measured 2θ ranges do not overlap: there is no common range to map." /> : null}
-      {view === 'difference' && pair[0] === pair[1] ? <Alert type="info" showIcon message="Choose two different patterns for A and B." /> : null}
+      {ready && view === 'difference' && pair[0] === pair[1] ? <Alert type="info" showIcon message="Choose two different patterns for A and B." /> : null}
       {view === 'difference' && difference && !difference.x.length ? <Alert type="warning" showIcon message="A and B do not overlap in 2θ." /> : null}
-      {loading ? <Spin /> : plot && <Plotly
+      {ready && plot && <Plotly
         data={plot.data}
         layout={{
           autosize: true, hovermode: 'closest', dragmode: NAVIGATION_DRAGMODE, uirevision: `${taskQuery}-${view}-${viewRevision}`,
@@ -232,8 +267,10 @@ function MeasuredComparePage({ location }) {
         config={{ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG, toImageButtonOptions: { format: 'svg', filename: `dara-pattern-${view}` } }}
         style={{ width: '100%' }} useResizeHandler
       />}
-      {patterns.length > 0 && <Table size="small" rowKey="task_id" dataSource={patterns} pagination={false} scroll={{ x: 640 }} columns={[
-        { title: 'Task / sample', render: (_, row) => <a href={`/task?id=${row.task_id}`}>#{row.task_id} — {row.name}</a> },
+      {ready && <Table size="small" rowKey="task_id" dataSource={patterns} pagination={false} scroll={{ x: 640 }} columns={[
+        { title: 'ID', dataIndex: 'task_id', width: 60, className: 'dara-num' },
+        { title: 'Sample / file', render: (_, row) => <div className="dara-row-name"><a href={`/task/?id=${row.task_id}`} className="dara-row-primary">{row.name}</a>
+          {row.file && row.file !== row.name ? <MiddleText text={row.file} className="dara-row-file" /> : null}</div> },
         ...(seriesValues ? [{ title: unit ? `Variable (${unit})` : 'Variable', className: 'dara-num', render: (_, row, index) => seriesValues[index] }] : []),
         { title: '2θ range (°)', render: (_, row) => `${row.angles[0].toFixed(3)}–${row.angles[row.angles.length - 1].toFixed(3)}` },
         { title: 'Points', className: 'dara-num', render: (_, row) => row.angles.length },

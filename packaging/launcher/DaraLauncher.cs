@@ -736,6 +736,14 @@ namespace Dara.Desktop
                         "DARA - Analysis running", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
                     if (answer != DialogResult.Yes) { e.Cancel = true; return; }
                 }
+                else if (active < 0)
+                {
+                    var answer = MessageBox.Show(this,
+                        "DARA could not check for running analyses.\n\n" +
+                        "Closing DARA stops any analysis that is running; it is marked as failed and can be run again later.\n\nClose anyway?",
+                        "DARA - Close", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+                    if (answer != DialogResult.Yes) { e.Cancel = true; return; }
+                }
             }
             closeConfirmed = true;
             closing = true;
@@ -749,12 +757,13 @@ namespace Dara.Desktop
             base.OnFormClosed(e);
         }
 
+        // Queued and running tasks; -1 when the server did not answer in time or the answer is unreadable.
         int ActiveAnalyses()
         {
             string body = HttpGet(appUrl + "api/tasks?limit=1&state=READY,RUNNING,CANCELLING", 3000);
-            if (body == null) return 0;
+            if (body == null) return -1;
             var match = Regex.Match(body, "\"total_tasks\"\\s*:\\s*(\\d+)");
-            return match.Success ? int.Parse(match.Groups[1].Value) : 0;
+            return match.Success ? int.Parse(match.Groups[1].Value) : -1;
         }
 
         protected override void WndProc(ref Message m)

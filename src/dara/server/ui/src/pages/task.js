@@ -756,13 +756,17 @@ function parameterText(name, parameter) {
   return value ? `${name} = ${value}` : null;
 }
 
-/** "SPHAR4 · 0.93" of a phase refined with a preferred-orientation correction; null without one. */
-function orientationText(row) {
+/** Preferred-orientation model of a phase ("SPHAR4", "none") when the fit says anything about it; no
+ * strength: BGMN's listing gives none. `reduced` when BGMN lowered the requested order. */
+function orientationView(row) {
   const po = row.preferred_orientation;
-  if (!po?.corrected) return null;
-  const mean = Number(po.mean_gewicht);
-  return `${po.model}${Number.isFinite(mean) ? ` · ${mean.toFixed(2)}` : ''}`;
+  if (!po || !(po.corrected || po.requested || po.reduced_by_bgmn)) return null;
+  return { model: po.corrected ? po.model : 'none', reduced: Boolean(po.reduced_by_bgmn) };
 }
+
+/** The background of the automatic fit: "Auto" (BGMN does not report its number of terms), "n terms", "manual curve (n points)". */
+const backgroundText = model => (model?.mode === 'fixed' ? `${model.terms} terms`
+  : model?.mode === 'curve' ? `manual curve (${model.anchors} points)` : model?.mode === 'auto' ? 'Auto' : null);
 
 function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confidence = null, rowActions = null, spread = null, weightsRelative = false, format = undefined }) {
   const dataSource = phases.map(phase => ({ phase, ...(details?.[phase] || {}) }));
@@ -775,10 +779,16 @@ function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confid
     sorter: (a, b) => levelRank(confidence.phases[a.phase]?.level) - levelRank(confidence.phases[b.phase]?.level),
     render: (_, row) => <VerdictTag verdict={confidence.phases[row.phase]} format={format} /> }] : [];
   // A quiet column, only when a phase of this fit was refined with a texture correction.
-  const orientationColumn = dataSource.some(row => orientationText(row)) ? [{
-    title: <Tooltip title="Preferred-orientation correction refined by BGMN: spherical harmonics of the stated order (SPHAR); the number is BGMN's mean correction factor MeanValue(GEWICHT). A strong correction can drive the weight fraction: compare with a fit without it (Refine › Refinement controls…).">
+  const orientationColumn = dataSource.some(row => orientationView(row)) ? [{
+    title: <Tooltip title="Preferred-orientation correction refined by BGMN: spherical harmonics of the stated order (SPHAR). A strong correction can drive the weight fraction: compare with a fit without it (Refine › Refinement controls…).">
       <span>Pref. orientation</span></Tooltip>,
-    key: 'orientation', render: (_, row) => orientationText(row) || <Text type="secondary">None</Text> }] : [];
+    key: 'orientation', render: (_, row) => {
+      const po = orientationView(row);
+      if (!po) return <Text type="secondary">none</Text>;
+      return <>{po.model === 'none' ? <Text type="secondary">none</Text> : po.model}
+        {po.reduced ? <>{" · "}<Tooltip title={`Requested ${row.preferred_orientation.requested}. BGMN lowers the order when the data do not support it.`}>
+          <Text type="secondary" className="dara-th-note">reduced by BGMN</Text></Tooltip></> : null}</>;
+    } }] : [];
   return <Table size="small" pagination={false} rowKey="phase" scroll={{ x: 'max-content' }} tableLayout="auto" dataSource={dataSource}
     columns={[
       { title: 'Phase', dataIndex: 'phase', width: 220,
@@ -1698,6 +1708,8 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
           </Descriptions.Item>
           <Descriptions.Item label={FORMULA_LABEL[data.analysis_mode] || 'Expected formulas'}>{(data.precursors || []).join(', ') || "None"}</Descriptions.Item>
           <Descriptions.Item label="Search options">{searchOptionsText(data.additional_search_options)}</Descriptions.Item>
+          {backgroundText(data.final_result?.background) ? <Descriptions.Item label="Background polynomial terms">
+            {backgroundText(data.final_result.background)}</Descriptions.Item> : null}
           {excludedRanges.length ? <Descriptions.Item label="Excluded 2θ">
             <Tooltip title="Shaded in the fit plot; omitted from fitting">
               <span>{excludedRanges.map(([lo, hi]) => `${lo}–${hi}°`).join(', ')}</span>
@@ -2074,7 +2086,7 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
       </Dropdown>
       {/* Back to the Search-match workspace with this pattern: add or drop phases, then save again. */}
       <Tooltip title="Open this pattern on the Submit page to change the accepted phases with Search-match; saving makes a new task">
-        <Button href={`/?clone_task=${task_id}`}>Edit phases (Search-match)</Button>
+        <Button href={`/?clone_task=${task_id}&search=1`}>Edit phases (Search-match)</Button>
       </Tooltip>
       <Tooltip title="Refine these phases with Rietveld as a new task: refined amounts, lattice parameters and fit quality (about a minute)">
         <Button type="primary" loading={refining} onClick={refine}>Refine with Rietveld</Button>

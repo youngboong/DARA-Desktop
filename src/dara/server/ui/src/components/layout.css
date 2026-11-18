@@ -659,3 +659,187 @@ code {
   width: 0;
   min-width: 100%;
 }
+
+/* Page head of the list pages: title, live note, actions on the right. */
+.dara-page-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dara-space-2) var(--dara-space-3);
+  margin-bottom: var(--dara-space-2);
+}
+
+.dara-page-head h1 {
+  margin: 0;
+  font-size: var(--dara-font-20);
+  font-weight: 600;
+  line-height: 32px;
+}
+
+.dara-page-note {
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-hint);
+}
+
+.dara-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--dara-space-2);
+  margin-left: auto;
+}
+
+/* antd draws a dropdown button as a full-width block: here it takes its own width. */
+.dara-page-actions .ant-dropdown-button {
+  display: inline-flex;
+  width: auto;
+}
+
+/* Results filters: one toolbar row of standard controls (all reachable by keyboard). */
+.dara-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dara-space-2);
+  margin-bottom: var(--dara-space-3);
+}
+
+.dara-filter-name { width: 240px; }
+.dara-filter-user { width: 180px; }
+.dara-filter-select { width: 170px; }
+
+/* Results rows: one line per task (sample, file, marks); unfinished rows add a status line. */
+.dara-results-table .ant-table.ant-table-small .ant-table-tbody > tr > td {
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+.dara-results-table .ant-table.ant-table-small .ant-table-tbody .ant-tag {
+  line-height: 18px;
+}
+
+.dara-row-name {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.dara-row-name > * { flex: none; }
+
+.dara-row-name > .dara-row-primary,
+.dara-row-name > .dara-row-file {
+  flex: 0 1 auto;
+  min-width: 3em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dara-row-file {
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
+.dara-row-meta {
+  font-size: var(--dara-font-12);
+}
+
+/* Middle ellipsis: the head shrinks, the distinguishing end stays. */
+.dara-mid {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: bottom;
+}
+
+.dara-mid-head {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: pre;
+}
+
+.dara-mid-tail {
+  flex: none;
+  white-space: pre;
+}
+
+.dara-row-status {
+  font-size: var(--dara-font-12);
+  line-height: 18px;
+  color: var(--dara-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dara-row-status-fail { color: var(--dara-fail); }
+.dara-row-status-info { color: var(--dara-accent); }
+
+.dara-row-progress {
+  display: inline-block;
+  width: 56px;
+  height: 4px;
+  margin-right: 6px;
+  vertical-align: middle;
+  background: var(--dara-border);
+  border-radius: var(--dara-radius);
+  overflow: hidden;
+}
+
+.dara-row-progress > i {
+  display: block;
+  height: 100%;
+  background: var(--dara-accent);
+}
+
+.dara-row-phases {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dara-nowrap { white-space: nowrap; }
+
+/* Row actions: borderless icons, quieter than the data; they strengthen on hover and focus. */
+.dara-row-actions {
+  display: inline-flex;
+  gap: 2px;
+}
+
+.dara-row-actions .ant-btn-text {
+  color: var(--dara-text-hint);
+}
+
+.dara-row-actions .ant-btn-text:not([disabled]):hover,
+.dara-row-actions .ant-btn-text:not([disabled]):focus-visible,
+.dara-row-actions .ant-btn-text.ant-dropdown-open {
+  color: var(--dara-accent);
+  background: var(--dara-accent-bg);
+}
+
+.dara-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dara-space-3);
+}
+
+.dara-error-list {
+  margin: 0 0 16px;
+  padding-left: 20px;
+  color: var(--dara-fail);
+}
+
+.dara-qr-bg-error {
+  margin: var(--dara-space-2) 0 0;
+  font-size: var(--dara-font-12);
+  color: var(--dara-fail);
+}
+
+/* Submit page on an empty database: one quiet line to the Tutorial. */
+.dara-first-run {
+  margin: 0 0 var(--dara-space-3);
+  color: var(--dara-text-secondary);
+}

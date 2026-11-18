@@ -41,6 +41,7 @@ export function useQuickRanking(buildRequest) {
   status.current = state.status;
   const ownBack = useRef(false); // a history.back() of close(): its popstate is not the user's Back
   const background = useRef(null); // accepted "Background…" settings, sent with every ranking request
+  const preselect = useRef(null); // reference ids to select when the next ranking finishes (a reopened identification)
 
   const setSelected = keys => {
     setSelectedKeys(keys);
@@ -90,7 +91,9 @@ export function useQuickRanking(buildRequest) {
       if (!response.ok) throw new Error(data.detail || 'The search-match failed.');
       if (data.status === 'error') throw new Error(data.error || 'The search-match failed.');
       setState({ status: 'done', key, data });
-      setSelected(defaultSelection(data));
+      const wanted = (preselect.current || []).filter(source => (data.ranking || []).some(row => row.source === source));
+      preselect.current = null;
+      setSelected(wanted.length ? wanted : defaultSelection(data));
     } catch (error) {
       if (sequence === run.current) setState({ status: 'error', key, error: String(error.message || error) });
     }
@@ -153,12 +156,24 @@ export function useQuickRanking(buildRequest) {
     shown, state, selected, setSelected, colors, focused, setFocused, theoretical, refining, identifying, ranked, start, cancel,
     // The residual of the current selection (`stale` while the newer one is on its way).
     residual: residual ? { ...residual, stale: residual.key !== residualKey } : null,
-    /** Shows the workspace: the last ranking when its inputs are unchanged, else a new one. */
-    open() {
+    /**
+     * Shows the workspace: the last ranking when its inputs are unchanged, else a new one. A stored
+     * search-match reopens with `{selected, background, theoretical}`: a new ranking with those
+     * settings, its reference ids selected where the ranking has them.
+     */
+    open(stored = null) {
       scroll.current = window.scrollY;
       setShown(true);
       if (!window.history.state?.daraQuick) window.history.pushState({ ...(window.history.state || {}), daraQuick: true }, '');
       window.scrollTo(0, 0);
+      if (stored) {
+        background.current = stored.background || null;
+        preselect.current = stored.selected?.length ? [...stored.selected] : null;
+        const withTheoretical = Boolean(stored.theoretical);
+        setTheoretical(withTheoretical);
+        start(withTheoretical);
+        return;
+      }
       if (!ranked && state.status !== 'pending') start(theoretical);
     },
     /** Back to the setup; a pending ranking is cancelled. */
@@ -210,12 +225,35 @@ function Suggestion({ combination }) {
 
 /**
  * HighScore's "Determine Background" for the search-match: the default method, or Sonneveld & Visser
- * with HighScore's granularity and bending factor; "Accept" ranks again with them and shows the curve.
+ * with HighScore's granularity and bending factor. While the sliders move, the curve is drawn on the
+ * pattern (`onPreview(view)`, debounced, from the finished job's pattern); "Accept" ranks again with them.
+ * shortcut: no manual base points here (the task page's anchor editor is bound to its fit plot); add them if asked.
  */
-function BackgroundForm({ initial, onAccept }) {
+function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
   const [settings, setSettings] = useState(() => backgroundSettings(initial));
+  const [previewError, setPreviewError] = useState('');
   const set = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
   const tuned = settings.method === 'sonneveld_visser';
+  const chosen = tuned ? settings : { method: 'auto' };
+  const chosenKey = JSON.stringify(chosen);
+  useEffect(() => {
+    if (!jobId) return undefined;
+    let current = true;
+    const timer = setTimeout(async () => {
+      try {
+        const response = await fetch(`${URL}/quick-ranking/${jobId}/background`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: chosenKey,
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(response.status === 404 ? 'This search-match has expired: run it again.' : body.detail || `HTTP ${response.status}`);
+        if (current) { setPreviewError(''); onPreview(body); }
+      } catch (error) {
+        if (current) setPreviewError(error instanceof TypeError ? 'The DARA server did not answer.' : String(error.message || error));
+      }
+    }, 300);
+    return () => { current = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, chosenKey]);
   return <div className="dara-qr-bg-form">
     <Radio.Group size="small" value={settings.method} optionType="button" onChange={event => set('method', event.target.value)}
       options={[{ value: 'auto', label: 'Automatic' }, { value: 'sonneveld_visser', label: 'Granularity / bending' }]} />
@@ -225,7 +263,8 @@ function BackgroundForm({ initial, onAccept }) {
     <label htmlFor="dara-qr-bending">Bending factor <span className="dara-num">{settings.bending_factor}</span></label>
     <Slider id="dara-qr-bending" min={0} max={50} step={0.5} value={settings.bending_factor} disabled={!tuned}
       onChange={value => set('bending_factor', value)} tooltip={{ formatter: null }} />
-    <Button type="primary" size="small" onClick={() => onAccept(tuned ? settings : { method: 'auto' })}>Accept and rank again</Button>
+    {previewError ? <p className="dara-qr-bg-error" role="alert">{`Curve preview unavailable: ${previewError}`}</p> : null}
+    <Button type="primary" size="small" onClick={() => onAccept(chosen)}>Accept and rank again</Button>
   </div>;
 }
 
@@ -367,6 +406,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const [showResidual, setShowResidual] = useState(false);
   const [showBackground, setShowBackground] = useState(false); // the measured pattern with its background
   const [backgroundOpen, setBackgroundOpen] = useState(false);
+  const [backgroundPreview, setBackgroundPreview] = useState(null); // live curve while the Background popover is open
   const [zoom, setZoom] = useState({ range: null, revision: 0 }); // a click on an unexplained-peak marker zooms there
 
   const data = state.status === 'done' ? state.data : null;
@@ -428,7 +468,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const bounds = data?.profile ? [data.profile.two_theta?.[0], data.profile.two_theta?.slice(-1)[0]] : null;
   // The background view (when the server sends the curve) shows the measured pattern with the
   // background the ranking removed; the sticks belong to the net scale and stay in the other views.
-  const withBackground = showBackground ? backgroundTraces(data?.background) : null;
+  const withBackground = backgroundPreview ? backgroundTraces(backgroundPreview) : showBackground ? backgroundTraces(data?.background) : null;
   // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
   const traces = withBackground || !data ? withBackground || [] : [...overlayTraces(showResidual && left ? withResidualProfile(data, left) : data, showResidual && left ? [] : selected, colors, focused),
     ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, markerLevel)] : [])];
@@ -481,11 +521,12 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 : 'Click a candidate to preview its reflections; tick it to keep it.'}</span>
               <span className="dara-qr-plot-tools">
                 <span>{withBackground ? 'Measured pattern with its background' : showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
-                {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground} onChange={setShowBackground} aria-label="Show the background" />Background</label> : null}
+                {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground || Boolean(backgroundPreview)} onChange={setShowBackground} aria-label="Show the background" />Background</label> : null}
                 {data.background?.settings ? <Popover trigger="click" placement="bottomRight" title="Determine background" open={backgroundOpen}
-                  onOpenChange={setBackgroundOpen} destroyTooltipOnHide
-                  content={<BackgroundForm initial={data.background.settings} onAccept={settings => {
+                  onOpenChange={value => { setBackgroundOpen(value); if (!value) setBackgroundPreview(null); }} destroyTooltipOnHide
+                  content={<BackgroundForm initial={data.background.settings} jobId={data.job_id} onPreview={setBackgroundPreview} onAccept={settings => {
                     setBackgroundOpen(false);
+                    setBackgroundPreview(null);
                     setShowBackground(true);
                     quick.rankWithBackground(settings);
                   }} />}>

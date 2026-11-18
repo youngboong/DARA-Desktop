@@ -1,7 +1,7 @@
 import React, { useEffect } from 'react';
 import { Layout as LayoutAntd } from 'antd';
 import styled from 'styled-components';
-import HeaderMenu from './HeaderMenu';
+import HeaderMenu, { GuardedLink } from './HeaderMenu';
 import { Link } from 'gatsby';
 import Halmet from 'react-helmet';
 import favicon from '../images/favicon.ico';
@@ -23,7 +23,7 @@ function Header({ current }) {
   return (
     <HeaderAntd>
       <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <Link className='page-title' to='/' aria-label='DARA, new analysis'>
+        <GuardedLink className='page-title' to='/' aria-label='DARA, new analysis'>
           {/* Mark: a reference stick pattern on its baseline, the line list every phase card carries. */}
           <svg className='page-title-mark' viewBox='0 0 24 24' width='22' height='22' aria-hidden='true'>
             <path d='M5 19V12M9 19V5M13 19V14M17 19V8M21 19V15' fill='none' stroke='var(--dara-shell-mark)' strokeWidth='2' strokeLinecap='square' />
@@ -31,7 +31,7 @@ function Header({ current }) {
           </svg>
           <span className='page-title-text'>DARA</span>
           <span className='page-title-sub'>XRD phase analysis</span>
-        </Link>
+        </GuardedLink>
         <HeaderMenu current={current}></HeaderMenu>
       </div>
     </HeaderAntd>
@@ -229,7 +229,8 @@ function Layout({ children, hasSider, title }) {
   return (
       <LayoutContainer className="layout-container">
         <Halmet>
-          <title>{title ? `${title} | `: ""}DARA | Data-driven automated Rietveld analysis for phase search and refinement</title>
+          {/* Short: the desktop window title shows the start ("Results | DARA", "Task 41 · … | DARA"). */}
+          <title>{title ? `${title} | DARA` : 'DARA | XRD phase analysis'}</title>
         </Halmet>
         <Halmet>
           <link rel="icon" href={favicon} />

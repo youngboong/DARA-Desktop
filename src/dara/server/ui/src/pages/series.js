@@ -1,11 +1,12 @@
 import React from 'react';
 import Loadable from 'react-loadable';
-import { Alert, Button, Progress, Select, Space, Spin, Table, Tag, Tooltip, Typography } from 'antd';
-import { LineChartOutlined, TableOutlined } from '@ant-design/icons';
+import { Alert, Button, Progress, Select, Space, Spin, Table, Tag, Typography, message } from 'antd';
+import { LineChartOutlined, ReloadOutlined, TableOutlined } from '@ant-design/icons';
 import Layout from '../components/Layout';
-import { StateTag } from '../components/ConfidenceViews';
-import { overallColor, overallLabel } from '../components/confidence.mjs';
-import { formatFixed, phasesLabel, phasesTooltip } from '../components/resultsList.mjs';
+import { resultColumns } from '../components/ResultColumns';
+import { downloadTable, errorText } from '../components/exportTable';
+import { taskHref } from '../components/sampleNav.mjs';
+import { formatDate } from '../components/resultsList.mjs';
 import {
   LATTICE_PARAMETERS, fitTraces, hasActiveItems, latticeTraces, phaseLabels, phaseTraces, progress,
   taskIds, xAxis,
@@ -13,7 +14,9 @@ import {
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const POLL_MS = 10000;
+const MAX_RETRY_MS = 60000;
 const MAX_COMPARE = 20;
+const MAX_EXPORT = 50;
 
 const Plotly = Loadable({
   loader: () => import('react-plotly.js'),
@@ -93,42 +96,66 @@ function FitChart({ items, axis }) {
     config={config('dara-series-fit')} style={{ width: '100%' }} useResizeHandler />;
 }
 
-function ConfidenceCell({ summary }) {
-  const label = overallLabel(summary?.confidence_overall);
-  return label ? <Tag color={overallColor(summary.confidence_overall)}>{label}</Tag> : '—';
-}
+// "300 °C" (value, a space, the unit); the token from the file name when it has no value.
+const variableText = variable => (variable?.value !== null && variable?.value !== undefined
+  ? `${variable.value}${variable.unit ? ` ${variable.unit}` : ''}` : variable?.raw ?? '—');
 
-function SeriesDetail({ id }) {
+function SeriesDetail({ id, onName }) {
   const [data, setData] = React.useState(undefined);
-  const [error, setError] = React.useState('');
+  const [error, setError] = React.useState(null); // {text, notFound, retryIn}
+  const [attempt, setAttempt] = React.useState(0);
+  const [exporting, setExporting] = React.useState(false);
 
+  // Polls while tasks are queued or running; a failed refresh retries with a growing delay
+  // (10 s, 20 s, 40 s, then every minute) instead of stopping.
   React.useEffect(() => {
     let active = true;
     let timer = null;
+    let failures = 0;
     const load = () => fetch(`${URL}/series/${encodeURIComponent(id)}`)
       .then(async response => {
-        const body = await response.json();
-        if (!response.ok) throw new Error(typeof body.detail === 'string' ? body.detail : `HTTP ${response.status}`);
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const failure = new Error(typeof body.detail === 'string' ? body.detail : `HTTP ${response.status}`);
+          failure.notFound = response.status === 404;
+          throw failure;
+        }
         return body;
       })
       .then(body => {
         if (!active) return;
+        failures = 0;
         setData(body);
-        setError('');
+        setError(null);
         if (hasActiveItems(body.items)) timer = window.setTimeout(load, POLL_MS);
       })
       .catch(e => {
         if (!active) return;
-        setError(String(e.message || e));
+        if (e.notFound) { setError({ text: errorText(e), notFound: true }); setData(null); return; }
+        const delay = Math.min(POLL_MS * 2 ** failures, MAX_RETRY_MS);
+        failures += 1;
+        setError({ text: errorText(e), retryIn: delay / 1000 });
         setData(previous => previous ?? null);
+        timer = window.setTimeout(load, delay);
       });
     setData(undefined);
     load();
     return () => { active = false; if (timer) window.clearTimeout(timer); };
-  }, [id]);
+  }, [id, attempt]);
+  React.useEffect(() => { if (data?.name) onName(data.name); }, [data?.name, onName]);
 
   if (data === undefined) return <Spin size="large" />;
-  if (data === null) return <Alert type="error" showIcon message="Series could not be loaded" description={error} />;
+  if (data === null) {
+    return <div className="dara-empty" role="alert">
+      <h3>{error?.notFound ? 'Series not found' : 'The series could not be loaded'}</h3>
+      <p>{error?.notFound ? 'It may have been deleted, or the link is incomplete.' : `${error?.text} Retrying in ${error?.retryIn} s.`}</p>
+      <div className="dara-empty-actions">
+        {error?.notFound ? null : <Button type="primary" icon={<ReloadOutlined />} onClick={() => setAttempt(value => value + 1)}>Retry now</Button>}
+        <Button type={error?.notFound ? 'primary' : 'default'} href="/series/">All series</Button>
+        <a href="/results/">Results</a>
+      </div>
+    </div>;
+  }
 
   const items = data.items || [];
   const axis = xAxis(items);
@@ -138,24 +165,38 @@ function SeriesDetail({ id }) {
   // The series variable goes along, so the comparison map can use it as its y axis.
   const valueOf = new Map(items.map((item, index) => [item.task_id, axis.values[index]]));
   const compareValues = axis.usesVariable ? `&values=${compareIds.map(id => valueOf.get(id)).join(',')}${axis.title ? `&unit=${encodeURIComponent(axis.title)}` : ''}` : '';
-  const allIds = taskIds(items).slice(0, 50);
+  const allIds = taskIds(items).slice(0, MAX_EXPORT);
+  const seriesIds = taskIds(items);
+  // A task opened here knows the series order (Previous / Next sample) and returns to this series.
+  const back = `from=series&id=${encodeURIComponent(id)}`;
+  const columns = resultColumns({ hrefOf: row => taskHref(row.fw_id, { ids: seriesIds, back }), sourceHref: task => taskHref(task, { back }) });
+  const rows = items.map(item => ({ ...item, fw_id: item.task_id, adopted: item.adopted ?? item.summary?.adopted }));
+  const exportTable = async () => {
+    setExporting(true);
+    try {
+      message.success(`Exported to ${await downloadTable(allIds)}.`);
+    } catch (e) {
+      message.error(errorText(e));
+    } finally {
+      setExporting(false);
+    }
+  };
 
   return <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-    {error ? <Alert type="warning" showIcon message={`Refresh failed: ${error}`} /> : null}
-    <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12 }}>
-      <div>
-        <h2 style={{ marginBottom: 4 }}>{data.name}</h2>
-        <Space wrap>
-          <Tag>{`${total} tasks`}</Tag>
-          {data.unit ? <Tag>{`Variable: ${data.unit}`}</Tag> : <Tag>No variable parsed — ordered by file name</Tag>}
-          {data.created_on ? <Tag>{`Submitted ${data.created_on}`}</Tag> : null}
-        </Space>
-      </div>
-      <Space wrap>
-        <Button icon={<TableOutlined />} href={`${URL}/tasks/table.csv?ids=${allIds.join(',')}`}>Export CSV</Button>
-        <Button icon={<LineChartOutlined />} disabled={completedIds.length < 2}
-          href={completedIds.length >= 2 ? `/compare?tasks=${compareIds.join(',')}${compareValues}` : undefined}>Compare patterns</Button>
+    {error ? <Alert type="warning" showIcon message={`Refresh failed: ${error.text}`}
+      description={`Retrying in ${error.retryIn} s.`} action={<Button size="small" onClick={() => setAttempt(value => value + 1)}>Retry now</Button>} /> : null}
+    <div className="dara-page-head">
+      <h1><a href="/series/" style={{ fontWeight: 400 }}>Series</a>{' › '}{data.name}</h1>
+      <Space wrap size={4}>
+        <Tag>{`${total} tasks`}</Tag>
+        {data.unit ? <Tag>{`Variable: ${data.unit}`}</Tag> : <Tag>No variable parsed — ordered by file name</Tag>}
+        {data.created_on ? <Tag>{`Submitted ${formatDate(data.created_on)}`}</Tag> : null}
       </Space>
+      <div className="dara-page-actions">
+        <Button icon={<LineChartOutlined />} disabled={completedIds.length < 2}
+          href={completedIds.length >= 2 ? `/compare/?tasks=${compareIds.join(',')}${compareValues}&from=series&id=${encodeURIComponent(id)}` : undefined}>Compare patterns</Button>
+        <Button icon={<TableOutlined />} loading={exporting} onClick={exportTable}>{exporting ? 'Exporting…' : 'Export table (CSV)'}</Button>
+      </div>
     </div>
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -165,22 +206,15 @@ function SeriesDetail({ id }) {
       {hasActiveItems(items) ? <Typography.Text type="secondary">Updating every {POLL_MS / 1000} s while tasks are queued or running.</Typography.Text> : null}
       {completedIds.length > MAX_COMPARE ? <div><Typography.Text type="secondary">{`Pattern comparison shows the first ${MAX_COMPARE} completed tasks.`}</Typography.Text></div> : null}
     </div>
-    <Table size="small" rowKey="task_id" pagination={false} dataSource={items} scroll={{ x: 900 }}
+    {items.length > MAX_EXPORT ? <Typography.Text type="secondary">{`The table export takes the first ${MAX_EXPORT} tasks; select the rest in Results to export them.`}</Typography.Text> : null}
+    <Table size="small" className="dara-results-table" rowKey="fw_id" pagination={false} dataSource={rows} tableLayout="fixed" scroll={{ x: 1000 }}
       columns={[
-        { title: 'Order', dataIndex: 'order', width: 70, className: 'dara-num', render: value => value + 1 },
-        { title: 'File', dataIndex: 'name', render: (text, row) => <a href={`/task/?id=${row.task_id}`}>{text}</a> },
-        { title: data.unit ? `Variable (${data.unit})` : 'Variable', key: 'variable', render: (_, row) => row.variable?.raw ?? '—' },
-        { title: 'Status', dataIndex: 'state', render: state => <StateTag state={state} /> },
-        { title: 'Rwp (%)', key: 'rwp', className: 'dara-num', render: (_, row) => formatFixed(row.summary?.final_rwp ?? row.summary?.best_rwp) },
-        { title: <Tooltip title="Goodness of fit = Rwp / Rexp of the final refinement">GOF</Tooltip>, key: 'gof', className: 'dara-num', render: (_, row) => formatFixed(row.summary?.gof) },
-        { title: 'Confidence', key: 'confidence', render: (_, row) => <ConfidenceCell summary={row.summary} /> },
-        { title: 'Phases', key: 'phases', width: 280, render: (_, row) => {
-          const label = phasesLabel(row.summary, 4);
-          return label ? <Tooltip title={<div style={{ whiteSpace: 'pre-line' }}>{phasesTooltip(row.summary)}</div>}><span>{label}</span></Tooltip> : '—';
-        } },
+        { title: 'Order', dataIndex: 'order', key: 'order', width: 64, className: 'dara-num', render: value => value + 1 },
+        { title: 'Variable', key: 'variable', width: 100, className: 'dara-num', render: (_, row) => variableText(row.variable) },
+        columns.name, columns.verdict, columns.rwp, columns.gof, columns.phases,
       ]} />
     {done < 2 ? <Alert type="info" showIcon message="Trend charts need at least two completed tasks."
-      description={<><a href="/results">Back to Results</a> to check progress, or <a href="/">submit another series</a>.</>} /> : null}
+      description={<><a href="/results/">Results</a> shows every task's progress; <a href="/?series=1">submit another series</a>.</>} /> : null}
     <ChartBlock title="Phase fractions" note="Weight fractions are relative to the modelled crystalline phases; error bars are BGMN estimated standard deviations. Gaps mean the phase was not in the final result of that sample.">
       <PhaseChart items={items} axis={axis} />
     </ChartBlock>
@@ -196,19 +230,23 @@ function SeriesDetail({ id }) {
 function SeriesList() {
   const [data, setData] = React.useState(undefined);
   const [error, setError] = React.useState('');
+  const [attempt, setAttempt] = React.useState(0);
   React.useEffect(() => {
+    setData(undefined);
+    setError('');
     fetch(`${URL}/series`)
-      .then(response => response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`)))
+      .then(response => response.ok ? response.json() : Promise.reject(new Error(`The series list could not be loaded (HTTP ${response.status}).`)))
       .then(body => setData(body.series || []))
-      .catch(e => { setError(String(e.message || e)); setData([]); });
-  }, []);
+      .catch(e => { setError(errorText(e)); setData([]); });
+  }, [attempt]);
   return <>
-    <h2>Series</h2>
+    <div className="dara-page-head"><h1>Series</h1></div>
     {data?.length ? <Typography.Paragraph type="secondary">
       A series is a set of patterns analysed independently with identical settings. Submit one from the Submit page with “Submit as a series”.
     </Typography.Paragraph> : null}
-    {error ? <Alert type="error" showIcon message="Series list unavailable" description={error} style={{ marginBottom: 12 }} /> : null}
-    {data !== undefined && !data.length && !error ? <div className="dara-empty">
+    {error ? <div className="dara-empty" role="alert"><h3>The series list could not be loaded</h3><p>{error}</p>
+      <Button type="primary" icon={<ReloadOutlined />} onClick={() => setAttempt(value => value + 1)}>Retry</Button></div> : null}
+    {error ? null : data !== undefined && !data.length ? <div className="dara-empty">
       <h3>No series yet</h3>
       <p>Submit several patterns of one sample (for example a temperature or time series) with identical settings, then follow their phases here.</p>
       <Button type="primary" href="/?series=1">Submit a series</Button>
@@ -216,7 +254,7 @@ function SeriesList() {
       locale={{ emptyText: <>No series have been submitted yet. <a href="/?series=1">Submit a series</a>.</> }}
       columns={[
         { title: 'Name', dataIndex: 'name', render: (text, row) => <a href={`/series/?id=${encodeURIComponent(row.series_id)}`}>{text || row.series_id}</a> },
-        { title: 'Created', dataIndex: 'created_on' },
+        { title: 'Submitted', dataIndex: 'created_on', render: formatDate },
         { title: 'Tasks', dataIndex: 'n_tasks', className: 'dara-num' },
         { title: 'Completed', dataIndex: 'n_completed', className: 'dara-num' },
         { title: 'Variable', dataIndex: 'unit', render: value => value || '—' },
@@ -226,7 +264,8 @@ function SeriesList() {
 
 export default function SeriesPage({ location }) {
   const id = new URLSearchParams(location.search).get('id');
-  return <Layout hasSider={false} title="Series">
-    {id ? <SeriesDetail id={id} /> : <SeriesList />}
+  const [name, setName] = React.useState('');
+  return <Layout hasSider={false} title={id && name ? `Series · ${name}` : 'Series'}>
+    {id ? <SeriesDetail id={id} onName={setName} /> : <SeriesList />}
   </Layout>;
 }

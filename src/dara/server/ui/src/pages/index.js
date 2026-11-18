@@ -19,6 +19,7 @@ import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../compone
 // explicit .js: on case-insensitive disks webpack would resolve quickRanking.mjs / structureLibrary.mjs first
 import QuickRankingWorkspace, { QuickRankingSummary, useQuickRanking } from '../components/QuickRanking.js';
 import StructureLibrary from '../components/StructureLibrary.js';
+import { setLeaveGuard } from '../components/leaveGuard.mjs';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const { confirm } = Modal;
@@ -275,6 +276,10 @@ function Submission() {
     setUsingRemembered(false);
   };
   const [loadingClone, setLoadingClone] = useState(false);
+  // A stored search-match to reopen once the clone's settings are in the form: /?clone_task=ID&search=1,
+  // or any identification task ({selected, background, theoretical}).
+  const [reopenSearch, setReopenSearch] = useState(null);
+  const [firstRun, setFirstRun] = useState(false); // an empty database: the Tutorial is offered
   const [seriesMode, setSeriesMode] = useState(false);
   // "Submit a series" from the Series page opens the form in series mode.
   useEffect(() => { if (new URLSearchParams(window.location.search).get('series')) setSeriesMode(true); }, []);
@@ -445,7 +450,14 @@ function Submission() {
           standard_wt: settings.internal_standard?.wt_percent,
         });
         if (settings.internal_standard) setStandardOpen(true);
-        setAnalysisMode(settings.analysis_mode);
+        // An identification is a search-match result, not a form mode: the form keeps a search mode.
+        const identification = settings.analysis_mode === 'identification';
+        const mode = identification ? 'elemental' : settings.analysis_mode;
+        if (identification) form.setFieldsValue({ analysis_mode: mode });
+        setAnalysisMode(mode);
+        if (identification || new URLSearchParams(window.location.search).get('search') === '1') {
+          setReopenSearch({ selected: settings.reference_ids || [], background: settings.background || null, theoretical: settings.include_theoretical });
+        }
         setSynchrotron(isSync);
         setPreviousInstrument(settings.instrument_profile);
         setCloneSource(data);
@@ -642,6 +654,19 @@ function Submission() {
       form.getFieldInstance(name)?.focus?.({ preventScroll: true });
     }, 0);
   };
+  // Opened in the render where the clone is in place, so the ranking request carries its stored pattern.
+  useEffect(() => {
+    if (!reopenSearch || !cloneSource) return;
+    setReopenSearch(null);
+    quick.open(reopenSearch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reopenSearch, cloneSource]);
+  useEffect(() => {
+    let active = true;
+    fetch(`${URL}/tasks?page=1&limit=1&user=`).then(response => (response.ok ? response.json() : null))
+      .then(body => { if (active && body?.total_tasks === 0) setFirstRun(true); }).catch(() => {});
+    return () => { active = false; };
+  }, []);
   const openSearchMatch = () => {
     setRecentElements(rememberElements(browserStorage(), checkElements(form.getFieldValue('elements')).symbols));
     quick.open();
@@ -652,7 +677,10 @@ function Submission() {
     if (!unsaved) return undefined;
     const warn = event => { if (!leaving.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', warn);
-    return () => window.removeEventListener('beforeunload', warn);
+    // The header's links change the route without unloading: they ask through the leave guard.
+    const unguard = setLeaveGuard(() => (leaving.current ? null
+      : 'The loaded pattern, its settings and the search-match ranking on this page are not kept.'));
+    return () => { window.removeEventListener('beforeunload', warn); unguard(); };
   }, [unsaved]);
 
   // "Save identification": the selected phases as the result, without refinement. Uses the ranking's
@@ -672,15 +700,8 @@ function Submission() {
     }
     let body;
     try {
+      // A rerun without a new file sends `source_task_id`: the server reuses the stored pattern.
       body = quickRankingRequest();
-      if (body.has('source_task_id')) {
-        // shortcut: /identification takes an uploaded file only; a rerun sends the source task's measured pattern (no recorded-anode check).
-        const sourceId = body.get('source_task_id');
-        const response = await fetch(`${URL}/task/${sourceId}/pattern.xy`);
-        if (!response.ok) throw new Error(`The stored pattern of Task ${sourceId} could not be loaded (HTTP ${response.status}).`);
-        body.delete('source_task_id');
-        body.append('pattern_file', new File([await response.blob()], `${cloneSource.filename.replace(/\.[^.]*$/, '')}.xy`));
-      }
     } catch (error) {
       setMsg(String(error.message || error));
       return false;
@@ -972,6 +993,7 @@ function Submission() {
           <>Radiation {wavelengthSummary}</>, rangeSummary]} /> : null}
       <Container hidden={quick.shown}>
         <h1 className="dara-sr-only">New analysis</h1>
+        {firstRun ? <p className="dara-first-run">No analyses yet. The <a href="/tutorial/">tutorial</a> walks through a first one, from the pattern to the adopted fit.</p> : null}
         <Form className="dara-submit-layout" layout="vertical" form={form}
           initialValues={{
             analysis_mode: 'elemental', temperature: 800, atmosphere: 'air', use_cod: true,

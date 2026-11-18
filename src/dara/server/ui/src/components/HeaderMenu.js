@@ -1,14 +1,14 @@
-import { Menu, Switch } from 'antd';
+import { Menu, Modal, Switch } from 'antd';
 import styled from 'styled-components';
 import { useEffect, useState } from 'react';
-import { Link } from 'gatsby';
+import { Link, navigate } from 'gatsby';
+import { leaveWarning } from './leaveGuard.mjs';
 import React from 'react';
 import UpdateDialog from './UpdateDialog';
 import { UPDATE_CHECK_MS, showUpdateTag } from './appUpdate.mjs';
 import useAdvancedTools from './useAdvancedTools';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
-const PAGES = ['submit', 'results', 'series', 'tutorial'];
 
 const StyledMenu = styled(Menu)`
   border-bottom: none;
@@ -19,6 +19,23 @@ function keyForPath(pathname) {
   const first = pathname.split('/').filter(Boolean)[0];
   if (!first) return 'submit';
   return ['task', 'compare'].includes(first) ? 'results' : first;
+}
+
+/**
+ * A header link that asks first when the page holds unsaved work (a loaded pattern, a ranking):
+ * client-side route changes do not fire `beforeunload`.
+ */
+export function GuardedLink({ to, children, ...props }) {
+  const onClick = event => {
+    const warning = leaveWarning();
+    if (!warning || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey) return;
+    event.preventDefault();
+    Modal.confirm({
+      title: 'Leave this page?', content: warning, okText: 'Leave', cancelText: 'Stay',
+      onOk: () => navigate(to),
+    });
+  };
+  return <Link to={to} onClick={onClick} {...props}>{children}</Link>;
 }
 
 function HeaderMenu() {
@@ -39,12 +56,6 @@ function HeaderMenu() {
     return () => clearInterval(timer);
   }, []);
 
-  const handleSelect = ({ key }) => {
-    if (PAGES.includes(key)) {  // documentation leaves the app; version and update items open no page
-      set_selected_key(key);
-    }
-  };
-
   const handleClick = ({ key }) => {
     if (key === 'update' || key === 'check-update') set_update_open(true);
     if (key === 'advanced') set_advanced(!advanced);
@@ -52,24 +63,23 @@ function HeaderMenu() {
 
   return (
     <>
-    <StyledMenu mode='horizontal' 
-      activeKey={[selected_key]}
-      defaultActiveFirst={[selected_key]}
+    {/* Uncontrolled active item: rc-menu moves it with the arrow keys (Enter or Down opens Help). */}
+    <StyledMenu mode='horizontal'
+      // The selected item follows the page (each page mounts the header): a click that the leave
+      // guard stops must not mark another page.
       selectedKeys={[selected_key]}
-      defaultSelectedKeys={[selected_key]}
-      onSelect={handleSelect}
       onClick={handleClick}
       inlineCollapsed={false}
       disabledOverflow
     >
       <Menu.Item key='submit' title='Submit'>
-        <Link to='/'>Submit</Link>
+        <GuardedLink to='/'>Submit</GuardedLink>
       </Menu.Item>
       <Menu.Item key='results' title='Results'>
-        <Link to='/results'>Results</Link>
+        <GuardedLink to='/results/'>Results</GuardedLink>
       </Menu.Item>
       <Menu.Item key='series' title='Series'>
-        <Link to='/series'>Series</Link>
+        <GuardedLink to='/series/'>Series</GuardedLink>
       </Menu.Item>
       {showUpdateTag(update) ? (
         <Menu.Item key='update' title={`DARA ${update.latest} is available`}>
@@ -78,16 +88,17 @@ function HeaderMenu() {
       ) : null}
       <Menu.SubMenu key='help' title='Help'>
         <Menu.Item key='tutorial' title='Tutorial'>
-          <Link to='/tutorial'>Tutorial</Link>
+          <GuardedLink to='/tutorial/'>Tutorial</GuardedLink>
         </Menu.Item>
         <Menu.Item key='doc' title='Documentation'>
           <a href="https://CederGroupHub.github.io/dara/" target="_blank" rel="noopener noreferrer">Documentation</a>
         </Menu.Item>
         <Menu.Divider />
         {/* A per-browser preference: crystallite size, unit cell, RIR, Le Bail and the FWHM curve. */}
-        <Menu.Item key='advanced' title='Show the specialist tools: crystallite size and strain, unit cell, RIR, Le Bail fit, instrument FWHM curve'>
+        <Menu.Item key='advanced' role='menuitemcheckbox' aria-checked={advanced} title='Show the specialist tools: crystallite size and strain, unit cell, RIR, Le Bail fit, instrument FWHM curve'>
           <span className='dara-menu-switch'>Advanced analysis tools
-            <Switch size='small' checked={advanced} aria-label='Advanced analysis tools' tabIndex={-1} /></span>
+            {/* The menu item takes the keyboard (Enter); the switch only shows the state. */}
+            <Switch size='small' checked={advanced} aria-hidden='true' tabIndex={-1} /></span>
         </Menu.Item>
         {update?.packaged ? <Menu.Item key='check-update'>Check for updates</Menu.Item> : null}
         {update ? <Menu.Item key='version' disabled className='dara-version-item'>{`DARA ${update.current}`}</Menu.Item> : null}

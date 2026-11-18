@@ -1,7 +1,7 @@
 import React from 'react';
 import { Alert, Button, Input, message, Modal, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import { EditOutlined, InfoCircleOutlined, SaveOutlined } from '@ant-design/icons';
-import { runAfterSuccess } from './submitHelpers.mjs';
+import { readRemembered, runAfterSuccess } from './submitHelpers.mjs';
 import { API, NOT_AVAILABLE, postJson, requestJson } from './QuickRefineProgress';
 import { DEFAULT_CONTROLS, RefinementControlsEditor } from './PracticalControls';
 import { selectionQuery, withHkl } from './confidence.mjs';
@@ -35,7 +35,8 @@ export function useTaskReview(taskId) {
     try {
       const body = await responseJson(await fetch(`${API}/task/${taskId}/review`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selection: choice, notes }),
+        // The adopter is the user name remembered by the Submit form (the one "My tasks" uses), if any.
+        body: JSON.stringify({ selection: choice, notes, adopted_by: String(readRemembered(window.localStorage)?.fields?.user || '').trim() || null }),
       }));
       // Already saved on the server; UI follow-up problems must not look like a failed save.
       runAfterSuccess([

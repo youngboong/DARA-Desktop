@@ -1,47 +1,24 @@
 import React from 'react';
-import styled from 'styled-components';
+import { Button } from 'antd';
 import Layout from '../components/Layout';
 
-const NotFoundContainer = styled.div`
-  font-size: 24px;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  align-content: center;
-
-  .not-found-code {
-    font-size: 128px;
-    color: #a0a0a0;
-    font-weight: 500;
-  }
-
-  .not-found-info {
-    text-align: center
-  }
-
-  & code {
-    background-color: rgba(0, 0, 0, 0.1);
-    border-radius: 6px;
-    padding: .2em .4em;
-    font-size: 85%;
-  }
-`
-
 function NoFoundPage() {
-  const PATH_NAME = typeof window !== 'undefined' ? window.location.pathname : ''
+  const [path, setPath] = React.useState('');
+  // Read after mount, so the server-rendered page and the first client render agree.
+  React.useEffect(() => { setPath(window.location.pathname); }, []);
   return (
-    <Layout hasSider={false} title="Not Found">
-      <NotFoundContainer className='not-found'>
-        <div className='not-found-code'>
-          404
+    <Layout hasSider={false} title="Page not found">
+      <div className="dara-empty" role="alert">
+        <h3>Page not found</h3>
+        <p>{path ? <><code>{path}</code> does not exist in DARA. </> : 'This page does not exist in DARA. '}
+          The address may be incomplete, or the task or series it pointed to was deleted.</p>
+        <div className="dara-empty-actions">
+          <Button type="primary" href="/results/">Results</Button>
+          <Button href="/">Submit a pattern</Button>
         </div>
-        <div className='not-found-info'>
-          {PATH_NAME ? <code>{PATH_NAME}</code> : "This page"} not found in this site.
-        </div>
-      </NotFoundContainer>
+      </div>
     </Layout>
-  )
+  );
 }
 
 export default NoFoundPage;

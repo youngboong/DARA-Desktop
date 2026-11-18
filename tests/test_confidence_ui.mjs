@@ -11,7 +11,7 @@ assert.equal(overallAlertType('expert'), 'error');
 assert.equal(overallAlertType(undefined), 'info');
 assert.equal(overallColor('high'), 'green');
 assert.equal(overallColor('check'), 'gold');
-assert.equal(overallColor('expert'), 'red');
+assert.equal(overallColor('expert'), 'lime');
 assert.equal(overallColor(null), 'default');
 assert.equal(verdictColor('confident'), 'green');
 assert.equal(verdictColor('ambiguous'), 'gold');

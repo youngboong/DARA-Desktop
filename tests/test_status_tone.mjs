@@ -13,7 +13,7 @@ assert.equal(stateTone(undefined), null);
 assert.equal(levelTone('high'), 'ok');
 assert.equal(levelTone('check'), 'review');
 assert.equal(levelTone('ambiguous'), 'review');
-assert.equal(levelTone('expert'), 'fail');
+assert.equal(levelTone('expert'), 'escalate'); // red means failure only
 assert.equal(levelTone('weak'), 'fail');
 assert.equal(levelTone('unknown'), 'neutral');
 assert.equal(severityTone('warning'), 'review');

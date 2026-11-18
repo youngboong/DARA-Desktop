@@ -46,7 +46,7 @@ Click on "Submit" in the navigation menu to access the submission form.
 
 Select one of three analysis modes. The fields below the selector change with the mode.
 
-- **Phase identification**: DARA searches the databases for the phases in your pattern. Enter the elements, or the formulas of the starting materials or the expected phases.
+- **Phase search + Rietveld**: DARA searches the databases for the phases in your pattern. Enter the elements, or the formulas of the starting materials or the expected phases.
 - **Known-phase refinement**: DARA refines only the phases you list under "Phases to refine". Use it when you already know what is in the sample.
 - **Reaction check**: DARA compares your formulas with a predicted reaction at a given temperature (27 to 1727 °C) and atmosphere.
 
@@ -79,28 +79,45 @@ Select your diffractometer configuration from the dropdown.
 
 Click "Submit Analysis" to queue your job. You will see if there is any error in the submission. Otherwise, you will see the task submitted successfully and appear in the results page.
 
-## Monitoring Your Analysis
+## Search-match and identification
 
-### Results Page
+Search-match ranks reference structures against your pattern in seconds, as HighScore and Match! do. Load a pattern, enter the elements or formulas, then click **Search-match** in the run card of the Submit page.
 
-Navigate to "Results" to see all submitted analyses:
+- The candidate table lists the matching structures with their score and how much of the pattern they explain. Click a candidate to preview its reflections on the pattern; tick it to select it.
+- **Residual** shows what the selected phases leave unexplained, with the best matches for the peaks that remain.
+- **Background…** sets the background removed before ranking: Automatic, or Granularity / bending as in HighScore. The curve is drawn on the pattern while you move the sliders; "Accept and rank again" ranks with it.
+- **Refine with Rietveld** submits a Known-phase refinement of the selected structures (minutes).
+- **Save identification** stores the selected phases as the result without refinement. An identification has no Rwp; its amounts are estimated from reference intensity ratios (RIR).
 
-**Table Columns:**
-- **ID #**: Unique task identifier
-- **Name**: Original filename
-- **Status**: Current processing state
-  - 🔵 `PENDING`: Waiting in queue
-  - 🟡 `RUNNING`: Currently processing
-  - 🟢 `COMPLETED`: Analysis finished successfully
-  - 🔴 `FIZZLED`: Analysis failed with error
-- **Created**: Submission timestamp
-- **Submitted by**: Username
+To change the phases of a saved identification, open its task and click **Edit phases (Search-match)**: the search-match opens again on the stored pattern with those phases selected. Saving makes a new task; the first one is kept.
 
-**Filtering:**
-Use the search box to filter results by username.
+## Results
 
-**Pagination:**
-Navigate through results using the pagination controls at the bottom.
+Navigate to "Results" to follow and review the submitted analyses. The list updates by itself while tasks are queued or running.
+
+**Columns:**
+- **ID**: task number.
+- **Name**: the sample name, then the file name in smaller type. A long file name keeps its end (for example `--8min.xrdml`). The red mark (`v1`, `v2`, `#3`) shows which fit is adopted; "rerun of #120" links to the task it was copied from. Running tasks show their stage and progress under the name, queued tasks their place in the queue, failed tasks the reason.
+- **Verdict**: for a completed task, the confidence of the result: **High**, **Check** or **Expert review**; **No fit** when the search found no phase set. Other tasks show their state: Queued, Running, Stopping, Failed or Cancelled. Red is used for failures only.
+- **Rwp (%)** and **GOF**: of the adopted fit, or of the automatic fit when nothing is adopted.
+- **Final phases**, **Submitted** (date and time) and **User**.
+
+Click a column title to sort by name, verdict, Rwp, GOF or submission time; the sort applies to every page.
+
+**Filters:** search the sample or file name, pick **My tasks** (the user name you last submitted with) or **All users**, or type part of a user name. **Status** and **Verdict** narrow the list further; **Clear filters** removes them. Filters, sort, page and selection stay in the address, so Back from a task returns to the same view.
+
+**Reviewing several samples:** open a task from the list. The arrows beside the task title (or the `[` and `]` keys) open the previous and next sample of the list page, and the "Results" link returns to the same view.
+
+**Selected tasks:** tick rows on any page.
+- **Compare patterns** overlays 2 to 20 completed patterns (stack, map or difference).
+- **Export table (CSV)** writes one row per phase of the adopted fit of each selected task; its menu also exports every task matching the filter. The first export of a set takes 10–20 s per 50 tasks.
+- The **selected** menu retries failed tasks whose failure is usually temporary, deletes the selected tasks (queued and running tasks are skipped) or clears the selection.
+
+Each row's download button saves that task's results as a ZIP; its **More actions** menu reruns the task with the same settings, retries a failed task, stops a running one or removes a queued one from the queue.
+
+## Advanced analysis tools
+
+**Help → Advanced analysis tools** switches on the specialist tools on the task page: crystallite size and strain, unit cell, RIR quantification, Le Bail fit and the instrument FWHM curve. The setting is kept per browser; the routine result (fit, phases, amounts, exports) does not need it.
 
 ## Interpreting Results
 

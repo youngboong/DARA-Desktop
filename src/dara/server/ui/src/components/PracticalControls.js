@@ -1,8 +1,8 @@
 import React from 'react';
 import { runAfterSuccess } from './submitHelpers.mjs';
 import { stateLabel } from './resultsList.mjs';
-import { Alert, Button, Checkbox, Form, Input, InputNumber, message, Modal, Progress, Radio, Select, Space, Tag, Tooltip } from 'antd';
-import { QuestionCircleOutlined } from '@ant-design/icons';
+import { Alert, Button, Checkbox, Form, Input, InputNumber, message, Modal, Progress, Radio, Select, Space, Tag, Tooltip, Upload } from 'antd';
+import { QuestionCircleOutlined, UploadOutlined } from '@ant-design/icons';
 import { API } from './QuickRefineProgress';
 export const DEFAULT_CONTROLS = { lattice: 'inherit', lattice_percent: 2, orientation: 'inherit', peak_width: 'inherit' };
 
@@ -143,7 +143,19 @@ function InstrumentSetupFields({ form }) {
   </div>;
 }
 
+const PATTERN_FILES = '.xy,.xye,.xrdml,.raw,.rasx,.txt,.scn,.ras,.brml,.csv,.dat,.asc'; // as the Submit form
+
+/** One file picked with antd's Upload (English labels, like the rest of the app), not sent until submit. */
+function FilePick({ file, onChange, accept, label }) {
+  return <Upload accept={accept} maxCount={1} fileList={file ? [file] : []}
+    beforeUpload={picked => { onChange(picked); return false; }} onRemove={() => { onChange(null); }}>
+    <Button icon={<UploadOutlined />} aria-label={label}>Select file</Button>
+  </Upload>;
+}
+
 // Fits DetW of a profile with a device file (.sav) to a measured standard; saves a new profile.
+// The job lives on the server (about 40 min): opening the dialog re-attaches to a running one, and a
+// failed status request is retried instead of dropping the job.
 export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibrated }) {
   const [open, setOpen] = React.useState(false);
   const [standard, setStandard] = React.useState('LaB6');
@@ -151,22 +163,47 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
   const [file, setFile] = React.useState(null);
   const [job, setJob] = React.useState(null);
   const [error, setError] = React.useState('');
+  const [statusError, setStatusError] = React.useState(''); // a status request failed; polling goes on
+  const [tick, setTick] = React.useState(0);
   const running = job?.status === 'running';
   const done = React.useRef(onCalibrated);
   done.current = onCalibrated;  // the parent passes a new function on every render
+  // On mount and on opening: a calibration started earlier (another tab, before a reload) is shown again.
+  React.useEffect(() => {
+    if (job) return undefined;
+    let active = true;
+    fetch(`${API}/instrument-profiles/calibrate`)
+      .then(response => (response.ok ? response.json() : null))
+      .then(body => {
+        const current = body?.running ? (body.jobs || []).find(item => item.id === body.running) : null;
+        if (active && current) setJob(current);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
   React.useEffect(() => {
     if (!running) return undefined;
     const timer = setTimeout(async () => {
       try {
         const response = await fetch(`${API}/instrument-profiles/calibrate/${job.id}`);
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.detail || 'Calibration status unavailable');
+        const body = await response.json().catch(() => ({}));
+        if (response.status === 404) {
+          setJob(null);
+          setError('The server no longer knows this calibration (DARA was restarted). Start it again.');
+          return;
+        }
+        if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+        setStatusError('');
         setJob(body);
         if (body.status === 'done') done.current(body.result, body.fwhm_curve);
-      } catch (e) { setError(e.message); setJob(null); }
+      } catch (e) {
+        setStatusError(e instanceof TypeError ? 'The DARA server did not answer' : e.message);
+        setTick(value => value + 1);
+      }
     }, 5000);
     return () => clearTimeout(timer);
-  }, [job, running]);
+  }, [job, running, tick]);
   const start = async () => {
     if (!file) { message.error('Select the measured standard pattern.'); return; }
     const data = new FormData();
@@ -192,10 +229,11 @@ export function CalibrateProfile({ profile, enabled, wavelength = 'Cu', onCalibr
           options={[{ value: 'LaB6', label: 'LaB6 (Pm-3m)' }, { value: 'Si', label: 'Si (Fd-3m)' }, { value: 'Al2O3', label: 'Al2O3 corundum' }]} /></label>
         <label>Radiation<br /><Select aria-label="Calibration radiation" value={radiation} onChange={setRadiation} style={{ width: 100 }}
           options={['Cu', 'Co', 'Cr', 'Fe', 'Mo'].map(value => ({ value, label: value }))} /></label>
-        <label>Measured standard pattern<br /><input aria-label="Standard pattern file" type="file" onChange={e => setFile(e.target.files[0])} /></label>
+        <div>Measured standard pattern<br /><FilePick file={file} onChange={setFile} accept={PATTERN_FILES} label="Select the standard pattern file" /></div>
       </Space> : null}
       {running ? <><Progress percent={Math.round(100 * job.completed / job.total)} status="active" />
-        <p>{job.completed} / {job.total} profile compiles finished (3–15 min each; smaller DetW takes longer).</p></> : null}
+        <p>{`“${job.profile}” with ${job.standard}: `}{job.completed} / {job.total} profile compiles finished (3–15 min each; smaller DetW takes longer).</p>
+        {statusError ? <Alert type="warning" showIcon message={`Status not updated: ${statusError}. Retrying every 5 s; the calibration continues on the server.`} /> : null}</> : null}
       {job?.status === 'failed' ? <Alert type="error" showIcon message="Calibration failed" description={job.error} /> : null}
       {fit ? <Alert type="success" showIcon message={`Saved and selected: ${result.label}`}
         description={<>DetW {fit.detw_start} → {fit.detw} mm · Rwp {fit.rwp_start.toFixed(2)} → {fit.rwp.toFixed(2)} %<br />
@@ -258,8 +296,10 @@ export function InstrumentManager({ onRegistered, buttonLabel = 'Register instru
         <Form.Item name="radiation" label="Radiation (e.g. Cu Kα)" rules={[{required:true}]}><Input maxLength={60} /></Form.Item>
         {mode === 'build' ? <InstrumentSetupFields form={form} /> : <>
           <Form.Item name="geometry" label="Geometry, slits and detector" rules={[{required:true}]}><Input maxLength={250} /></Form.Item>
-          <p><label>Compiled GEQ (required)<input aria-label="GEQ profile file" type="file" accept=".geq" onChange={e => setFiles({...files,geq:e.target.files[0]})} /></label></p>
-          <p><label>Matching GER (optional)<input aria-label="GER profile file" type="file" accept=".ger" onChange={e => setFiles({...files,ger:e.target.files[0]})} /></label></p>
+          <Form.Item label="Compiled GEQ (required)" required>
+            <FilePick file={files.geq} accept=".geq" label="Select the GEQ profile file" onChange={geq => setFiles(previous => ({ ...previous, geq }))} /></Form.Item>
+          <Form.Item label="Matching GER (optional)">
+            <FilePick file={files.ger} accept=".ger" label="Select the GER profile file" onChange={ger => setFiles(previous => ({ ...previous, ger }))} /></Form.Item>
           <Form.Item name="verified" valuePropName="checked"><Checkbox>Verified against a standard by an operator</Checkbox></Form.Item>
           <Form.Item name="verified_by" label="Verified by"><Input maxLength={120} /></Form.Item>
         </>}

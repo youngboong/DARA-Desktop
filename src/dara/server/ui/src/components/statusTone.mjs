@@ -2,9 +2,10 @@
 // preset-colour rules in tokens.css; the antd preset name below is only the hook for those rules.
 // Rules: Completed has no colour; red means failure only; "review" is amber; metrics are neutral
 // unless a threshold the app already uses is violated. Tags always keep their words.
-// "Check recommended" is amber; "Expert review recommended" is light red (tag and banner) to stand above it.
+// "Check recommended" is amber; "Expert review recommended" is amber too (red means failure only) and
+// stands above it by a stronger border and weight (role "escalate", drawn by the `lime` preset rule).
 
-export const TONE_COLOR = { ok: 'green', review: 'gold', fail: 'red', info: 'blue', neutral: 'default' };
+export const TONE_COLOR = { ok: 'green', review: 'gold', escalate: 'lime', fail: 'red', info: 'blue', neutral: 'default' };
 
 /** antd Tag `color` for a role (`undefined` role = no colour). */
 export const toneColor = role => (role ? TONE_COLOR[role] || 'default' : undefined);
@@ -20,7 +21,7 @@ export function stateTone(state) {
   }
 }
 
-const LEVEL_TONE = { high: 'ok', confident: 'ok', check: 'review', ambiguous: 'review', expert: 'fail', weak: 'fail' };
+const LEVEL_TONE = { high: 'ok', confident: 'ok', check: 'review', ambiguous: 'review', expert: 'escalate', weak: 'fail' };
 /** Overall confidence or phase verdict level. */
 export const levelTone = level => LEVEL_TONE[level] || 'neutral';
 
