@@ -11,7 +11,7 @@ const { Text } = Typography;
 
 const ORIGIN_LABEL = {
   automatic: 'Automatic', add_hint: 'Hint', add_peak_search: 'Peak search', swap: 'Swap',
-  remove: 'Remove', background: 'Background', manual: 'Manual', refine_all: 'Refine all', structure: 'Structure',
+  remove: 'Remove', background: 'Background', manual: 'Manual', refine_all: 'Refine all', structure: 'Structure', le_bail: 'Le Bail',
 };
 
 export const VERSIONS_POLL_MS = 15000;

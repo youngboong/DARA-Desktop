@@ -69,7 +69,10 @@ function ConstraintRow({ item, sites, onChange, onRemove }) {
  * and occupancy constraints, then start a version (origin "structure"). Eligibility, sites and the
  * parameter limit come from GET /task/{id}/structure-sites; the server checks every rule again on submit.
  */
-export default function StructureRefineDrawer({ taskId, sel, phases, renderPhase, open, onClose, busy, onSubmit }) {
+// A Le Bail phase has free reflection intensities: there is no structure model to refine.
+const LE_BAIL_REFUSAL = { code: 'le_bail', message: 'Fitted by Le Bail: no structure model to refine. Return it to Rietveld first (Refine › Le Bail fit of a phase…).' };
+
+export default function StructureRefineDrawer({ taskId, sel, phases, renderPhase, open, onClose, busy, onSubmit, leBail = [] }) {
   const [info, setInfo] = React.useState({});
   const [loading, setLoading] = React.useState(false);
   const [phase, setPhase] = React.useState(null);
@@ -84,12 +87,13 @@ export default function StructureRefineDrawer({ taskId, sel, phases, renderPhase
       .catch(error => ({ phase: name, eligible: false, sites: [], refusals: [{ code: 'unsupported_structure', message: error.message }], warnings: [] }))))
       .then(list => {
         if (!active) return;
-        setInfo(Object.fromEntries(list.map(item => [item.phase, item])));
+        setInfo(Object.fromEntries(list.map(item => [item.phase, leBail.includes(item.phase)
+          ? { ...item, eligible: false, refusals: [LE_BAIL_REFUSAL] } : item])));
         setLoading(false);
       });
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, taskId, sel, phasesKey]);
+  }, [open, taskId, sel, phasesKey, leBail.join('|')]);
 
   // The first eligible phase is preselected; a phase that is gone from the list is dropped.
   React.useEffect(() => {

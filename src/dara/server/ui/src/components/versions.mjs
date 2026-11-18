@@ -248,17 +248,30 @@ export function weightRows(a, b, symbolOf = () => null) {
   });
 }
 
+/**
+ * Phases of a fit fitted by Le Bail (no weight fraction): `le_bail_phases` of a version or
+ * fit-compare side, or `phase_details[name].le_bail` of a result.
+ */
+export function leBailPhases(fit) {
+  if (Array.isArray(fit?.le_bail_phases)) return fit.le_bail_phases;
+  return Object.entries(fit?.phase_details || {}).filter(([, detail]) => detail?.le_bail).map(([name]) => name);
+}
+
 function identityRows(a, b) {
   const groups = new Map();
   [['a', a], ['b', b]].forEach(([side, fit]) => {
     const identity = fit?.phase_identity || {};
-    Object.entries(fit?.weight_percent || {}).forEach(([name, value]) => {
+    const weights = fit?.weight_percent || {};
+    // A Le Bail phase has no weight: its row comes from the phase list (identity keys).
+    const leBail = new Set(leBailPhases(fit));
+    const names = [...new Set([...Object.keys(weights), ...Object.keys(identity), ...leBail])];
+    names.map(name => [name, weights[name]]).forEach(([name, value]) => {
       const number = spacegroupOfPhase(name);
       // Disordered CIFs (Y31.99952O47.99904) share the row of their reduced formula (Y2O3).
       const raw = identity[name] || (number == null ? `name:${name}` : `${formulaOfPhase(name)}_${number}`);
       const key = raw.replace(/^[^_:]+(?=_)/, formula => tidyFormula(formula));
       if (!groups.has(key)) groups.set(key, { a: [], b: [] });
-      groups.get(key)[side].push({ name, value: finite(value) ? Number(value) : null });
+      groups.get(key)[side].push({ name, value: finite(value) ? Number(value) : null, leBail: leBail.has(name) });
     });
   });
   const byWeight = (x, y) => (y.value ?? -Infinity) - (x.value ?? -Infinity);
@@ -276,6 +289,8 @@ function identityRows(a, b) {
         names,
         a: group.a[i]?.value ?? null,
         b: group.b[i]?.value ?? null,
+        aLeBail: Boolean(group.a[i]?.leBail),
+        bLeBail: Boolean(group.b[i]?.leBail),
       };
     });
   });
@@ -450,6 +465,16 @@ export function removeRequest(phaseName) {
   };
 }
 
+/**
+ * Quick-refine request that fits `target` by Le Bail, or returns it to Rietveld when it already is
+ * one of `current` (the displayed fit's Le Bail phases). BGMN fits one Le Bail phase per run, so
+ * another Le Bail phase goes back to Rietveld in the same request.
+ */
+export function leBailRequest(target, current = []) {
+  const others = current.filter(name => name !== target).map(name => [name, false]);
+  return { origin: 'le_bail', le_bail: { ...Object.fromEntries(others), [target]: !current.includes(target) } };
+}
+
 const METRICS = [
   { key: 'rwp', label: 'Rwp', digits: 2, read: s => s?.fit_quality?.rwp ?? s?.rwp },
   { key: 'gof', label: 'GOF', digits: 2, read: s => s?.fit_quality?.gof ?? s?.gof },
@@ -477,14 +502,22 @@ export function deltaStrip(base, next, symbolOf = () => null) {
   });
   const wa = base?.weight_percent || {};
   const wb = next?.weight_percent || {};
-  const phases = [...new Set([...Object.keys(wa), ...Object.keys(wb)])];
+  const [la, lb] = [new Set(leBailPhases(base)), new Set(leBailPhases(next))];
+  const phases = [...new Set([...Object.keys(wa), ...Object.keys(wb), ...la, ...lb])];
+  // Fractions relative to the Rietveld phases (a Le Bail phase is left out) are not comparable
+  // with absolute ones: such a row shows both values without a difference.
+  const relativeA = Boolean(base?.weights_relative);
+  const relativeB = Boolean(next?.weights_relative);
   // A formula that occurs twice (Fe2O3 R-3c and R-3m) gets its space group, as in phaseLabels.
   const labels = phaseLabels(phases, symbolOf);
   for (const [i, phase] of phases.entries()) {
     const a = finite(wa[phase]) ? Number(wa[phase]) : null;
     const b = finite(wb[phase]) ? Number(wb[phase]) : null;
-    rows.push({ key: `wt:${phase}`, label: `${labels[i]} wt%`, phase, a, b, digits: 2,
-      delta: a !== null && b !== null ? b - a : null, better: false });
+    const leBailA = la.has(phase);
+    const leBailB = lb.has(phase);
+    rows.push({ key: `wt:${phase}`, label: `${labels[i]} wt%`, phase, a, b, digits: 2, leBailA, leBailB,
+      relative: !leBailB && relativeB ? 'b' : !leBailA && relativeA ? 'a' : null,
+      delta: a !== null && b !== null && relativeA === relativeB ? b - a : null, better: false });
   }
   return rows;
 }
@@ -506,6 +539,13 @@ export function deltaBaseText(base, allResults = []) {
 /** Text for a delta row such as `7.10 → 6.20 (−0.90)`. */
 export function deltaText(row) {
   const d = row.digits ?? 2;
+  // A Le Bail phase has no amount; relative fractions are marked as such.
+  const side = (value, leBail, relative) => (leBail ? 'Le Bail' : `${fixed(value, d)}${relative ? ' (relative)' : ''}`);
+  if (row.leBailA || row.leBailB) {
+    if (row.leBailA && row.leBailB) return 'Le Bail';
+    return `${side(row.a, row.leBailA, row.relative === 'a')} → ${side(row.b, row.leBailB, row.relative === 'b')}`;
+  }
+  if (row.relative && row.a !== null && row.b !== null) return `${side(row.a, false, row.relative === 'a')} → ${side(row.b, false, row.relative === 'b')}`;
   // A phase only in one fit reads as added or removed, not as "— → 28.99".
   if (row.a === null && row.b !== null) return `new ${fixed(row.b, d)}`;
   if (row.b === null && row.a !== null) return `removed (was ${fixed(row.a, d)})`;

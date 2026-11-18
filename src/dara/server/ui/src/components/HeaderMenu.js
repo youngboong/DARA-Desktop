@@ -1,10 +1,11 @@
-import { Menu } from 'antd';
+import { Menu, Switch } from 'antd';
 import styled from 'styled-components';
 import { useEffect, useState } from 'react';
 import { Link } from 'gatsby';
 import React from 'react';
 import UpdateDialog from './UpdateDialog';
 import { UPDATE_CHECK_MS, showUpdateTag } from './appUpdate.mjs';
+import useAdvancedTools from './useAdvancedTools';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const PAGES = ['submit', 'results', 'series', 'tutorial'];
@@ -24,6 +25,7 @@ function HeaderMenu() {
   const [ selected_key, set_selected_key ] = useState('');
   const [ update, set_update ] = useState(null);
   const [ update_open, set_update_open ] = useState(false);
+  const [ advanced, set_advanced ] = useAdvancedTools();
 
   // Read the path after mount so the server-rendered markup matches the first client render.
   useEffect(() => { set_selected_key(keyForPath(window.location.pathname)); }, []);
@@ -45,6 +47,7 @@ function HeaderMenu() {
 
   const handleClick = ({ key }) => {
     if (key === 'update' || key === 'check-update') set_update_open(true);
+    if (key === 'advanced') set_advanced(!advanced);
   };
 
   return (
@@ -80,7 +83,12 @@ function HeaderMenu() {
         <Menu.Item key='doc' title='Documentation'>
           <a href="https://CederGroupHub.github.io/dara/" target="_blank" rel="noopener noreferrer">Documentation</a>
         </Menu.Item>
-        {update ? <Menu.Divider /> : null}
+        <Menu.Divider />
+        {/* A per-browser preference: crystallite size, unit cell, RIR, Le Bail and the FWHM curve. */}
+        <Menu.Item key='advanced' title='Show the specialist tools: crystallite size and strain, unit cell, RIR, Le Bail fit, instrument FWHM curve'>
+          <span className='dara-menu-switch'>Advanced analysis tools
+            <Switch size='small' checked={advanced} aria-label='Advanced analysis tools' tabIndex={-1} /></span>
+        </Menu.Item>
         {update?.packaged ? <Menu.Item key='check-update'>Check for updates</Menu.Item> : null}
         {update ? <Menu.Item key='version' disabled className='dara-version-item'>{`DARA ${update.current}`}</Menu.Item> : null}
       </Menu.SubMenu>

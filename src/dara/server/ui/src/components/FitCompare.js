@@ -77,8 +77,10 @@ export default function FitCompare({ taskId, a, b, open, onClose, onAdoptB, adop
   const rows = data ? [
     { key: 'rwp', metric: 'Rwp (%)', a: fixed(data.a?.rwp), b: fixed(data.b?.rwp) },
     { key: 'gof', metric: 'GOF', a: fixed(data.a?.gof), b: fixed(data.b?.gof) },
+    // A Le Bail phase has no amount; fractions without it are relative to the Rietveld phases.
     ...weights.map(row => ({ key: `wt:${row.key}`, metric: `${row.formula} (wt%)`, title: row.names.join(' / '),
-      a: fixed(row.a), b: fixed(row.b) })),
+      a: row.aLeBail ? 'Le Bail' : `${fixed(row.a)}${row.a != null && data.a?.weights_relative ? ' (relative)' : ''}`,
+      b: row.bLeBail ? 'Le Bail' : `${fixed(row.b)}${row.b != null && data.b?.weights_relative ? ' (relative)' : ''}` })),
     ...(massBalance ? [{ key: 'mb', metric: 'Mass balance', a: massBalanceText(data.a?.mass_balance), b: massBalanceText(data.b?.mass_balance) }] : []),
     // Same "significant (+minor)" form as the candidate and version tables.
     { key: 'unexplained', metric: 'Unexplained peaks', a: unexplainedText(data.a), b: unexplainedText(data.b) },

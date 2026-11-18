@@ -9,6 +9,8 @@ import { curveRangeText, curveText, instrumentQuery } from './instrumentCurve.mj
 import { FwhmCurveDialog } from './InstrumentFwhmCurve';
 import CellRefinementView from './CellRefinementView';
 import { DEFAULT_SHIFT_MODEL, SHIFT_MODELS } from './cellRefinement.mjs';
+import useAdvancedTools from './useAdvancedTools';
+import { shownPeakView } from './advancedTools.mjs';
 
 const { Text } = Typography;
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <Spin /> });
@@ -23,6 +25,7 @@ const INSTRUMENT_HELP = 'Instrument FWHM removed from each peak before Scherrer 
   + 'Standard curve: the Caglioti curve of a line-broadening standard measured on this instrument profile, taken at each peak\'s angle. '
   + 'Constant FWHM: one value for all angles, remembered for this profile.';
 const WH_HELP = 'Williamson–Hall: β·cos θ = K·λ/D + ε·4·sin θ, a straight line through the fitted peaks of one phase (β: Kα1 FWHM with the instrument FWHM removed, in radians). Needs 4 or more fitted peaks over at least 30° 2θ.';
+const SIZE_HELP = 'Crystallite size and microstrain from the peak widths: a Scherrer size for each observed peak and a Williamson–Hall line per phase.';
 const CELL_HELP = 'Unit-cell refinement: least-squares lattice parameters from the Kα1 positions of the indexed observed peaks of each phase, with a zero shift, a specimen displacement or an internal-standard 2θ correction.';
 const SHIFT_HELP = 'Instrumental 2θ shift refined with the cell. Zero shift and specimen displacement are not refined together: over a lab scan they are almost fully correlated. An internal standard corrects 2θ with a phase of known cell first.';
 const FIT_NOTE_HELP = {
@@ -59,12 +62,16 @@ function storeFwhm(profile, value) {
 }
 
 /**
- * "Peaks" tab of the fit view: the calculated reflections of the displayed fit, the peaks found in
- * the measured pattern with their fitted FWHM and Scherrer size, or the Williamson–Hall fit per phase.
+ * "Peaks" tab of the fit view: the calculated reflections of the displayed fit and the peaks found in
+ * the measured pattern; with the advanced analysis tools also crystallite size / microstrain
+ * (Scherrer per peak, Williamson–Hall per phase) and the unit cell from the peak positions.
  * Loads when the tab is shown.
  */
 export default function PeakListTab({ taskId, sel, active }) {
   const [view, setView] = React.useState('calculated');
+  const [advanced] = useAdvancedTools();
+  // A remembered advanced view shows "Observed peaks" while the tools are off (and fetches nothing).
+  const shown = shownPeakView(view, advanced);
   const [k, setK] = React.useState(0.89);
   const [instrument, setInstrument] = React.useState(null);
   const [profile, setProfile] = React.useState(null);
@@ -104,17 +111,18 @@ export default function PeakListTab({ taskId, sel, active }) {
   };
   const shownMode = mode ?? applied?.mode ?? (instrument ? 'constant' : 'none');
   const query = `sel=${encodeURIComponent(sel)}&${instrumentQuery({ k, mode, constant: instrument })}`;
+  const plainQuery = `sel=${encodeURIComponent(sel)}`;
   // Profiles without a file of their own (synchrotron) cannot carry a curve.
   const measurable = Boolean(profile) && profile !== 'synchrotron';
   return <>
     <div className="dara-toolbar">
       <div className="dara-toolbar-group">
-        <Radio.Group size="small" optionType="button" value={view} onChange={event => setView(event.target.value)}
+        <Radio.Group size="small" optionType="button" value={shown} onChange={event => setView(event.target.value)}
           aria-label="Peak list" options={[{ value: 'calculated', label: 'Calculated reflections' }, { value: 'observed', label: 'Observed peaks' },
-            { value: 'size', label: <Tooltip title={WH_HELP}><span>Size / strain</span></Tooltip> },
-            { value: 'cell', label: <Tooltip title={CELL_HELP}><span>Unit cell</span></Tooltip> }]} />
+            ...(advanced ? [{ value: 'size', label: <Tooltip title={SIZE_HELP}><span>Size / strain</span></Tooltip> },
+              { value: 'cell', label: <Tooltip title={CELL_HELP}><span>Unit cell</span></Tooltip> }] : [])]} />
       </div>
-      {view === 'cell' ? <div className="dara-toolbar-group" aria-label="Unit-cell settings">
+      {shown === 'cell' ? <div className="dara-toolbar-group" aria-label="Unit-cell settings">
         <label className="dara-toolbar-item">
           <Tooltip title={SHIFT_HELP}><span>Shift model</span></Tooltip>
           <Select size="small" aria-label="Shift model" value={shiftModel} onChange={setShiftModel} style={{ width: 240 }} dropdownMatchSelectWidth={false}
@@ -122,7 +130,7 @@ export default function PeakListTab({ taskId, sel, active }) {
               label: <>Internal standard: <ChemicalFormula formula={entry.label} /></> }))]} />
         </label>
       </div> : null}
-      {view !== 'observed' && view !== 'size' ? null : <div className="dara-toolbar-group" aria-label="Size estimate settings">
+      {shown !== 'size' ? null : <div className="dara-toolbar-group" aria-label="Size estimate settings">
         <Tooltip title={K_HELP}>
           <Select size="small" aria-label="Scherrer constant" value={k} onChange={setK} options={SCHERRER_K} style={{ width: 96 }} />
         </Tooltip>
@@ -137,11 +145,13 @@ export default function PeakListTab({ taskId, sel, active }) {
         {measurable && applied && !curve ? <Button type="link" size="small" onClick={() => setCurveOpen(true)}>Measure with a standard…</Button> : null}
       </div>}
     </div>
-    {view === 'observed' ? <ObservedPeaks taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
-      : view === 'size' ? <WilliamsonHall taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
-        : view === 'cell' ? <CellRefinementView taskId={taskId} sel={sel} model={shiftModel} active={active} onPhases={onCellPhases} />
+    {shown === 'observed' ? <ObservedPeaks taskId={taskId} query={plainQuery} onResponse={onResponse} active={active} />
+      : shown === 'size' ? <SizeStrain taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
+        : shown === 'cell' ? <CellRefinementView taskId={taskId} sel={sel} model={shiftModel} active={active} onPhases={onCellPhases} />
           : <CalculatedReflections taskId={taskId} sel={sel} active={active} />}
-    {measurable ? <FwhmCurveDialog profile={profile} open={curveOpen} onClose={() => setCurveOpen(false)} onChange={curveChanged} /> : null}
+    {measurable && advanced ? <FwhmCurveDialog profile={profile} open={curveOpen} onClose={() => setCurveOpen(false)} onChange={curveChanged} /> : null}
+    {advanced ? null : <Text className="dara-footnote" style={{ marginTop: 12 }}>
+      Crystallite size, unit cell, RIR and Le Bail: turn on Advanced analysis tools in the Help menu.</Text>}
   </>;
 }
 
@@ -165,10 +175,10 @@ function useSizeRequest(path, active, onResponse, reload) {
 const withEsd = (value, esd, digits) => (value == null ? '—'
   : `${Number(value).toFixed(digits)}${esd != null && Number.isFinite(esd) ? ` ± ${Number(esd).toFixed(digits)}` : ''}`);
 
-/** Peaks of the measured pattern (GET /task/{id}/observed-peaks): fitted FWHM, Scherrer size and the assignment to the reflections of the fit. */
-function ObservedPeaks({ taskId, query, onResponse, active, reload }) {
+/** Peaks of the measured pattern (GET /task/{id}/observed-peaks): position, intensity, fitted FWHM and the assignment to the reflections of the fit. */
+function ObservedPeaks({ taskId, query, onResponse, active }) {
   const [filter, setFilter] = React.useState('all');
-  const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onResponse, reload);
+  const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onResponse, 0);
 
   if (error) return <Alert type="error" showIcon message="The observed peaks could not be loaded." description={error} />;
   if (!body) return <div style={{ minHeight: 480, paddingTop: 48, textAlign: 'center' }}><Spin tip="Fitting the peaks of the measured pattern" /></div>;
@@ -176,11 +186,6 @@ function ObservedPeaks({ taskId, query, onResponse, active, reload }) {
   const rows = (body.rows || []).map((row, index) => ({ ...row, key: index, number: index + 1 }));
   const unassigned = rows.filter(row => !row.phase).length;
   const shown = filter === 'all' ? rows : rows.filter(row => (filter === 'assigned') === Boolean(row.phase));
-  const byNumber = key => (a, b) => (a[key] ?? -Infinity) - (b[key] ?? -Infinity);
-  const corrected = (body.instrument?.mode ?? 'none') !== 'none';
-  const sizeTitle = corrected
-    ? <Tooltip title="Scherrer estimate from this peak alone: K·λ / (β·cos θ), β the FWHM with the instrument FWHM at this angle removed"><span>Size (nm)</span></Tooltip>
-    : <Tooltip title="No instrument broadening removed: a lower bound. Choose a standard curve or a constant instrument FWHM to correct it."><span>Size (nm), uncorrected</span></Tooltip>;
   const columns = [
     { title: '#', dataIndex: 'number', className: 'dara-num', sorter: byNumber('number') },
     { title: '2θ (°)', dataIndex: 'two_theta_deg', className: 'dara-num', sorter: byNumber('two_theta_deg'), render: fixed(3) },
@@ -189,19 +194,13 @@ function ObservedPeaks({ taskId, query, onResponse, active, reload }) {
     { title: <Tooltip title="Relative to the strongest observed peak"><span>Rel. I (%)</span></Tooltip>, dataIndex: 'intensity_rel_percent', className: 'dara-num', sorter: byNumber('intensity_rel_percent'), render: fixed(1) },
     { title: <Tooltip title="Kα1 full width at half maximum from a pseudo-Voigt fit of the measured peak (instrument + sample)"><span>FWHM (°)</span></Tooltip>, dataIndex: 'fwhm_deg',
       className: 'dara-num', sorter: byNumber('fwhm_deg'),
-      render: (value, row) => (value == null ? <Tooltip title={FIT_NOTE_HELP[row.fit_note] || null}><Text type="secondary">{row.fit_note || '—'}</Text></Tooltip>
-        : <Tooltip title={row.eta == null ? null : `η = ${Number(row.eta).toFixed(2)} (0 Gaussian, 1 Lorentzian)`}>{withEsd(value, row.fwhm_esd_deg, 3)}</Tooltip>) },
-    ...(corrected ? [{ title: <Tooltip title="Instrument FWHM removed from this peak: the standard curve at its angle, or the constant"><span>Instr. (°)</span></Tooltip>,
-      dataIndex: 'instrument_fwhm_deg', className: 'dara-num', render: fixed(3) }] : []),
+      render: fwhmCell },
     { title: 'Phase', key: 'phase', sorter: (a, b) => Number(Boolean(a.phase)) - Number(Boolean(b.phase)) || String(a.phase_label).localeCompare(String(b.phase_label)),
       render: (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>) },
     { title: <Tooltip title="Indices of the nearest reflection, in the database setting"><span>hkl</span></Tooltip>, dataIndex: 'hkl',
       render: value => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{value ?? <Text type="secondary">—</Text>}</span> },
     { title: <Tooltip title="Observed − calculated 2θ of the assigned reflection"><span>Δ2θ (°)</span></Tooltip>, dataIndex: 'delta_two_theta_deg', className: 'dara-num',
       sorter: (a, b) => Math.abs(a.delta_two_theta_deg ?? 1e9) - Math.abs(b.delta_two_theta_deg ?? 1e9), render: fixed(3) },
-    { title: sizeTitle, dataIndex: 'size_nm', className: 'dara-num', sorter: byNumber('size_nm'),
-      render: (value, row) => (value != null ? fixed(0)(value)
-        : <Text type="secondary">{row.size_note === 'below instrument resolution' ? '> resolution limit' : '—'}</Text>) },
   ];
   return <>
     <div className="dara-toolbar">
@@ -214,7 +213,55 @@ function ObservedPeaks({ taskId, query, onResponse, active, reload }) {
       <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
         pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
     </div>
-    <Text className="dara-footnote">Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak). {QUIET_NOTE} {correctionNote(body.instrument)}</Text>
+    <Text className="dara-footnote">Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak).</Text>
+  </>;
+}
+
+const byNumber = key => (a, b) => (a[key] ?? -Infinity) - (b[key] ?? -Infinity);
+const phaseCell = (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>);
+// The fitted Kα1 FWHM ± e.s.d., or why the peak has none (merged, overlapped, too weak).
+function fwhmCell(value, row) {
+  return value == null ? <Tooltip title={FIT_NOTE_HELP[row.fit_note] || null}><Text type="secondary">{row.fit_note || '—'}</Text></Tooltip>
+    : <Tooltip title={row.eta == null ? null : `η = ${Number(row.eta).toFixed(2)} (0 Gaussian, 1 Lorentzian)`}>{withEsd(value, row.fwhm_esd_deg, 3)}</Tooltip>;
+}
+
+/** "Size / strain" view: the Scherrer size of each observed peak, then the Williamson–Hall fit per phase. */
+function SizeStrain({ taskId, query, onResponse, active, reload }) {
+  const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onResponse, reload);
+  if (error) return <Alert type="error" showIcon message="The observed peaks could not be loaded." description={error} />;
+  if (!body) return <div style={{ minHeight: 480, paddingTop: 48, textAlign: 'center' }}><Spin tip="Fitting the peaks of the measured pattern" /></div>;
+  const rows = (body.rows || []).map((row, index) => ({ ...row, key: index }));
+  const corrected = (body.instrument?.mode ?? 'none') !== 'none';
+  const sizeTitle = corrected
+    ? <Tooltip title="Scherrer estimate from this peak alone: K·λ / (β·cos θ), β the FWHM with the instrument FWHM at this angle removed"><span>Size (nm)</span></Tooltip>
+    : <Tooltip title="No instrument broadening removed: a lower bound. Choose a standard curve or a constant instrument FWHM to correct it."><span>Size (nm), uncorrected</span></Tooltip>;
+  const columns = [
+    { title: 'Phase', key: 'phase', render: phaseCell,
+      sorter: (a, b) => Number(Boolean(a.phase)) - Number(Boolean(b.phase)) || String(a.phase_label).localeCompare(String(b.phase_label)) },
+    { title: <Tooltip title="Indices of the nearest reflection, in the database setting"><span>hkl</span></Tooltip>, dataIndex: 'hkl',
+      render: value => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{value ?? <Text type="secondary">—</Text>}</span> },
+    { title: '2θ (°)', dataIndex: 'two_theta_deg', className: 'dara-num', sorter: byNumber('two_theta_deg'), render: fixed(3) },
+    { title: <Tooltip title="Kα1 full width at half maximum from a pseudo-Voigt fit of the measured peak (instrument + sample)"><span>FWHM (°)</span></Tooltip>,
+      dataIndex: 'fwhm_deg', className: 'dara-num', sorter: byNumber('fwhm_deg'), render: fwhmCell },
+    ...(corrected ? [{ title: <Tooltip title="Instrument FWHM removed from this peak: the standard curve at its angle, or the constant"><span>Instr. (°)</span></Tooltip>,
+      dataIndex: 'instrument_fwhm_deg', className: 'dara-num', render: fixed(3) }] : []),
+    { title: sizeTitle, dataIndex: 'size_nm', className: 'dara-num', sorter: byNumber('size_nm'),
+      render: (value, row) => (value != null ? fixed(0)(value)
+        : <Text type="secondary">{row.size_note === 'below instrument resolution' ? '> resolution limit' : '—'}</Text>) },
+  ];
+  return <>
+    <h4 className="dara-section-label">Scherrer size per peak</h4>
+    <div className="dara-toolbar">
+      <Text type="secondary" className="dara-num">{`${rows.length} peak${rows.length === 1 ? '' : 's'}`}</Text>
+      <Button size="small" icon={<DownloadOutlined />} href={`${API}/task/${taskId}/observed-peaks.csv?${query}`}>Download CSV</Button>
+    </div>
+    <div className="dara-fit-table" style={{ marginBottom: 16 }}>
+      <Table size="small" rowKey="key" dataSource={rows} columns={columns} scroll={{ x: 'max-content' }}
+        pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
+    </div>
+    <h4 className="dara-section-label"><Tooltip title={WH_HELP}><span>Williamson–Hall per phase</span></Tooltip></h4>
+    <WilliamsonHall taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
+    <Text className="dara-footnote">{QUIET_NOTE} {correctionNote(body.instrument)}</Text>
   </>;
 }
 
@@ -257,7 +304,6 @@ function WilliamsonHall({ taskId, query, onResponse, active, reload }) {
     <div className="dara-wh-grid">
       {plotted.map(entry => <WilliamsonHallPlot key={entry.phase} entry={entry} />)}
     </div>
-    <Text className="dara-footnote">{QUIET_NOTE} {correctionNote(body.instrument)}</Text>
   </>;
 }
 

@@ -415,3 +415,28 @@ code {
 .dara-cell-phase details summary {
   cursor: pointer;
 }
+
+/* A second, quieter line under a table heading (e.g. "relative to the Rietveld phases"). */
+.dara-th-note {
+  font-size: var(--dara-font-12);
+  font-weight: 400;
+  color: var(--dara-text-hint);
+  white-space: nowrap;
+}
+
+/* Label of a part of a view (e.g. "Scherrer size per peak" / "Williamson–Hall per phase"). */
+.dara-section-label {
+  margin: var(--dara-space-2) 0 var(--dara-space-2);
+  font-size: var(--dara-font-13);
+  font-weight: 600;
+  color: var(--dara-text);
+}
+
+/* A menu item that is a switch (Help › Advanced analysis tools). */
+.dara-menu-switch {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dara-space-3);
+  width: 100%;
+}

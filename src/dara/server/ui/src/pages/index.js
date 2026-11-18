@@ -10,6 +10,7 @@ import { MAX_SERIES_FILES, seriesPreviewRows } from '../components/seriesTrends.
 import { COMMON_STANDARDS } from '../components/InternalStandardCard';
 import { FwhmCurveButton } from '../components/InstrumentFwhmCurve';
 import { curveText } from '../components/instrumentCurve.mjs';
+import useAdvancedTools from '../components/useAdvancedTools';
 import { advancedChanges, forgetRemembered, readRemembered, runAfterSuccess, writeRemembered } from '../components/submitHelpers.mjs';
 import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../components/knownPhases.mjs';
 // explicit .js: on case-insensitive disks webpack would resolve quickRanking.mjs / structureLibrary.mjs first
@@ -197,6 +198,7 @@ function Submission() {
   const [instrumentDetails, setInstrumentDetails] = useState({});
   const [calibratable, setCalibratable] = useState([]);
   const [fwhmCurves, setFwhmCurves] = useState({}); // {profile: summary} of the stored instrument FWHM curves
+  const [advanced] = useAdvancedTools(); // the FWHM curve is an advanced analysis tool
   const [refinementControls, setRefinementControls] = useState(DEFAULT_CONTROLS);
   const selectedInstrument = Form.useWatch('instrument_profile', form);
   const [patternInspection, setPatternInspection] = useState(null);
@@ -928,7 +930,7 @@ function Submission() {
                     <Form.Item name="instrument_profile" noStyle>
                       <Select showSearch optionFilterProp="search" aria-label="Instrument profile" style={{ width: '100%' }}
                         options={instrumentNames.map(name => ({ value: name, search: instrumentLabel(name),
-                          label: fwhmCurves[name] ? <>{instrumentLabel(name)} <span className="dara-dim">· FWHM curve {curveText(fwhmCurves[name])}</span></> : instrumentLabel(name) }))} />
+                          label: advanced && fwhmCurves[name] ? <>{instrumentLabel(name)} <span className="dara-dim">· FWHM curve {curveText(fwhmCurves[name])}</span></> : instrumentLabel(name) }))} />
                     </Form.Item>
                   </div>
                   <InstrumentManager buttonLabel="Register profile…" buttonSize="middle" onRegistered={profile => {
@@ -945,7 +947,7 @@ function Submission() {
                       setCalibratable(previous => [...previous, profile.id]);
                       form.setFieldsValue({ instrument_profile: profile.id });
                     }} />
-                  {selectedInstrument && selectedInstrument !== 'synchrotron'
+                  {advanced && selectedInstrument && selectedInstrument !== 'synchrotron'
                     ? <FwhmCurveButton profile={selectedInstrument} profileLabel={instrumentLabel(selectedInstrument)}
                       wavelength={watchedWavelengthLab || 'Cu'}
                       onChange={curve => setFwhmCurves(previous => {

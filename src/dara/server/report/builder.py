@@ -364,6 +364,16 @@ def _methods_paragraph(
     if anchors:
         parts.append(escape(_background_curve_text(anchors, refinement, curve_params)) + " ")
     parts.append("Weight fractions were calculated from the refined scale factors.")
+    from dara.result import le_bail_phases
+
+    le_bail = sorted(le_bail_phases(getattr(refinement, "lst_data", None)))
+    if le_bail:
+        names = " and ".join(_plain_name(name) for name in le_bail)
+        parts.append(
+            f" {escape(names)} was fitted by the Le Bail method (reflection intensities refined freely, "
+            "without a structure model), so its amount was not determined; the weight fractions of the "
+            "other phases are relative to each other."
+        )
     return "<p>" + "".join(parts) + "</p>"
 
 

@@ -44,7 +44,7 @@ function RirTable({ taskId, sel }) {
   ];
   return <>
     {body.complete === false ? <Alert type="warning" showIcon style={{ marginBottom: 8 }}
-      message={<FormulaText text={`Incomplete: no usable line for ${missing.join(', ') || 'one phase'}. The other phases are normalised among themselves.`} />} /> : null}
+      message={<FormulaText text={`Incomplete: no RIR fraction for ${missing.join(', ') || 'one phase'}. The other phases are normalised among themselves.`} />} /> : null}
     <div className="dara-fit-table">
       <Table size="small" rowKey="key" dataSource={rirRows(body)} columns={columns} pagination={false} scroll={{ x: 'max-content' }} />
     </div>

@@ -29,6 +29,8 @@ import StructureRefineDrawer, { StructureResults } from '../components/Structure
 import { structurePhases } from '../components/structureModel.mjs';
 import PeakListTab from '../components/PeakListTab';
 import RirSemiQuant from '../components/RirSemiQuant';
+import LeBailDialog from '../components/LeBailDialog';
+import useAdvancedTools from '../components/useAdvancedTools';
 import useTaskAnnotations from '../components/useTaskAnnotations';
 import { cleanAnnotationText, newAnnotationId, plotAnnotations, removeAnnotation, upsertAnnotation } from '../components/plotAnnotations.mjs';
 import InternalStandardCard from '../components/InternalStandardCard';
@@ -43,7 +45,7 @@ import { noFitHints, searchOptionsText } from '../components/resultsList.mjs';
 import { colorPhaseTraces, compositionSegments, fillIndex, tidyFormula, trayLine } from '../components/composition.mjs';
 import {
   BASELINE_LABEL, QUICK_CHECK_HINT, REFINE_ALL_FIRST, addedLabel, alternativeLink, alternativeOfVerdict, availableComparisonBase, baselineRequest, comparisonBase,
-  deltaBaseText, deltaStrip, deltaText, displayedCandidateOf, fitFromSearch, phaseSymbolLookup, searchWithFit,
+  deltaBaseText, deltaStrip, deltaText, leBailPhases, displayedCandidateOf, fitFromSearch, phaseSymbolLookup, searchWithFit,
   formulaOfPhase, isQuickCheck, knownDisplayFormula, needsBaseline, parseSelection, plotQuery, refineAllRequest, relabelPhaseTraces,
   rememberDisplayFormulas, removeRequest,
   referenceVariants, replacementOf, runText, selectOptionGroups, selectionLabel, spacegroupOfPhase, versionGone, versionPhaseOptions, versionReadyText,
@@ -741,7 +743,7 @@ function parameterText(name, parameter) {
   return value ? `${name} = ${value}` : null;
 }
 
-function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confidence = null, rowActions = null, spread = null }) {
+function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confidence = null, rowActions = null, spread = null, weightsRelative = false }) {
   const dataSource = phases.map(phase => ({ phase, ...(details?.[phase] || {}) }));
   // Rows with the same formula and space group show their database id to tell them apart.
   const identityKey = phase => `${formulaOfPhase(phase)}_${spacegroupOfPhase(phase)}`;
@@ -756,9 +758,12 @@ function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confid
       { title: 'Phase', dataIndex: 'phase', width: 220,
         render: phase => <PhaseIdentity reference={phase} metadata={metadata?.[phase]} showDatabaseId={repeated.has(identityKey(phase))} /> },
       ...verdictColumn,
-      { title: <Tooltip title="Normalized over modeled crystalline phases; amorphous and unidentified material are excluded. ± is the BGMN estimated standard deviation, propagated after normalization."><span>Quantity</span></Tooltip>,
+      { title: weightsRelative
+        ? <Tooltip title="Normalized over the Rietveld phases only: a Le Bail phase has no weight fraction, so these amounts are relative to each other. ± is the BGMN estimated standard deviation."><span>Quantity<div className="dara-th-note">relative to the Rietveld phases</div></span></Tooltip>
+        : <Tooltip title="Normalized over modeled crystalline phases; amorphous and unidentified material are excluded. ± is the BGMN estimated standard deviation, propagated after normalization."><span>Quantity</span></Tooltip>,
         className: 'dara-num',
         render: (_, row) => {
+          if (row.le_bail) return <StatusTag text="Le Bail" tooltip="Fitted by Le Bail: reflection intensities refined freely, so the phase has no weight fraction." />;
           if (row.weight_percent == null) return '—';
           const tag = amountTag(row, confidence?.phases?.[row.phase]?.weight_flag);
           const range = spread?.[formulaOfPhase(row.phase)];
@@ -930,6 +935,9 @@ function TaskDetail({ data, task_id, onDelete }) {
   const [drawerOpen, setDrawerOpen] = React.useState(false);
   const [plotAnnotating, setPlotAnnotating] = React.useState(false); // the workspace plot is in label editing
   const [structureOpen, setStructureOpen] = React.useState(false);
+  const [leBailOpen, setLeBailOpen] = React.useState(null); // {initial: phase | null} while the Le Bail dialog is open
+  // Specialist tools (RIR, Le Bail) only with "Advanced analysis tools"; existing results always display.
+  const [advanced] = useAdvancedTools();
   const [fitTab, setFitTab] = React.useState('phases');
   // Internal standard of the best fit after an edit (undefined: the task summary's own block).
   const [bestStandard, setBestStandard] = React.useState(undefined);
@@ -1087,6 +1095,7 @@ function TaskDetail({ data, task_id, onDelete }) {
   const adoptedSummary = adoptedSel === null || adoptedParsed === 'best' ? null : findSummary(adoptedSel);
   const deltaRows = versionData?.final_result && baseSummary ? deltaStrip(baseSummary, versionData.final_result, symbolOf) : [];
   const displayedPhases = displayedResult ? (displayedResult.highlighted_phases || displayedResult.phases || []) : [];
+  const displayedLeBail = leBailPhases(displayedResult);
   // Explicit background polynomial degree of the displayed fit (null: BGMN chooses it).
   const baseDegree = versionNumber ? (versionData?.background?.degree ?? null)
     : (data.final_refinement_params?.background_degree ?? null);
@@ -1139,10 +1148,14 @@ function TaskDetail({ data, task_id, onDelete }) {
     const items = [
       ...(link ? [{ key: 'view', label: link.text, title: link.title }] : []),
       ...(displayedPhases.length >= 2 ? [{ key: 'refit', label: 'Refit without this phase…', disabled: quick.busy }] : []),
+      // Returning a Le Bail phase to Rietveld stays possible with the advanced tools off.
+      ...(advanced || displayedLeBail.includes(row.phase)
+        ? [{ key: 'lebail', label: displayedLeBail.includes(row.phase) ? 'Back to Rietveld…' : 'Le Bail fit…', disabled: quick.busy }] : []),
     ];
     if (!items.length) return null;
     const onClick = ({ key }) => {
       if (key === 'view') setPlotId(link.sel);
+      if (key === 'lebail') setLeBailOpen({ initial: row.phase });
       if (key === 'refit') Modal.confirm({ title: 'Refine the other phases without this one?', content: 'Creates a new version; this fit is kept.',
         okText: 'Refine as new version', cancelText: 'Cancel', onOk: () => runQuick(removeRequest(row.phase)) });
     };
@@ -1441,7 +1454,7 @@ function TaskDetail({ data, task_id, onDelete }) {
         onView={setPlotId} onPreview={setPreviewSel} shownSel={shownSel} onCompare={(a, b) => setCompare({ a, b })} symbolOf={symbolOf} onRefineAll={quickShown ? refineAll : null} refineBusy={quick.busy}
         extra={quickShown ? <QuickRefineProgress job={quick.job} onCancel={quick.cancel} onDismiss={quick.dismiss} /> : null} />
       <h3 style={{ marginTop: 16 }}>{summaryHeading}</h3>
-      <PhaseRefinementTable phases={summary.highlighted_phases || summary.phases} metadata={summary.phase_metadata} details={summary.phase_details} confidence={summary.confidence} spread={weightSpread(data.all_results)} />
+      <PhaseRefinementTable phases={summary.highlighted_phases || summary.phases} metadata={summary.phase_metadata} details={summary.phase_details} confidence={summary.confidence} spread={summary.weights_relative ? null : weightSpread(data.all_results)} weightsRelative={Boolean(summary.weights_relative)} />
       {/* The known-phase outcomes describe the automatic fit, not an adopted re-refinement. */}
       <KnownPhaseNotes data={data} style={adoptedVersionNumber ? { display: 'none' } : undefined} />
       <InternalStandardCard taskId={task_id} renderPhase={renderReference}
@@ -1514,10 +1527,12 @@ function TaskDetail({ data, task_id, onDelete }) {
                 { key: 'phases', label: 'Select phases…', title: 'Choose the phases to refine as a new version' },
                 { key: 'background', label: 'Background…', title: 'Background polynomial and excluded 2θ intervals' },
                 { key: 'structure', label: 'Structure…', title: 'Free atomic positions, B or occupancies of one phase (indicative)' },
+                ...(advanced ? [{ key: 'lebail', label: 'Le Bail fit of a phase…', title: 'Fit one phase with free reflection intensities: cell and profile refined, no weight fraction' }] : []),
               ], onClick: ({ key }) => {
                 if (key === 'phases') setPhaseSignal(n => n + 1);
                 if (key === 'background') setBackgroundOpen(true);
                 if (key === 'structure') { setDrawerOpen(false); setStructureOpen(true); }
+                if (key === 'lebail') setLeBailOpen({ initial: null });
               } }}>
               <Tooltip title={quickCheck ? REFINE_ALL_FIRST : quick.busy ? 'A refinement is running' : null}>
                 <Button disabled={quick.busy || quickCheck}>Refine <DownOutlined /></Button>
@@ -1580,10 +1595,10 @@ function TaskDetail({ data, task_id, onDelete }) {
               { key: 'phases', label: 'Phases', children: <>
                 <PhaseRefinementTable phases={displayedPhases}
                   metadata={displayedResult.phase_metadata} details={displayedResult.phase_details} confidence={displayedResult.confidence}
-                  rowActions={quickShown && !quickCheck ? rowActions : null} />
+                  rowActions={quickShown && !quickCheck ? rowActions : null} weightsRelative={Boolean(displayedResult.weights_relative)} />
                 {currentSel === 'best' ? <KnownPhaseNotes data={data} /> : null}
                 <FitCautions cautions={displayedResult.cautions} style={{ margin: '12px 0' }} />
-                <RirSemiQuant taskId={task_id} sel={currentSel} />
+                {advanced ? <RirSemiQuant taskId={task_id} sel={currentSel} /> : null}
               </> },
               { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel={currentSel} active={fitTab === 'peaks' && !versionPending} /> },
               ...(structurePhases(displayedResult.phase_details).length ? [{ key: 'structure', label: 'Structure',
@@ -1591,7 +1606,10 @@ function TaskDetail({ data, task_id, onDelete }) {
             ]} />
         </> : null}
       </Modal>
-      <StructureRefineDrawer taskId={task_id} sel={currentSel} phases={displayedPhases} renderPhase={renderReference} open={structureShown}
+      <LeBailDialog open={Boolean(leBailOpen) && !quickCheck} initial={leBailOpen?.initial} phases={advanced ? displayedPhases : displayedLeBail} leBail={displayedLeBail}
+        renderPhase={renderReference} busy={quick.busy} onCancel={() => setLeBailOpen(null)}
+        onSubmit={request => { setLeBailOpen(null); runQuick(request); }} />
+      <StructureRefineDrawer taskId={task_id} sel={currentSel} phases={displayedPhases} renderPhase={renderReference} open={structureShown} leBail={displayedLeBail}
         busy={quick.busy} onClose={() => setStructureOpen(false)} onSubmit={request => runQuick(request)} />
       <PeakCandidatesDrawer taskId={task_id} sel={currentSel} peaks={peaks} open={drawerShown}
         diagnostics={displayedResult?.peak_diagnostics} onAddHint={(hint, target) => { setDrawerOpen(false); addHint(hint, target); }}

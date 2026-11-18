@@ -448,6 +448,10 @@ def _lite(selection, meta: dict, summary: dict) -> dict:
 
     quality = summary.get("fit_quality") or {}
     weights = summary.get("weight_percent") or {}
+    details = summary.get("phase_details") or {}
+    # A Le Bail phase has no weight: the phase list comes from the fit, not from the weight keys.
+    phases = list(dict.fromkeys([*weights, *(name for name in summary.get("phases") or [] if isinstance(name, str)), *details]))
+    le_bail = [name for name in phases if (details.get(name) or {}).get("le_bail")]
     return {
         "sel": versions.format_selection(selection),
         "label": meta.get("label"),
@@ -458,9 +462,11 @@ def _lite(selection, meta: dict, summary: dict) -> dict:
         "weight_percent": weights,
         # reduced formula + space group per phase, so the UI lines up the same compound
         # refined from different database records
-        "phase_identity": {name: _phase_identity(name) for name in weights},
+        "phase_identity": {name: _phase_identity(name) for name in phases},
         # space-group symbols, so two rows with one formula can be labelled (Y2O3 Ia-3 / I2_13)
-        "phase_symbols": phase_symbols(weights),
+        "phase_symbols": phase_symbols(phases),
+        "le_bail_phases": le_bail,
+        "weights_relative": bool(summary.get("weights_relative")),
         "mass_balance": summary.get("mass_balance"),
         "n_unexplained": unexplained_count(summary.get("peak_diagnostics")),
         "n_unexplained_minor": unexplained_minor_count(summary.get("peak_diagnostics")),
