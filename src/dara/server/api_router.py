@@ -424,7 +424,36 @@ def _add_status_fields(entry, refinement, name, index, extra, spec, b1_spec, ref
     )
 
 
-def _preferred_orientation(phase) -> dict:
+def background_model(refinement_params) -> dict:
+    """Background polynomial of a fit: ``{mode, terms}``.
+
+    ``mode`` "fixed" (``RU=<n>`` set, ``terms`` = n), "curve" (the analyst's curve with ``UNT=`` and
+    ``RU=2``: a scale and a constant, ``anchors`` = number of points) or "auto" (``RU`` left to
+    BGMN). For "auto" ``terms`` is null: BGMN 4.2.22 states the number nowhere in its output
+    (.lst, .par, .dia give only the total parameter count; on BiFeO3.xy the total was 17 with
+    RU left to BGMN and 12 with RU=5, so BGMN chose 10, which only a second run reveals).
+    """
+    params = refinement_params if isinstance(refinement_params, dict) else {}
+    anchors = params.get("background_anchors")
+    if anchors:
+        from dara.background_curve import BGMN_RU
+
+        return {"mode": "curve", "terms": BGMN_RU, "anchors": len(anchors)}
+    degree = params.get("background_degree")
+    if isinstance(degree, int) and not isinstance(degree, bool):
+        return {"mode": "fixed", "terms": degree}
+    return {"mode": "auto", "terms": None}
+
+
+def _requested_spec(spec, name, key):
+    """``spec(name, key)``, or ``None`` without a resolver or when it does not know the key."""
+    try:
+        return spec(name, key) if spec else None
+    except Exception:  # noqa: BLE001 - an informative field; never break the payload
+        return None
+
+
+def _preferred_orientation(phase, requested=None) -> dict:
     """Preferred-orientation model of a refined phase, as far as the BGMN listing states it.
 
     BGMN's ``GEWICHT=SPHARx`` is the positive-definite spherical-harmonics correction of order
@@ -433,16 +462,24 @@ def _preferred_orientation(phase) -> dict:
     coefficients nor the factor of each reflection (BGMN gives ``GEWICHT(h,k,l)`` only as a GOAL
     the control file would have to request), so no texture strength is derived here
     (``strength`` stays null). ``model`` null: a plain isotropic scale factor.
+
+    ``requested``: the GEWICHT spec the phase was refined with (``SPHAR4``, ``0_0``; null when
+    unknown). ``reduced_by_bgmn``: a spherical-harmonics order was requested but BGMN listed a
+    lower one or none: BGMN lowers the degree by itself when GEWICHT does not exceed LIMITx
+    times its esd after the isotropic step (bgmn.de/variables.html, LIMIT2...LIMIT10).
     """
     model = getattr(phase, "gewicht_name", None)
     match = re.fullmatch(r"SPHAR(\d+)", str(model or "").upper())
     order = int(match.group(1)) if match else None
+    wanted = re.fullmatch(r"SPHAR(\d+)", str(requested or "").strip().upper())
     return {
         "model": model,
         "spherical_harmonics_order": order,
         "corrected": bool(order),  # SPHAR0 is the isotropic value
         "mean_gewicht": _value_and_esd(getattr(phase, "gewicht", None))[0] if order else None,
         "strength": None,
+        "requested": str(requested) if requested is not None else None,
+        "reduced_by_bgmn": bool(wanted and int(wanted.group(1)) > (order or 0)),
     }
 
 
@@ -512,7 +549,7 @@ def _phase_refinement_details(
             "rphase": phase.rphase,
             "grain_sizes": grain_sizes,
             "crystallite_size_status": crystallite_size_status(extra, grain_sizes, b1_value),
-            "preferred_orientation": _preferred_orientation(phase),
+            "preferred_orientation": _preferred_orientation(phase, _requested_spec(spec, name, "gewicht")),
         }
         try:
             _add_status_fields(output[name], refinement, name, index, extra, spec, b1_value, references)
@@ -2194,12 +2231,17 @@ async def _result(task_id: int):
     job_name = job["job"]["name"]
 
     if job["status"] == "READY":
+        from dara.server.worker import get_all_pending_jobs
+
+        queue = get_all_pending_jobs(sort_by_submitted_time=True)
         return {
             "task_label": job_name,
             "status": job["status"],
             "submitted_on": convert_to_local_tz(job["submitted_time"]).strftime(
                 "%Y-%m-%d %H:%M:%S"
             ),
+            # 1 = next to start; the Results list's queue_position
+            "queue_position": queue.index(job["uuid"]) + 1 if job.get("uuid") in queue else None,
         }
 
     if job["status"] in {"RUNNING", "CANCELLING", "CANCELLED"}:
@@ -2329,8 +2371,11 @@ def enrich_version_summary(task: dict, document, record: dict, summary):
     confidence = summary.get("confidence") if isinstance(summary, dict) else None
     # verdicts stored before the current phase-identity rule (confidence SCHEMA) are judged again
     stale_verdicts = isinstance(confidence, dict) and confidence.get("schema", 0) < confidence_module.SCHEMA
+    # stored before the preferred-orientation model of a stored result was read (SPHAR name lost)
     if not isinstance(details, dict) or (not stale_verdicts and all(
-        isinstance(item, dict) and "refinement_status" in item for item in details.values()
+        isinstance(item, dict) and "refinement_status" in item
+        and "reduced_by_bgmn" in (item.get("preferred_orientation") or {})
+        for item in details.values()
     )):
         return summary
     number = record.get("version") or record.get("index")
@@ -2350,7 +2395,7 @@ def enrich_version_summary(task: dict, document, record: dict, summary):
         while len(_VERSION_ENRICHED) > _VERSION_ENRICHED_MAX:
             _VERSION_ENRICHED.popitem(last=False)
     out = dict(summary)
-    for field_name in ("phase_details", "phase_metadata", "confidence", "cautions"):
+    for field_name in ("phase_details", "phase_metadata", "confidence", "cautions", "background"):
         if field_name in fresh:
             out[field_name] = deepcopy(fresh[field_name])
     return out
@@ -2697,6 +2742,7 @@ def _summarize_document(job: dict, document, *, persist_summary: bool = True) ->
             "weight_percent": weight_percent,
             "phase_metadata": final_phase_metadata,
             "fit_quality": final_fit_quality,
+            "background": background_model((getattr(d, "search_kwargs", None) or {}).get("refinement_params")),
             "phase_details": final_phase_details,
             "peak_diagnostics": final_peak_diagnostics,
             "cautions": final_cautions,

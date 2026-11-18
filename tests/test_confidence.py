@@ -218,7 +218,7 @@ def test_alternative_within_rwp_tolerance_makes_phase_ambiguous():
     alternative = phase_b["evidence"]["alternative"]
     assert alternative["candidate_number"] == 2 and alternative["delta_rwp"] == pytest.approx(0.3)
     assert alternative["replaced_by"] == [cf._label(C)]
-    assert "Candidate 2 without this phase fits almost as well (Rwp 7.9% vs 7.6%)." in phase_b["reasons"]
+    assert "Candidate 2 without this phase fits almost as well (Rwp 7.90% vs 7.60%)." in phase_b["reasons"]
     # A is also in the near candidate -> no alternative for A
     assert block["phases"][A]["evidence"]["alternative"] is None
     # Beyond max(0.5, 5%) -> no longer an alternative

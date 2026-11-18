@@ -196,14 +196,16 @@ def test_report_lists_automated_cautions_with_escaped_text(context):
 
 def test_adoption_keeps_who_when_and_the_replaced_selection(context):
     client, task, _ = context
-    task["user"] = "kim"
-    first = client.put("/api/task/9/review", json={"selection": 1}).json()
+    task["user"] = "benchmark"  # the submitter is never taken as the one who adopts
+    first = client.put("/api/task/9/review", json={"selection": 1, "adopted_by": " kim "}).json()
     assert first["adopted_by"] == "kim" and first["adopted_at"] and first["previous"] is None
+    assert first["history"][-1]["by"] == "kim"
     notes = client.put("/api/task/9/review", json={"selection": 1, "notes": "n"}).json()
     assert notes["adopted_at"] == first["adopted_at"] and len(notes["history"]) == 1  # notes only
     second = client.put("/api/task/9/review", json={"selection": "best"}).json()
     assert second["previous"] == {"selection": 1, "adopted_at": first["adopted_at"], "adopted_by": "kim"}
     assert [entry["selection"] for entry in second["history"]] == [1, "best"]
+    assert second["adopted_by"] is None and second["history"][-1]["by"] is None  # no name sent
     for index in range(25):
         client.put("/api/task/9/review", json={"selection": index % 2})
     assert len(client.get("/api/task/9/review").json()["history"]) == review_router.ADOPTION_HISTORY_MAX

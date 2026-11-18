@@ -11,7 +11,7 @@ import math
 import re
 from datetime import datetime, timezone
 from html import escape
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Optional
 
 import numpy as np
 from fastapi import APIRouter, HTTPException, Query
@@ -34,6 +34,8 @@ class ReviewUpdate(BaseModel):
         | None
     ) = None
     notes: str = Field(default="", max_length=10000)
+    # Who adopts (no login: the name the client remembers, e.g. from the Submit form); never the submitter.
+    adopted_by: Optional[str] = Field(default=None, max_length=120)
 
 
 async def _load_completed_task(task_id: int):
@@ -130,8 +132,8 @@ async def save_review(task_id: int, update: ReviewUpdate):
         }
         if old.get("selection") != selection:
             current["summary"] = None  # the results list shows the adopted fit: summarize again
-            # No login: the task's user field (the name given on submission) is the identity.
-            user = current.get("user") or None
+            # No login: only the name the request gives (None when it gives none).
+            user = (update.adopted_by or "").strip() or None
             if old.get("selection") is not None:
                 review["previous"] = {
                     "selection": old.get("selection"),

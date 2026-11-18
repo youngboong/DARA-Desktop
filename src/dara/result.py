@@ -107,8 +107,8 @@ class PhaseResult(BaseModel):
             geweicht_name = re.search(r"^([A-Z\d]+)", geweicht).group(1)
             values["GEWICHT"] = geweicht_mean
             values["GEWICHT_NAME"] = geweicht_name
-        else:
-            values["GEWICHT_NAME"] = None
+        elif isinstance(values, dict) and "GEWICHT_NAME" not in values and "gewicht_name" not in values:
+            values["GEWICHT_NAME"] = None  # a stored result keeps its name (SPHAR4) when decoded again
         return values
 
     def get_structure(self, lattice_fallback: Optional[dict] = None) -> Structure:

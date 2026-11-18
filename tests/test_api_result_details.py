@@ -203,10 +203,38 @@ def test_preferred_orientation_states_the_bgmn_model_and_no_invented_strength():
     sphar = SimpleNamespace(gewicht_name="SPHAR4", gewicht=0.063431)
     assert api_router._preferred_orientation(sphar) == {
         "model": "SPHAR4", "spherical_harmonics_order": 4, "corrected": True, "mean_gewicht": 0.063431,
-        "strength": None,
+        "strength": None, "requested": None, "reduced_by_bgmn": False,
     }
     plain = api_router._preferred_orientation(SimpleNamespace(gewicht_name=None, gewicht=(0.3, 0.01)))
     assert plain["model"] is None and plain["corrected"] is False and plain["mean_gewicht"] is None
     assert api_router._preferred_orientation(SimpleNamespace(gewicht_name="SPHAR0", gewicht=0.1))["corrected"] is False
     # the listing line BGMN 4.2.22 writes for such a phase
     assert PhaseResult.check_gewicht({"GEWICHT": "SPHAR4, MeanValue(GEWICHT)=0.0634310"})["GEWICHT_NAME"] == "SPHAR4"
+
+
+def test_preferred_orientation_of_a_stored_version_listing_survives_decoding():
+    # BGMN 4.2.22 listing of a re-refinement (all phases requested SPHAR4): BGMN kept SPHAR4 for
+    # one phase, lowered another to SPHAR2 and two to an isotropic GEWICHT (LIMITx rule).
+    from pathlib import Path
+
+    from dara.result import PhaseResult, parse_lst
+
+    names = ["PH6NO4_19_(cod_9007583)-3", "Na4P2O7_19_(cod_1522370)-0",
+             "Na12.67P4O6.67_165_(cod_9007527)-0", "Na2CO3_12_(cod_2106297)-0"]
+    lst = parse_lst(Path(__file__).parent / "test_data" / "bgmn_sphar_version.lst", phase_names=names)
+    stored = {name: phase.model_dump(by_alias=True) for name, phase in lst.phases_results.items()}
+    decoded = {name: PhaseResult(**data) for name, data in stored.items()}  # as a stored result is read
+    seen = {name: api_router._preferred_orientation(phase, "SPHAR4") for name, phase in decoded.items()}
+    assert [seen[n]["model"] for n in names] == [None, "SPHAR4", "SPHAR2", None]
+    assert [seen[n]["corrected"] for n in names] == [False, True, True, False]
+    assert [seen[n]["reduced_by_bgmn"] for n in names] == [True, False, True, True]
+    assert seen[names[1]]["mean_gewicht"] == 0.578319 and seen[names[1]]["requested"] == "SPHAR4"
+    plain = api_router._preferred_orientation(decoded[names[0]], "0_0")  # isotropic as requested
+    assert plain["corrected"] is False and plain["reduced_by_bgmn"] is False
+
+
+def test_background_model_states_what_was_set_and_no_guess_for_auto():
+    assert api_router.background_model(None) == {"mode": "auto", "terms": None}
+    assert api_router.background_model({"background_degree": 6}) == {"mode": "fixed", "terms": 6}
+    curve = api_router.background_model({"background_anchors": [[10, 5], [80, 6], [120, 4]]})
+    assert curve == {"mode": "curve", "terms": 2, "anchors": 3}

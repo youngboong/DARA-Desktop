@@ -167,6 +167,7 @@ def test_summarize_document_matches_result_and_never_touches_store(monkeypatch):
     assert payload["status"] == "COMPLETED"
     assert payload["final_result"]["confidence"]["overall"]["level"] in {"high", "check", "expert"}
     assert payload["all_results"][0]["confidence"]["schema"] == confidence.SCHEMA
+    assert payload["final_result"]["background"] == {"mode": "auto", "terms": None}
 
     worker, results = _Store([job]), _Store([{"uuid": "u-sum", "output": document}])
     worker.update = lambda value: None

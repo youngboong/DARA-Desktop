@@ -251,6 +251,7 @@ def test_list_filters_and_sorts_across_pages(tmp_path, monkeypatch):
     rows = {t["fw_id"]: t for t in _list()["tasks"]}
     assert rows[2]["source_task_id"] == 1 and rows[1]["source_task_id"] is None
     assert (rows[4]["queue_position"], rows[5]["queue_position"]) == (1, 2) and rows[1]["queue_position"] is None
+    assert asyncio.run(api_router.result(5))["queue_position"] == 2  # the task page gives the same number
     for bad in ({"sort": "colour"}, {"order": "up"}, {"verdict": "great"}):
         with pytest.raises(Exception) as caught:
             _list(**bad)

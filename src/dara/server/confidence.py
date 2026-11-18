@@ -23,7 +23,7 @@ from dara.cif_names import cif_stem
 
 logger = logging.getLogger("dara.server.confidence")
 
-SCHEMA = 2  # 2: one phase = same reduced formula, or same space group and close composition
+SCHEMA = 3  # 2: one phase = same formula, or same space group and close composition; 3: Rwp in reasons to 2 decimals
 
 PRESENCE_CONFIDENT = 0.6
 SIGMA_CONFIDENT = 3.0
@@ -718,7 +718,7 @@ def _phase_assessment(target: CandidateEvidence, phase: str, displayed) -> dict:
         who = f"Candidate {number}" if number is not None else "An alternative candidate"
         reasons.append(
             f"{who} without this phase fits almost as well "
-            f"(Rwp {alternative['rwp']:.1f}% vs {target.rwp:.1f}%)."
+            f"(Rwp {alternative['rwp']:.2f}% vs {target.rwp:.2f}%)."
         )
     model_note = None
     if model_alt is not None:
@@ -726,7 +726,7 @@ def _phase_assessment(target: CandidateEvidence, phase: str, displayed) -> dict:
         who = f"Candidate {number}" if number is not None else "An alternative candidate"
         kind = "polymorph" if model_alt["polymorph"] else "structure model"
         model_note = (
-            f"{who} fits almost as well (Rwp {model_alt['rwp']:.1f}% vs {target.rwp:.1f}%) "
+            f"{who} fits almost as well (Rwp {model_alt['rwp']:.2f}% vs {target.rwp:.2f}%) "
             f"with a different {kind} of this phase (space group "
             f"{model_alt['spacegroup_number']} instead of {model_alt['own_spacegroup_number']}); "
             "the compound itself is present in both."
