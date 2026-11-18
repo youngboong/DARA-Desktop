@@ -2212,9 +2212,11 @@ async def result(task_id: int):
     if isinstance(payload, dict):
         with get_worker_store() as worker_store:
             job = worker_store.query_one({"index": task_id}) or {}
-        settings = ((job.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
+        metadata = (job.get("job") or {}).get("metadata") or {}
+        settings = metadata.get("submission_settings") or {}
         payload["sample"] = settings.get("sample")
         payload["identified_from"] = settings.get("identified_from")  # refinement of an identification task
+        payload["series"] = metadata.get("series")  # {id, name, order, ...} of a series member
     return payload
 
 
@@ -3262,7 +3264,16 @@ async def download_result(task_id: int, idx: int | None = Query(None, ge=0)):
         raise HTTPException(status_code=404, detail="Task not found")
     if job["status"] != "COMPLETED":
         raise HTTPException(status_code=409, detail=not_completed_detail(job["status"]))
+    archive, filename = await _task_archive(task_id, job, idx)
+    return StreamingResponse(
+        archive,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
+
+async def _task_archive(task_id: int, job: dict, idx: int | None = None) -> tuple[BytesIO, str]:
+    """``(archive, filename)`` of the result download of a completed task (``idx``: one candidate)."""
     with get_result_store() as result_store:
         stored = result_store.query_one({"uuid": job["uuid"]})
     if stored is None:
@@ -3282,12 +3293,62 @@ async def download_result(task_id: int, idx: int | None = Query(None, ge=0)):
         adopted=adopted,
     )
     kind = "all_results" if idx is None else f"search_result_{idx + 1}"
-    filename = download_name(task_id, job["job"]["name"], kind)
-    return StreamingResponse(
-        archive,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
+    return archive, download_name(task_id, job["job"]["name"], kind)
+
+
+@router.get("/tasks/download.zip")
+async def download_tasks_archive(ids: str = Query(...)):
+    """The result archives of several tasks (as ``/task/{id}/download``), one folder per task.
+
+    Built in a temporary file one task at a time, then streamed. Tasks without a result archive
+    (not completed, not found, identifications: their report and CSVs are on the task page) are
+    listed in ``SKIPPED.txt``.
+    """
+    from dara.server.identification_router import is_identification
+
+    task_ids = _parse_task_ids(ids)
+    with get_worker_store() as worker_store:
+        jobs = {job["index"]: job for job in worker_store.query(
+            criteria={"index": {"$in": task_ids}}, properties=["index", "uuid", "status", "job.name", "job.metadata", "review"])}
+    spool = tempfile.TemporaryFile()
+    skipped = []
+    try:
+        with zipfile.ZipFile(spool, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+            for task_id in task_ids:
+                job = jobs.get(task_id)
+                if job is None:
+                    skipped.append(f"Task {task_id}: not found")
+                    continue
+                if job["status"] != "COMPLETED":
+                    skipped.append(f"Task {task_id}: {not_completed_detail(job['status'])}")
+                    continue
+                if is_identification(job):
+                    skipped.append(f"Task {task_id}: an identification has no fit files (open the task for its report and CSVs)")
+                    continue
+                try:
+                    archive, filename = await _task_archive(task_id, job)
+                except HTTPException as exc:
+                    skipped.append(f"Task {task_id}: {exc.detail}")
+                    continue
+                folder = filename.removesuffix(".zip")
+                with zipfile.ZipFile(archive) as single:
+                    for info in single.infolist():
+                        bundle.writestr(f"{folder}/{info.filename}", single.read(info))
+            if skipped:
+                bundle.writestr("SKIPPED.txt", "Not included:\n" + "\n".join(skipped) + "\n")
+    except BaseException:
+        spool.close()
+        raise
+    spool.seek(0)
+
+    def chunks():
+        with spool:
+            while chunk := spool.read(1 << 20):
+                yield chunk
+
+    filename = f"dara_tasks_{time.strftime('%Y%m%d')}_{len(task_ids)}_results.zip"
+    return StreamingResponse(chunks(), media_type="application/zip",
+                             headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 def _csv_response(content: bytes, filename: str) -> Response:
@@ -3987,6 +4048,50 @@ def _row_progress(task: dict) -> dict | None:
     return {"stage": state.get("stage"), "percent": percent}
 
 
+def list_row(task: dict, summary, queue=()) -> dict:
+    """One row of the Results list (also the items of ``/api/series/{id}``) from a worker record
+    with ``LIST_TASK_FIELDS``; ``queue``: uuids of the pending jobs in order."""
+    state = task["status"]
+    metadata = (task.get("job") or {}).get("metadata") or {}
+    settings = metadata.get("submission_settings") or {}
+    submitted = task.get("submitted_time")
+    return {
+        "fw_id": task["index"],
+        "name": task["job"]["name"],
+        "sample": settings.get("sample"),
+        "state": state,
+        "created_on": convert_to_local_tz(submitted).strftime("%Y-%m-%d %H:%M:%S") if submitted else None,
+        "user": task.get("user", "unknown"),
+        "summary": summary if isinstance(summary, dict) else None,
+        "series": metadata.get("series"),
+        "adopted": (task.get("review") or {}).get("selection"),
+        "error_summary": summarize_failure(task.get("error")) if state == "FIZZLED" else None,
+        "source_task_id": settings.get("source_task_id", settings.get("retry_of")),
+        "progress": _row_progress(task) if state in ("RUNNING", "CANCELLING") else None,
+        "queue_position": (
+            queue.index(task["uuid"]) + 1 if state == "READY" and task.get("uuid") in queue else None
+        ),
+    }
+
+
+@router.get("/tasks/users")
+async def task_users():
+    """Users of the stored tasks with their task counts, for the Results user filter. Spellings
+    that differ only in case are one entry (the filter ignores case), named by the most used one."""
+    from collections import Counter
+
+    with get_worker_store() as worker_store:
+        counts = Counter(task.get("user") for task in worker_store.query(criteria={}, properties=["user"]))
+    merged: dict[str, list] = {}
+    for user, count in counts.items():
+        if not isinstance(user, str) or not user.strip() or user == "unknown":
+            continue
+        merged.setdefault(user.strip().lower(), []).append((count, user))
+    users = [{"user": max(spellings)[1], "count": sum(count for count, _ in spellings)}
+             for spellings in merged.values()]
+    return {"users": sorted(users, key=lambda item: item["user"].lower())}
+
+
 @router.get("/tasks")
 async def get_all_tasks(
     page: int = Query(1, ge=1),
@@ -4077,33 +4182,7 @@ async def get_all_tasks(
         queue = get_all_pending_jobs(sort_by_submitted_time=True)
 
     for task in tasks:
-        index = task["index"]
-        state = task["status"]
-        summary = refreshed.get(index, task.get("summary"))
-        settings = ((task.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
-        tasks_result.append(
-            {
-                "fw_id": index,
-                "name": task["job"]["name"],
-                "sample": ((task["job"].get("metadata") or {}).get("submission_settings") or {}).get("sample"),
-                "state": state,
-                "created_on": convert_to_local_tz(task["submitted_time"]).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                ),
-                "user": task.get("user", "unknown"),
-                "summary": summary if isinstance(summary, dict) else None,
-                "series": ((task.get("job") or {}).get("metadata") or {}).get("series"),
-                "adopted": (task.get("review") or {}).get("selection"),
-                "error_summary": (
-                    summarize_failure(task.get("error")) if state == "FIZZLED" else None
-                ),
-                "source_task_id": settings.get("source_task_id", settings.get("retry_of")),
-                "progress": _row_progress(task) if state in ("RUNNING", "CANCELLING") else None,
-                "queue_position": (
-                    queue.index(task["uuid"]) + 1 if state == "READY" and task.get("uuid") in queue else None
-                ),
-            }
-        )
+        tasks_result.append(list_row(task, refreshed.get(task["index"], task.get("summary")), queue))
 
     if total_tasks is None:
         with get_worker_store() as worker_store:

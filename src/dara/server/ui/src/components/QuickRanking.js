@@ -8,8 +8,10 @@ import { progressPercent } from './structureLibrary.mjs';
 import {
   MAX_REFINE, SORTERS, assignColors, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
   progressText, rankingNotes, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, suggestedKeys, toggleKey,
-  mismatchView, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withResidualProfile, zoomWindow,
+  mismatchView, startingPoints, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withPoints, withResidualProfile, zoomWindow,
 } from './quickRanking.mjs';
+import { addAnchor, anchorError, curveWarnings, pchip, removeAnchor } from './backgroundAnchors.mjs';
+import { BackgroundCurvePanel } from './BackgroundEditor';
 
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <div className="dara-qr-plot-area" /> });
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
@@ -201,11 +203,14 @@ export function useQuickRanking(buildRequest) {
       }
       return submitted; // on success the page opens the new task
     },
-    /** `onIdentify({referenceIds})` (selection order) saves the identification; resolves to whether it was saved. */
+    /**
+     * `onIdentify({referenceIds, background})` (selection order; the ranking's background settings,
+     * base points included) saves the identification; resolves to whether it was saved.
+     */
     async identify(onIdentify) {
       setIdentifying(true);
       try {
-        await onIdentify({ referenceIds: [...selected] });
+        await onIdentify({ referenceIds: [...selected], background: background.current });
       } finally {
         setIdentifying(false);
       }
@@ -224,12 +229,31 @@ function Suggestion({ combination }) {
 }
 
 /**
+ * The background view of `settings` on the finished search-match `jobId` (its pattern, not ranked
+ * again): `{two_theta, observed, intensity, settings}`. Throws an Error with a user message.
+ */
+async function backgroundView(jobId, settings) {
+  let response;
+  try {
+    response = await fetch(`${URL}/quick-ranking/${jobId}/background`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(settings),
+    });
+  } catch (error) {
+    throw new Error('The DARA server did not answer.');
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(response.status === 404 ? 'This search-match has expired: run it again.' : body.detail || `HTTP ${response.status}`);
+  return body;
+}
+
+/**
  * HighScore's "Determine Background" for the search-match: the default method, or Sonneveld & Visser
  * with HighScore's granularity and bending factor. While the sliders move, the curve is drawn on the
  * pattern (`onPreview(view)`, debounced, from the finished job's pattern); "Accept" ranks again with them.
- * shortcut: no manual base points here (the task page's anchor editor is bound to its fit plot); add them if asked.
+ * HighScore's manual mode (base points set by hand) is "Edit points" on the plot; Accept here replaces them.
  */
 function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
+  const points = initial?.anchors?.length || 0;
   const [settings, setSettings] = useState(() => backgroundSettings(initial));
   const [previewError, setPreviewError] = useState('');
   const set = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
@@ -241,14 +265,10 @@ function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
     let current = true;
     const timer = setTimeout(async () => {
       try {
-        const response = await fetch(`${URL}/quick-ranking/${jobId}/background`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: chosenKey,
-        });
-        const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(response.status === 404 ? 'This search-match has expired: run it again.' : body.detail || `HTTP ${response.status}`);
+        const body = await backgroundView(jobId, chosen);
         if (current) { setPreviewError(''); onPreview(body); }
       } catch (error) {
-        if (current) setPreviewError(error instanceof TypeError ? 'The DARA server did not answer.' : String(error.message || error));
+        if (current) setPreviewError(String(error.message || error));
       }
     }, 300);
     return () => { current = false; clearTimeout(timer); };
@@ -264,6 +284,8 @@ function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
     <Slider id="dara-qr-bending" min={0} max={50} step={0.5} value={settings.bending_factor} disabled={!tuned}
       onChange={value => set('bending_factor', value)} tooltip={{ formatter: null }} />
     {previewError ? <p className="dara-qr-bg-error" role="alert">{`Curve preview unavailable: ${previewError}`}</p> : null}
+    {points ? <p className="dara-qr-bg-note">{`In use: ${points} base points set by hand. Accept replaces them with this curve.`}</p> : null}
+    <p className="dara-qr-bg-note">Base points (Edit points on the plot) change the search-match only; a Rietveld refinement fits its own background.</p>
     <Button type="primary" size="small" onClick={() => onAccept(chosen)}>Accept and rank again</Button>
   </div>;
 }
@@ -408,6 +430,8 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const [backgroundOpen, setBackgroundOpen] = useState(false);
   const [backgroundPreview, setBackgroundPreview] = useState(null); // live curve while the Background popover is open
   const [zoom, setZoom] = useState({ range: null, revision: 0 }); // a click on an unexplained-peak marker zooms there
+  const [points, setPoints] = useState(null); // {anchors, selected} while the base points are edited
+  const [pointsPreview, setPointsPreview] = useState(null); // {key, view} | {key, error}: the server's curve through them
 
   const data = state.status === 'done' ? state.data : null;
   const rows = rankingRows(data);
@@ -420,6 +444,64 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const weakLeft = data ? weakNotSelected(data, selected) : [];
   // The ranking's own check (the server compares the file's anode with the request) wins over the setup's.
   const mismatch = mismatchView(data?.wavelength_mismatch) || inspected;
+
+  // HighScore's manual background ("Edit points" in the Background view): base points dragged on
+  // the plot; the server draws the curve through them (debounced) on this ranking's pattern.
+  const bgView = data?.background;
+  useEffect(() => { setPoints(null); }, [data?.job_id]); // a new ranking ends the editing
+  const pointsKey = points ? JSON.stringify(points.anchors) : null;
+  const pointsError = points ? anchorError(points.anchors) : null;
+  useEffect(() => {
+    if (!pointsKey || pointsError || !data?.job_id) return undefined;
+    let current = true;
+    const timer = setTimeout(async () => {
+      try {
+        const view = await backgroundView(data.job_id, withPoints(bgView.settings, JSON.parse(pointsKey)));
+        if (current) setPointsPreview({ key: pointsKey, view });
+      } catch (error) {
+        if (current) setPointsPreview({ key: pointsKey, error: String(error.message || error) });
+      }
+    }, 300);
+    return () => { current = false; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pointsKey, pointsError, data?.job_id]);
+  // Only "background above the data": without a fit there is no phase intensity to tell a peak by.
+  const pointWarnings = React.useMemo(() => (points && backgroundTraces(bgView) ? curveWarnings({
+    x: bgView.two_theta, yObs: bgView.observed, yCalc: bgView.intensity, yBkg: bgView.intensity, anchors: points.anchors,
+  }) : []),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  [pointsKey, bgView]);
+  const grid = points && backgroundTraces(bgView) ? bgView.two_theta : null;
+  const shownCurve = pointsPreview?.key === pointsKey ? pointsPreview : null;
+  const pointsEdit = grid ? {
+    anchors: points.anchors, selected: points.selected, moveX: [grid[0], grid[grid.length - 1]],
+    curveOf: (anchors, xs) => pchip(anchors, xs || grid),
+    blocked: x => !(x >= grid[0] && x <= grid[grid.length - 1]),
+    onChange: anchors => setPoints(previous => previous && { ...previous, anchors }),
+    onAdd: point => setPoints(previous => {
+      if (!previous) return previous;
+      const anchors = addAnchor(previous.anchors, point);
+      return { anchors, selected: anchors.findIndex(item => item[0] === point[0]) };
+    }),
+    onRemove: index => setPoints(previous => previous && { anchors: removeAnchor(previous.anchors, index), selected: null }),
+    onSelect: index => setPoints(previous => previous && { ...previous, selected: index }),
+  } : null;
+  const pointTraces = grid ? [backgroundTraces(bgView)[0],
+    { type: 'scatter', mode: 'lines', name: 'Background', meta: 'bg-curve', x: grid, hoverinfo: 'skip', line: { color: '#c99a2e', width: 2 },
+      y: shownCurve?.view?.intensity?.length === grid.length ? shownCurve.view.intensity : pchip(points.anchors, grid) },
+    { type: 'scatter', mode: 'markers', name: 'Base points', meta: 'bg-anchors', cliponaxis: false,
+      x: points.anchors.map(point => point[0]), y: points.anchors.map(point => point[1]),
+      marker: { size: 11, color: points.anchors.map((_, index) => (index === points.selected ? '#3f6c8f' : '#ffffff')), line: { color: '#3f6c8f', width: 2 } },
+      hovertemplate: '2θ %{x:.3f}°<br>%{y:.1f}<extra>Base point</extra>' }] : null;
+  const startPoints = () => {
+    setPoints({ anchors: startingPoints(bgView), selected: null });
+    setPointsPreview(null);
+  };
+  const rankWithPoints = anchors => {
+    setPoints(null);
+    setShowBackground(true);
+    quick.rankWithBackground(withPoints(bgView.settings, anchors));
+  };
 
   const onRowKey = (event, row) => {
     const action = rowKeyAction(event.key);
@@ -468,7 +550,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const bounds = data?.profile ? [data.profile.two_theta?.[0], data.profile.two_theta?.slice(-1)[0]] : null;
   // The background view (when the server sends the curve) shows the measured pattern with the
   // background the ranking removed; the sticks belong to the net scale and stay in the other views.
-  const withBackground = backgroundPreview ? backgroundTraces(backgroundPreview) : showBackground ? backgroundTraces(data?.background) : null;
+  const withBackground = pointTraces || (backgroundPreview ? backgroundTraces(backgroundPreview) : showBackground ? backgroundTraces(data?.background) : null);
   // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
   const traces = withBackground || !data ? withBackground || [] : [...overlayTraces(showResidual && left ? withResidualProfile(data, left) : data, showResidual && left ? [] : selected, colors, focused),
     ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, markerLevel)] : [])];
@@ -520,9 +602,14 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                   {` · ${focusedRow.sourceLabel}`}{selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
                 : 'Click a candidate to preview its reflections; tick it to keep it.'}</span>
               <span className="dara-qr-plot-tools">
-                <span>{withBackground ? 'Measured pattern with its background' : showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
-                {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground || Boolean(backgroundPreview)} onChange={setShowBackground} aria-label="Show the background" />Background</label> : null}
-                {data.background?.settings ? <Popover trigger="click" placement="bottomRight" title="Determine background" open={backgroundOpen}
+                <span>{pointTraces ? 'Measured pattern with base points of its background' : withBackground ? 'Measured pattern with its background'
+                  : showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
+                {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground || Boolean(backgroundPreview) || Boolean(points)}
+                  onChange={value => { setShowBackground(value); if (!value) setPoints(null); }} aria-label="Show the background" />Background</label> : null}
+                {showBackground && !points && backgroundTraces(data.background) ? <Tooltip title="Set the background by hand: drag, add and remove base points on the curve (search-match only)">
+                  <Button size="small" onClick={startPoints}>Edit points</Button>
+                </Tooltip> : null}
+                {data.background?.settings && !points ? <Popover trigger="click" placement="bottomRight" title="Determine background" open={backgroundOpen}
                   onOpenChange={value => { setBackgroundOpen(value); if (!value) setBackgroundPreview(null); }} destroyTooltipOnHide
                   content={<BackgroundForm initial={data.background.settings} jobId={data.job_id} onPreview={setBackgroundPreview} onAccept={settings => {
                     setBackgroundOpen(false);
@@ -538,7 +625,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
               </span>
             </div>
-            {data.profile ? <Plot data={traces} useResizeHandler xBounds={bounds} onClick={onPlotClick}
+            {/* While the base points are edited their list sits beside the plot, so a drag never moves the plot. */}
+            {data.profile ? <div className={points ? 'dara-plot-with-side' : undefined}><div className="dara-plot-main">
+            <Plot data={traces} useResizeHandler xBounds={bounds} onClick={onPlotClick} anchorEdit={pointsEdit}
               onDoubleClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}
               className="dara-qr-plot-area" style={{ width: '100%' }}
               layout={{
@@ -548,7 +637,15 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 yaxis: { title: { text: withBackground ? 'Intensity' : showResidual && left ? 'Residual net intensity' : 'Net intensity' }, rangemode: 'tozero',
                   ...(zoom.range && zoom.y ? { range: [...zoom.y], autorange: false } : {}) },
               }}
-              config={{ displaylogo: false, responsive: true }} /> : null}
+              config={{ displaylogo: false, responsive: true }} /></div>
+            {pointsEdit ? <BackgroundCurvePanel side anchors={points.anchors} selected={points.selected}
+              onChange={pointsEdit.onChange} onSelect={pointsEdit.onSelect} onRemove={pointsEdit.onRemove} error={pointsError}
+              warnings={[...pointWarnings, ...(shownCurve?.error ? [`Curve preview unavailable: ${shownCurve.error}`] : [])]}
+              help="Drag a point · click the curve to add one · Alt+click a point or use the list to remove one. The points change the search-match only; a Rietveld refinement fits its own background."
+              submitText="Accept and rank again" resetText="Back to automatic" canReset={Boolean(bgView.settings?.anchors?.length)}
+              resetTitle={bgView.settings?.anchors?.length ? 'Rank again with the automatic background' : 'This ranking already uses the automatic background'}
+              onSubmit={() => rankWithPoints(points.anchors)} onReset={() => rankWithPoints([])} onCancel={() => setPoints(null)} /> : null}
+            </div> : null}
           </section>
           <div className="dara-qr-toolbar">
             <label><Switch size="small" checked={quick.theoretical} onChange={quick.toggleTheoretical} />
@@ -589,9 +686,11 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
             : <p className="dara-qr-empty">No phase selected. Tick candidates in the table to draw their sticks on the pattern, then refine them together.</p>}
           {weakLeft.length ? <p className="dara-qr-weak">
             {`${weakLeft.length} weak suggestion${weakLeft.length === 1 ? '' : 's'} not selected: `}
-            {weakLeft.map((item, index) => <React.Fragment key={item.key}>{index ? ', ' : ''}<ChemicalFormula formula={item.formula} /></React.Fragment>)}
-            {' '}<Button type="link" size="small" disabled={selected.length + weakLeft.length > MAX_REFINE}
-              onClick={() => setSelected([...selected, ...weakLeft.map(item => item.key)])}>Add</Button>
+            {/* One click adds the one phase it names. */}
+            {weakLeft.map((item, index) => <React.Fragment key={item.key}>{index ? ' ' : ''}
+              <Button type="link" size="small" icon={<PlusOutlined />} disabled={selected.length >= MAX_REFINE}
+                aria-label={`Add ${item.formula}`} onClick={() => setSelected([...selected, item.key])}><ChemicalFormula formula={item.formula} /></Button>
+            </React.Fragment>)}
           </p> : null}
           {chosen.length ? <ResidualPanel residual={residual} rows={rows} selected={selected} setSelected={setSelected} /> : null}
           {over ? <p className="dara-qr-limit">{`A refinement takes at most ${MAX_REFINE} phases: remove ${selected.length - MAX_REFINE}.`}</p> : null}

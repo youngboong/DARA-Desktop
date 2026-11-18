@@ -199,6 +199,25 @@ test('background view: measured and background only when the response carries th
   assert.equal(backgroundSettings({ method: 'rolling_minimum' }).method, 'auto', 'the server default is "auto"');
 });
 
+test('manual background: points seeded on the automatic curve, or the ones in use; settings with and without them', async () => {
+  const { startingPoints, withPoints } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  const x = Array.from({ length: 201 }, (_, i) => 10 + i * 0.1);
+  const intensity = x.map(value => 100 + 400 * Math.exp(-(value - 10) / 3)); // a low-angle rise
+  const observed = intensity.map((value, i) => value + (Math.abs(x[i] - 20) < 0.3 ? 2000 : 0)); // one peak
+  const points = startingPoints({ two_theta: x, observed, intensity, settings: { method: 'auto' } });
+  assert.ok(points.length >= 3 && points.length <= 20, 'a modest number');
+  assert.deepEqual([points[0][0], points.at(-1)[0]], [10, 30], 'both range ends');
+  assert.ok(points.every(([at]) => Math.abs(at - 20) >= 0.3), 'never on the peak');
+  assert.ok(points.every((point, i) => !i || point[0] > points[i - 1][0]), 'sorted');
+  const inUse = [[10, 5], [30, 6]];
+  assert.deepEqual(startingPoints({ two_theta: x, observed, intensity, settings: { anchors: inUse } }), inUse);
+  assert.deepEqual(startingPoints(undefined), []);
+  assert.deepEqual(withPoints({ method: 'sonneveld_visser', granularity: 30, bending_factor: 2, anchors: [[1, 1]] }, inUse),
+    { method: 'sonneveld_visser', granularity: 30, bending_factor: 2, anchors: inUse });
+  assert.deepEqual(withPoints({ method: 'auto', anchors: inUse }, []), { method: 'auto', granularity: 20, bending_factor: 1 },
+    'back to automatic drops the points');
+});
+
 test('stored-pattern ranking: the setup options as typed JSON', async () => {
   const { taskRankingBody } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
   assert.deepEqual(taskRankingBody([

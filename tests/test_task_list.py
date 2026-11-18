@@ -262,3 +262,12 @@ def test_list_labels_write_hydroxides_as_on_the_task_page():
     from dara.server.task_summary import _label
 
     assert _label("La(HO)3_176_(mp_mp-625394)-0").startswith("La(OH)3")
+
+
+def test_users_are_distinct_with_counts_and_case_variants_merged(populated):
+    with _store(populated) as store:
+        store.update({"uuid": "u4", "index": 4, "status": "READY", "user": "Amy", "job": {"name": "x.xy"}})
+        store.update({"uuid": "u5", "index": 5, "status": "READY", "user": None, "job": {"name": "y.xy"}})
+    users = asyncio.run(api_router.task_users())["users"]
+    # "amy" (2 tasks) and "Amy" (1) are one entry under the spelling used most; no entry without a user.
+    assert users == [{"user": "amy", "count": 3}, {"user": "bob", "count": 1}]

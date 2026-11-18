@@ -237,7 +237,20 @@ function attachAnchorEditing(gd, editRef) {
     const curve = drag.edit.curveOf(drag.anchors);
     const [curveIndex, anchorIndex] = [traceIndex('bg-curve'), traceIndex('bg-anchors')];
     if (curveIndex < 0 || anchorIndex < 0) return;
-    Plotly.restyle(gd, { y: [curve, drag.anchors.map(point => point[1])] }, [curveIndex, anchorIndex]);
+    const update = { y: [curve, drag.anchors.map(point => point[1])] };
+    if (drag.edit.moveX) update.x = [gd.data[curveIndex].x, drag.anchors.map(point => point[0])];
+    Plotly.restyle(gd, update, [curveIndex, anchorIndex]);
+  };
+
+  // `edit.moveX` ([lo, hi] 2θ) lets a point move sideways too, between its neighbours and inside [lo, hi].
+  const xAt = (edit, clientX, rect) => {
+    const xa = gd._fullLayout.xaxis;
+    const [lo, hi] = edit.moveX;
+    const before = drag.anchors[drag.index - 1];
+    const after = drag.anchors[drag.index + 1];
+    const min = before ? before[0] + 1e-3 : lo;
+    const max = after ? after[0] - 1e-3 : hi;
+    return roundTo(Math.min(Math.max(xa.p2l(clientX - rect.left - xa._offset), min), max), 4);
   };
 
   function onMove(event) {
@@ -245,7 +258,8 @@ function attachAnchorEditing(gd, editRef) {
     event.preventDefault();
     const rect = gd.getBoundingClientRect();
     const y = roundTo(pixelToIntensity(gd._fullLayout, event.clientY - rect.top), 2);
-    drag.anchors = drag.anchors.map((point, index) => (index === drag.index ? [point[0], y] : point));
+    const x = drag.edit.moveX ? xAt(drag.edit, event.clientX, rect) : null;
+    drag.anchors = drag.anchors.map((point, index) => (index === drag.index ? [x ?? point[0], y] : point));
     drag.moved = true;
     if (frame === null) frame = window.requestAnimationFrame(draw);
   }
@@ -293,7 +307,7 @@ function attachAnchorEditing(gd, editRef) {
     const layer = gd.querySelector('.nsewdrag');
     if (!layer || drag) return;
     const at = edit ? mainPanel(event.clientX, event.clientY) : null;
-    layer.style.cursor = at && hitAnchor(edit, at) >= 0 ? (event.altKey ? 'not-allowed' : 'ns-resize') : '';
+    layer.style.cursor = at && hitAnchor(edit, at) >= 0 ? (event.altKey ? 'not-allowed' : edit.moveX ? 'move' : 'ns-resize') : '';
   };
 
   gd.addEventListener('mousedown', onDown, true);
@@ -428,9 +442,10 @@ function attachAnnotating(gd, annotateRef) {
 /**
  * Plotly scatter plot with the DARA navigation. `xBounds` is the measured 2θ range that zoom
  * and pan stay inside (default: the extent of the plotted data). `anchorEdit` turns on background
- * curve editing: `{anchors, curveOf(anchors, xs?), blocked(x), onChange, onAdd, onRemove, onSelect}`
+ * curve editing: `{anchors, curveOf(anchors, xs?), blocked(x), onChange, onAdd, onRemove, onSelect, moveX?}`
  * (`curveOf` without `xs` gives the curve on the plotted 2θ grid; `blocked(x)` is true where no
- * anchor may be added). The curve and anchors are the traces with meta 'bg-curve' / 'bg-anchors'.
+ * anchor may be added; `moveX` [lo, hi] lets a dragged anchor move in 2θ as well, between its
+ * neighbours). The curve and anchors are the traces with meta 'bg-curve' / 'bg-anchors'.
  * `annotate` turns on label editing (see attachAnnotating).
  */
 export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, anchorEdit = null, annotate = null, ...props }) {

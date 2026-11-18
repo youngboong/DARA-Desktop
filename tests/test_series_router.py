@@ -297,3 +297,16 @@ def test_refresh_failure_keeps_the_old_summary(populated, client, monkeypatch):
 
 def test_detail_unknown_series_is_404(populated, client):
     assert client.get("/api/series/nope").status_code == 404
+
+
+def test_detail_items_carry_the_list_row_fields(populated, client, monkeypatch):
+    monkeypatch.setattr("dara.server.task_summary.summarize_stored_result", lambda uuid, runtime_s: None)
+    with _store(populated) as store:
+        record = store.query_one({"index": 1})
+        record["job"]["metadata"]["submission_settings"] = {"sample": "Anneal 500"}
+        record.update({"user": "amy", "review": {"selection": "version:2"}})
+        store.update(record)
+    items = {item["task_id"]: item for item in client.get("/api/series/s1").json()["items"]}
+    assert items[1]["sample"] == "Anneal 500" and items[1]["user"] == "amy" and items[1]["adopted"] == "version:2"
+    assert items[1]["created_on"].startswith("2026-05-01") and items[1]["error_summary"] is None
+    assert items[2]["sample"] is None and items[3]["progress"] is None

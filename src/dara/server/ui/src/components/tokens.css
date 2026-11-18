@@ -166,6 +166,10 @@ a:hover, .ant-btn-link:hover, .ant-typography a:hover { color: var(--dara-accent
 /* "Expert review" (role escalate, preset lime): the review amber with a full-strength border and weight,
    one step above "Check"; red stays for failures. */
 .ant-tag-lime { color: var(--dara-review); background: var(--dara-review-bg); border-color: var(--dara-review); font-weight: 600; }
+/* The "Expert review" banner in the same escalate tone: warning amber, full-strength border and icon, bold title. */
+.ant-alert.dara-alert-escalate { border-color: var(--dara-review); }
+.dara-alert-escalate .ant-alert-icon { color: var(--dara-review); }
+.dara-alert-escalate .ant-alert-message { font-weight: 600; }
 /* Progress bars in the accent (antd's blue and green otherwise); a failed one in the failure red. */
 .ant-progress-bg, .ant-progress-success-bg, .ant-progress-status-success .ant-progress-bg { background-color: var(--dara-accent); }
 .ant-progress-status-success .ant-progress-text { color: var(--dara-accent); }

@@ -52,3 +52,9 @@ export function taskHref(id, context) {
 export function positionText(context) {
   return context?.index >= 0 && context.ids.length > 1 ? `Sample ${context.index + 1} of ${context.ids.length}` : null;
 }
+
+/** Id of the series a task was opened from (`back` = "from=series&id=…"), or null. */
+export function seriesOf(context) {
+  const params = new URLSearchParams(context?.back || '');
+  return params.get('from') === 'series' && params.get('id') ? params.get('id') : null;
+}

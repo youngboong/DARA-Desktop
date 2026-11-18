@@ -289,3 +289,16 @@ export function fitTaskIds(selected = [], tasks = []) {
   const identification = new Set((tasks || []).filter(isIdentificationEntry).map(entry => entry.fw_id));
   return { ids: selected.filter(id => !identification.has(id)), skipped: selected.filter(id => identification.has(id)) };
 }
+
+/**
+ * Suggestions of the user filter: `previous` plus `names`, one entry per name ignoring case (the
+ * filter ignores case; the first spelling seen stays), sorted.
+ */
+export function mergeUsers(previous = [], names = []) {
+  const byKey = new Map(previous.map(name => [name.toLowerCase(), name]));
+  names.forEach(name => {
+    const text = typeof name === 'string' ? name.trim() : '';
+    if (text && text !== 'unknown' && !byKey.has(text.toLowerCase())) byKey.set(text.toLowerCase(), text);
+  });
+  return byKey.size === previous.length ? previous : [...byKey.values()].sort((a, b) => a.localeCompare(b));
+}

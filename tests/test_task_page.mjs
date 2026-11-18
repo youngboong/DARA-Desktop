@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { cautionDisplay, cautionRemedies, remedyForCaution, splitUndefinedParameters } from '../src/dara/server/ui/src/components/fitCautions.mjs';
 import { preciseRwp, reasonsText } from '../src/dara/server/ui/src/components/confidence.mjs';
-import { listContext, positionText, resultsHref, taskHref } from '../src/dara/server/ui/src/components/sampleNav.mjs';
+import { listContext, positionText, resultsHref, seriesOf, taskHref } from '../src/dara/server/ui/src/components/sampleNav.mjs';
 import { fillKeys } from '../src/dara/server/ui/src/components/composition.mjs';
 import { spacegroupOfPhase } from '../src/dara/server/ui/src/components/versions.mjs';
 
@@ -74,6 +74,8 @@ const edge = listContext('?id=44&list=38,41,44,x,-1', '44');
 assert.deepEqual([edge.ids, edge.prev, edge.next], [[38, 41, 44], 41, null]);
 assert.equal(listContext('?id=9&list=38,41', '9').prev, null, 'a task outside the list has no neighbours');
 assert.equal(resultsHref(listContext('?back=javascript:alert(1)', '1')), '/results?javascript%3Aalert%281%29=', 'back stays a query string');
+assert.equal(seriesOf(listContext(`?id=3&back=${encodeURIComponent('from=series&id=s-1')}`, '3')), 's-1', 'opened from a series');
+assert.equal(seriesOf(context), null);
 
 // Duplicates never share a tray fill; a compound keeps one fill across fits.
 const keys = fillKeys([{ phases: P, weights }, { phases: [P[1], P[2]], weights }], name => `${name.split('_')[0]}:${spacegroupOfPhase(name)}`);

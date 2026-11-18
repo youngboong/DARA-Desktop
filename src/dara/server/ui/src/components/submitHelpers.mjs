@@ -202,7 +202,23 @@ export function previewShape(points, { width = 600, height = 80, start = null, e
     .map(([a, b]) => [Math.max(lo, Math.min(a, b)), Math.min(hi, Math.max(a, b))])
     .filter(([a, b]) => b > a)
     .map(([a, b]) => ({ x: sx(a), width: sx(b) - sx(a) }));
-  return { d, shades, lo, hi };
+  return { d, shades, lo, hi, ticks: previewTicks(lo, hi) };
+}
+
+/**
+ * 2θ tick labels between the end values of the preview: a round step (1, 2, 5, 10 or 20°) giving
+ * at most 8 ticks, each `{value, at}` (`at`: 0..1 across the box), none within 6 % of an end label.
+ */
+export function previewTicks(lo, hi) {
+  const span = hi - lo;
+  if (!(span > 0)) return [];
+  const step = [1, 2, 5, 10, 20].find(value => span / value <= 8) || 50;
+  const ticks = [];
+  for (let value = Math.ceil(lo / step) * step; value < hi; value += step) {
+    const at = (value - lo) / span;
+    if (at >= 0.06 && at <= 0.94) ticks.push({ value, at });
+  }
+  return ticks;
 }
 
 /** `run(task)` runs `task()` (returning a promise) with at most `n` tasks at a time; resolves with its result. */

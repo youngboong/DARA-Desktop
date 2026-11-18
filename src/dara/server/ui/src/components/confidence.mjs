@@ -9,10 +9,13 @@ const fixed = (value, digits) => Number(value).toFixed(digits);
 const signed = (value, digits) => `${Number(value) >= 0 ? '+' : '−'}${Math.abs(Number(value)).toFixed(digits)}`;
 const plural = (count, singular, pluralForm = `${singular}s`) => `${count} ${count === 1 ? singular : pluralForm}`;
 
-const OVERALL_ALERT = { high: 'success', check: 'warning', expert: 'error' };
+// Expert review is not a failure: amber like "Check", one step stronger (`overallAlertClass`); red is failure only.
+const OVERALL_ALERT = { high: 'success', check: 'warning', expert: 'warning' };
 const RANK = { high: 0, confident: 0, check: 1, ambiguous: 1, expert: 2, weak: 2 };
 
 export const overallAlertType = level => OVERALL_ALERT[level] || 'info';
+/** Extra class of the overall banner: the escalate tone of the "Expert review" tag. */
+export const overallAlertClass = level => (levelTone(level) === 'escalate' ? 'dara-alert-escalate' : undefined);
 export const overallColor = level => toneColor(levelTone(level));
 export const verdictColor = overallColor;
 

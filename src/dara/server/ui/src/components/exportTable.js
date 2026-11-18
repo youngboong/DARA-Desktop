@@ -40,3 +40,12 @@ export async function downloadTable(ids, onProgress = () => {}) {
   saveText(mergeCsv(texts), filename);
   return filename;
 }
+
+/** The result archives of `ids` (at most 50, one folder per task) as one ZIP, saved. Resolves to the file name. */
+export async function downloadResults(ids) {
+  const response = await fetch(`${API}/tasks/download.zip?ids=${ids.join(',')}`);
+  if (!response.ok) throw await responseError(response, 'The results could not be downloaded');
+  const filename = /filename="([^"]+)"/.exec(response.headers.get('Content-Disposition') || '')?.[1] || 'dara_results.zip';
+  saveText(await response.blob(), filename, 'application/zip');
+  return filename;
+}

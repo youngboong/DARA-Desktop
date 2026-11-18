@@ -83,6 +83,7 @@ async def measured_pattern(task_id: int):
     return {
         "task_id": task_id,
         "name": ntpath.basename(str(job.get("job", {}).get("name") or f"Task {task_id}")),
+        "sample": ((job.get("job", {}).get("metadata") or {}).get("submission_settings") or {}).get("sample"),
         "angles": angles,
         "intensities": intensities,
         "wavelength": wavelength,

@@ -68,7 +68,7 @@ console.log('submit helpers ok');
   console.log('advanced changes ok');
 }
 
-import { checkElements, previewShape, readRecentElements, rememberElements, unrecognisedTokens } from '../src/dara/server/ui/src/components/submitHelpers.mjs';
+import { checkElements, previewShape, previewTicks, readRecentElements, rememberElements, unrecognisedTokens } from '../src/dara/server/ui/src/components/submitHelpers.mjs';
 
 // element entry: case normalised where the reading is unique, unknown entries named
 {
@@ -111,6 +111,11 @@ assert.deepEqual(unrecognisedTokens('C:/data/NCM811_2h.xy', { formulas: [] }), [
   assert.deepEqual(shape.shades, [{ x: 0, width: 25 }, { x: 75, width: 25 }]);
   assert.equal(previewShape({ two_theta: [10], intensity: [1] }), null);
   assert.equal(previewShape(null), null);
+  // tick labels between the end values: round 2θ values, none crowding an end label
+  assert.deepEqual(previewTicks(5, 80).map(tick => tick.value), [10, 20, 30, 40, 50, 60, 70]);
+  assert.deepEqual(previewTicks(10, 30).map(tick => tick.value), [15, 20, 25]);
+  assert.equal(previewTicks(20, 20).length, 0);
+  assert.ok(previewTicks(5, 80).every(tick => tick.at >= 0.06 && tick.at <= 0.94));
 }
 
 console.log('element entry, recent sets, file-name tokens and preview ok');

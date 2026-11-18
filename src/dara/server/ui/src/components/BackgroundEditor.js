@@ -98,10 +98,14 @@ export default function BackgroundEditor({ busy, disabled, getView, onSubmit, ba
  * so dragging an anchor never moves the plot; above it otherwise.
  * `anchors` are `[[2θ, y], ...]`; `onChange(anchors)` replaces them; `selected` is the anchor
  * index Delete removes. `warnings` never block; `error` (anchors the server would reject) does.
+ * The texts default to the fit view's; the search-match passes its own (`help`, `submitText`, ...).
  */
 export function BackgroundCurvePanel({
   anchors, selected = null, onChange, onSelect, onRemove, warnings = [], error = null, busy = false,
   canReset = false, onSubmit, onReset, onCancel, side = false,
+  help = 'Drag a point up or down · click the curve to add a point · Alt+click a point or press Delete to remove the selected one',
+  submitText = 'Refine as new version', resetText = 'Reset to automatic',
+  resetTitle = canReset ? "Refine with BGMN's automatic background polynomial" : 'This fit already uses the automatic background',
 }) {
   const setY = (index, value) => {
     if (!Number.isFinite(value)) return;
@@ -121,13 +125,13 @@ export function BackgroundCurvePanel({
     <Space align="start" wrap size={side ? 'middle' : 'large'} direction={side ? 'vertical' : 'horizontal'} style={{ width: '100%' }}>
       <div style={{ maxWidth: 420 }}>
         <Text strong>Edit background curve</Text> <Text type="secondary">({anchors.length} points, PCHIP)</Text>
-        <div><Text type="secondary">Drag a point up or down · click the curve to add a point · Alt+click a point or press Delete to remove the selected one</Text></div>
+        <div><Text type="secondary">{help}</Text></div>
         {error ? <Alert type="error" showIcon message={error} style={{ marginTop: 8 }} /> : null}
         {warnings.map(text => <Alert key={text} type="warning" showIcon message={text} style={{ marginTop: 8 }} />)}
         <Space wrap style={{ marginTop: 8 }}>
-          <Button type="primary" disabled={busy || Boolean(error)} loading={busy} onClick={onSubmit}>Refine as new version</Button>
-          <Tooltip title={canReset ? "Refine with BGMN's automatic background polynomial" : 'This fit already uses the automatic background'}>
-            <Button disabled={busy || !canReset} onClick={onReset}>Reset to automatic</Button>
+          <Button type="primary" disabled={busy || Boolean(error)} loading={busy} onClick={onSubmit}>{submitText}</Button>
+          <Tooltip title={resetTitle}>
+            <Button disabled={busy || !canReset} onClick={onReset}>{resetText}</Button>
           </Tooltip>
           <Button onClick={onCancel}>Cancel</Button>
         </Space>

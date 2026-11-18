@@ -494,6 +494,12 @@ code {
   margin-top: var(--dara-space-2);
 }
 
+.dara-qr-bg-note {
+  margin: var(--dara-space-2) 0 0;
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
 /* Task page: the answer under the verdict, one line: the judged fit, its phases with wt% ± e.s.d., the adoption. */
 .dara-result-line {
   display: flex;
@@ -705,6 +711,9 @@ code {
 
 .dara-filter-name { width: 240px; }
 .dara-filter-user { width: 180px; }
+/* A user suggestion: the name, and its task count on the right in the secondary ink. */
+.dara-user-option { display: flex; justify-content: space-between; gap: var(--dara-space-3); }
+.dara-user-option .dara-num { color: var(--dara-text-secondary); font-size: var(--dara-font-12); }
 .dara-filter-select { width: 170px; }
 
 /* Results rows: one line per task (sample, file, marks); unfinished rows add a status line. */

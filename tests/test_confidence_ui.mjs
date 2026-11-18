@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import {
-  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, selectionQuery, levelRank, overallAlertType, overallColor, reasonsText,
+  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, selectionQuery, levelRank, overallAlertClass, overallAlertType, overallColor, reasonsText,
   missingCell, patternFiles, patternHref, screeningTags, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, verdictColor,
 } from '../src/dara/server/ui/src/components/confidence.mjs';
 
 // --- levels ------------------------------------------------------------------
 assert.equal(overallAlertType('high'), 'success');
 assert.equal(overallAlertType('check'), 'warning');
-assert.equal(overallAlertType('expert'), 'error');
+assert.equal(overallAlertType('expert'), 'warning', 'Expert review is not a failure: no red banner');
+assert.equal(overallAlertClass('expert'), 'dara-alert-escalate');
+assert.equal(overallAlertClass('check'), undefined);
 assert.equal(overallAlertType(undefined), 'info');
 assert.equal(overallColor('high'), 'green');
 assert.equal(overallColor('check'), 'gold');

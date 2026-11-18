@@ -1,5 +1,6 @@
 // Pure helpers of the quick ranking workspace (search-match). No React, no fetch: tested with node.
 import { TRAY_LINES } from './composition.mjs';
+import { seedAnchors } from './backgroundAnchors.mjs';
 
 export const MAX_REFINE = 12; // Known-phase refinement takes at most 12 phases
 const PREVIEW_COLOR = '#c99a2e'; // --dara-shell-mark: apart from the grey measured line and the TRAY_LINES of selected phases
@@ -304,6 +305,22 @@ export function backgroundSettings(settings) {
     bending_factor: Number.isFinite(bending) ? Math.min(50, Math.max(0, bending)) : 1,
   };
 }
+
+/**
+ * Starting base points of HighScore's manual background on the Background view `view`
+ * ({two_theta, observed, intensity, settings}): the points in use, else points seeded on the
+ * automatic curve as the fit view seeds them (greedy, at most SEED_MAX; off-peak where the
+ * measured pattern is within 3σ of the curve).
+ */
+export function startingPoints(view) {
+  const given = view?.settings?.anchors;
+  if (given?.length) return given.map(point => [Number(point[0]), Number(point[1])]);
+  if (!backgroundTraces(view)) return [];
+  return seedAnchors({ x: view.two_theta, yObs: view.observed, yCalc: view.observed, yBkg: view.intensity });
+}
+
+/** Ranking settings with the base points `anchors` (none: back to the automatic curve of `settings`). */
+export const withPoints = (settings, anchors) => ({ ...backgroundSettings(settings), ...(anchors?.length ? { anchors } : {}) });
 
 const json = (value, fallback) => { try { return JSON.parse(value); } catch (_) { return fallback; } };
 const number = value => (value === null || value === undefined || value === '' ? undefined : Number(value));

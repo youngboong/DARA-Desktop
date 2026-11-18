@@ -220,8 +220,10 @@ async def submit_series(
 _LIST_PROPERTIES = ["index", "status", "submitted_time", "job.metadata.series", "job.name"]
 _DETAIL_PROPERTIES = [
     "index", "uuid", "status", "submitted_time", "start_time", "end_time", "summary",
-    "job.metadata.series", "job.name",
+    "job.metadata", "job.name", "user", "review.selection", "error",
 ]
+# Fields of a series item taken from its Results list row (``api_router.list_row``).
+_ROW_FIELDS = ("sample", "adopted", "created_on", "user", "error_summary", "progress")
 
 
 def _series_of(record: dict) -> dict | None:
@@ -311,16 +313,21 @@ async def get_series(series_id: str):
     records = _query_series(_DETAIL_PROPERTIES, series_id)
     if not records:
         raise HTTPException(status_code=404, detail="Series not found")
+    from dara.server.api_router import list_row
+
     entries = []
     for record in records:
         series = _series_of(record)
+        summary = _refreshed_summary(record)
+        row = list_row(record, summary)
         entries.append({
+            **{key: row[key] for key in _ROW_FIELDS},
             "task_id": record["index"],
             "name": (record.get("job") or {}).get("name"),
             "order": series.get("order", 0),
             "variable": series.get("variable"),
             "state": record.get("status"),
-            "summary": _refreshed_summary(record),
+            "summary": summary,
             "_time": record.get("submitted_time"),
         })
     entries.sort(key=lambda item: (item["order"], item["task_id"]))

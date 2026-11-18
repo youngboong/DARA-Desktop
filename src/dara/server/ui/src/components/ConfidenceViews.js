@@ -3,7 +3,7 @@ import { Alert, Button, Checkbox, Dropdown, Space, Tag, Tooltip } from 'antd';
 import { DownloadOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import { FormulaText } from './ChemicalFormula';
 import {
-  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, overallAlertType, patternHref,
+  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, overallAlertClass, overallAlertType, patternHref,
   overallColor, overallShortLabel, patternFiles, reasonsText, screeningTags, verdictColor,
 } from './confidence.mjs';
 
@@ -30,6 +30,7 @@ export function ConfidenceBanner({ confidence, action = null, style = null, subj
     style={{ marginBottom: 16, ...style }}
     showIcon
     type={overallAlertType(overall.level)}
+    className={overallAlertClass(overall.level)}
     message={<>{overall.label || overall.level}{subject ? <span className="dara-banner-subject">{` — ${subject}`}</span> : null}</>}
     description={<>
       {reasons.length ? <ul style={{ margin: 0, paddingLeft: 20 }}>{reasons.map((reason, index) => <li key={index}><FormulaText text={reason.text} />

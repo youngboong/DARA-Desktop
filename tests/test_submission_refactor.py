@@ -179,7 +179,7 @@ def test_summarize_document_matches_result_and_never_touches_store(monkeypatch):
     fc.clear_lattice_flag_cache()
     via_result = asyncio.run(api_router.result(4))
     # the endpoint adds the display formulas (it may read the versions store)
-    assert set(via_result) == set(payload) | {"display_formulas", "internal_standard", "sample", "identified_from"}
+    assert set(via_result) == set(payload) | {"display_formulas", "internal_standard", "sample", "identified_from", "series"}
     assert set(via_result["final_result"]) == set(payload["final_result"])
     fc.clear_lattice_flag_cache()
 

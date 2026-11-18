@@ -98,7 +98,9 @@ const Container = styled.div`
   .dara-pattern-preview { display: block; width: 100%; height: 80px; margin-top: 8px; border: 1px solid var(--dara-border); border-radius: var(--dara-radius); background: var(--dara-surface); }
   .dara-pattern-preview path { fill: none; stroke: var(--dara-text-secondary); stroke-width: 1; vector-effect: non-scaling-stroke; }
   .dara-pattern-preview rect { fill: var(--dara-surface-sunken); }
-  .dara-pattern-preview-axis { display: flex; justify-content: space-between; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
+  .dara-pattern-preview-axis { position: relative; display: flex; justify-content: space-between; color: var(--dara-text-secondary); font-size: var(--dara-font-12); font-variant-numeric: tabular-nums; }
+  .dara-pattern-preview-axis .tick { position: absolute; top: 0; transform: translateX(-50%); }
+  .dara-pattern-preview-axis .tick::before { content: ''; position: absolute; left: 50%; top: -5px; height: 4px; border-left: 1px solid var(--dara-border-strong); }
   .dara-recent { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
   .dara-recent .ant-btn-link { height: auto; padding: 0 4px; }
   .dara-qr-summary {
@@ -225,7 +227,11 @@ function PatternPreview({ points, start, end, excluded }) {
       {shape.shades.map(item => <rect key={item.x} x={item.x} y={0} width={item.width} height={80} />)}
       <path d={shape.d} />
     </svg>
-    <div className="dara-pattern-preview-axis"><span>{`${shape.lo.toFixed(1)}°`}</span><span>2θ</span><span>{`${shape.hi.toFixed(1)}°`}</span></div>
+    <div className="dara-pattern-preview-axis" aria-hidden="true">
+      <span>{`2θ ${shape.lo.toFixed(1)}°`}</span>
+      {shape.ticks.map(tick => <span key={tick.value} className="tick" style={{ left: `${(tick.at * 100).toFixed(2)}%` }}>{`${tick.value}°`}</span>)}
+      <span>{`${shape.hi.toFixed(1)}°`}</span>
+    </div>
   </div>;
 }
 
@@ -686,7 +692,7 @@ function Submission() {
   // "Save identification": the selected phases as the result, without refinement. Uses the ranking's
   // pattern and chemistry with the setup's user, sample and instrument; a field the setup has not
   // filled in yet takes the user back to it, like "Refine with Rietveld".
-  const saveIdentification = async ({ referenceIds: ids }) => {
+  const saveIdentification = async ({ referenceIds: ids, background }) => {
     let values;
     try {
       values = await form.validateFields(['user', 'instrument_profile', ...(synchrotron ? ['wavelength_sync_a'] : ['wavelength_lab'])]);
@@ -711,6 +717,8 @@ function Submission() {
     if (sample?.trim()) body.append('sample', sample.trim());
     body.append('instrument_profile', values.instrument_profile);
     body.append('reference_ids', JSON.stringify(ids));
+    // The background the ranking used (sliders or base points): stored and named in the report's methods.
+    if (background) body.set('background', JSON.stringify(background));
     setMsg(null);
     const send = async confirmed => {
       if (confirmed) body.set('confirm_wavelength', 'true');

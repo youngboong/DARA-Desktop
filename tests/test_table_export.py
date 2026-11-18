@@ -381,6 +381,41 @@ def test_download_result_writes_the_adopted_version(monkeypatch):
         assert json.loads(bundle.read("summary.json"))["adopted"] == "version:3"
 
 
+def test_bulk_download_has_one_folder_per_task_and_lists_the_skipped(monkeypatch):
+    document, summary = _archive_inputs()
+    records = [
+        {"index": 5, "uuid": "u5", "status": "COMPLETED", "job": {"name": "s.xrdml"}},
+        {"index": 6, "uuid": "u6", "status": "RUNNING", "job": {"name": "r.xy"}},
+        {"index": 7, "uuid": "u7", "status": "COMPLETED", "job": {
+            "name": "i.xy", "metadata": {"submission_settings": {"analysis_mode": "identification"}}}},
+    ]
+    monkeypatch.setattr(api_router, "get_worker_store", lambda: _Store(records))
+    monkeypatch.setattr(api_router, "get_result_store", lambda: _OneStore(None, {"output": document}))
+    monkeypatch.setattr(api_router, "MontyDecoder", lambda: SimpleNamespace(process_decoded=lambda o: o))
+
+    async def fake_result(task_id):
+        return summary
+
+    monkeypatch.setattr(api_router, "result", fake_result)
+    monkeypatch.setattr(api_router, "_adopted_version_record", lambda _job: None)
+
+    async def read():
+        response = await api_router.download_tasks_archive(ids="5,6,7,99")
+        return response, b"".join([chunk async for chunk in response.body_iterator])
+
+    response, body = asyncio.run(read())
+    assert re.search(r'dara_tasks_\d{8}_4_results\.zip"$', response.headers["content-disposition"])
+    with zipfile.ZipFile(io.BytesIO(body)) as bundle:
+        names = bundle.namelist()
+        assert "dara_task_5_s_all_results/summary.json" in names
+        assert not any(name.startswith(("dara_task_6", "dara_task_7")) for name in names)
+        skipped = bundle.read("SKIPPED.txt").decode()
+    assert "Task 6:" in skipped and "Task 7: an identification" in skipped and "Task 99: not found" in skipped
+    with pytest.raises(HTTPException) as caught:
+        asyncio.run(api_router.download_tasks_archive(ids=",".join(str(i) for i in range(51))))
+    assert caught.value.status_code == 400
+
+
 @pytest.mark.parametrize(
     ("state", "word"), [("FIZZLED", "failed"), ("CANCELLED", "cancelled"), ("RUNNING", "Wait")]
 )

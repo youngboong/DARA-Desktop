@@ -9,15 +9,16 @@ import { API as URL, postJson } from '../components/QuickRefineProgress';
 import { readRemembered } from '../components/submitHelpers.mjs';
 import { taskHref } from '../components/sampleNav.mjs';
 import { resultColumns } from '../components/ResultColumns';
-import { downloadTable, errorText, responseError } from '../components/exportTable';
+import { downloadResults, downloadTable, errorText, responseError } from '../components/exportTable';
 import {
   ACTIVE_STATES, MAX_LIMIT, PAGE_SIZES, STATES, apiQuery, backQuery, deletable, filtersActive,
-  hasActiveRows, isIdentificationEntry, parseResultsView, partitionSelected, resultsSearch, retryable, stateLabel,
+  hasActiveRows, isIdentificationEntry, mergeUsers, parseResultsView, partitionSelected, resultsSearch, retryable, stateLabel,
 } from '../components/resultsList.mjs';
 
 const POLL_MS = 5000;
 const MAX_POLL_ERRORS = 3;
 const MAX_COMPARE = 20;
+const MAX_ZIP = 50; // the server's id limit, as for the table export
 const VERDICT_OPTIONS = [
   { value: 'high', label: 'High' }, { value: 'check', label: 'Check' },
   { value: 'expert', label: 'Expert review' }, { value: 'no-fit', label: 'No fit' },
@@ -42,6 +43,8 @@ function ResultsPage({ location }) {
   const [busy, setBusy] = React.useState(false);
   const [users, setUsers] = React.useState([]);
   const [userText, setUserText] = React.useState('');
+  const [userCounts, setUserCounts] = React.useState({}); // lower-case user → task count
+  const [zipping, setZipping] = React.useState(false);
   const rowsById = React.useRef(new Map()); // every row seen, for bulk actions on selections across pages
 
   // The view lives in the address: filters, sort, page, size and selection (Back from a task restores it).
@@ -70,12 +73,16 @@ function ResultsPage({ location }) {
 
   const remember = tasks => {
     (tasks || []).forEach(entry => rowsById.current.set(entry.fw_id, entry));
-    setUsers(previous => {
-      const next = new Set(previous);
-      (tasks || []).forEach(entry => { if (entry.user && entry.user !== 'unknown') next.add(entry.user); });
-      return next.size === previous.length ? previous : [...next].sort((a, b) => a.localeCompare(b));
-    });
+    setUsers(previous => mergeUsers(previous, (tasks || []).map(entry => entry.user)));
   };
+  // Every user with stored tasks (and their counts), not only those of the loaded rows.
+  React.useEffect(() => {
+    fetch(`${URL}/tasks/users`).then(response => (response.ok ? response.json() : null)).then(body => {
+      if (!body?.users) return;
+      setUserCounts(Object.fromEntries(body.users.map(item => [item.user.toLowerCase(), item.count])));
+      setUsers(previous => mergeUsers(previous, body.users.map(item => item.user)));
+    }).catch(() => {}); // an older server: suggestions from the loaded rows only
+  }, []);
 
   // First load of a query: errors replace the table (with Retry).
   React.useEffect(() => {
@@ -292,14 +299,32 @@ function ResultsPage({ location }) {
       if (failed.length) message.error(`Not retried: ${failed.join('; ')}`, 8);
     }),
   });
+  // The ZIP goes to the server with every selected id: tasks without fit files are named in its SKIPPED.txt.
+  const zipReady = partitionSelected(selected, rowsById.current, entry => entry.state === 'COMPLETED' && !isIdentificationEntry(entry));
+  const zipLabel = selected.length > MAX_ZIP ? `Download results (ZIP): at most ${MAX_ZIP} tasks`
+    : `Download results (ZIP) (${zipReady.ids.length})`;
+  const downloadZip = async () => {
+    setZipping(true);
+    try {
+      const filename = await downloadResults(selected);
+      const left = selected.length - zipReady.ids.length;
+      message.success(`Saved ${filename}${left ? ` (${plural(left, 'task')} without fit files, listed in SKIPPED.txt)` : ''}.`);
+    } catch (error) {
+      message.error(errorText(error));
+    } finally {
+      setZipping(false);
+    }
+  };
   const bulkMenu = {
     items: [
+      { key: 'zip', icon: <DownloadOutlined />, label: zipLabel, disabled: !zipReady.ids.length || selected.length > MAX_ZIP },
       { key: 'retry', icon: <ReloadOutlined />, label: `Retry failed (${retryIds.length})`, disabled: !retryIds.length },
       { key: 'delete', icon: <DeleteOutlined />, danger: true, label: `Delete (${removable.ids.length})…`, disabled: !removable.ids.length },
       { type: 'divider' },
       { key: 'clear', label: 'Clear selection' },
     ],
     onClick: ({ key }) => {
+      if (key === 'zip') downloadZip();
       if (key === 'retry') bulkRetry();
       if (key === 'delete') bulkDelete();
       if (key === 'clear') setSelected([]);
@@ -371,7 +396,8 @@ function ResultsPage({ location }) {
         <div className="dara-page-head">
           <h1>Results</h1>
           <span className="dara-page-note" aria-live="polite">
-            {paused ? <>Updates paused <Button type="link" size="small" onClick={reload}>Retry</Button></>
+            {exporting ? 'First export of these tasks can take up to a minute.'
+              : paused ? <>Updates paused <Button type="link" size="small" onClick={reload}>Retry</Button></>
               : live ? 'Updating while tasks run' : null}
           </span>
           <div className="dara-page-actions">
@@ -390,8 +416,8 @@ function ResultsPage({ location }) {
               {exporting ? `Exporting ${exporting.done} / ${exporting.total}…`
                 : `Export table (CSV) · ${fit.ids.length || (total ? `all ${total}` : 0)}`}
             </Dropdown.Button>
-            <Dropdown menu={bulkMenu} disabled={!selected.length || busy} trigger={['click']}>
-              <Button loading={busy}>{`${selected.length} selected`} <DownOutlined /></Button>
+            <Dropdown menu={bulkMenu} disabled={!selected.length || busy || zipping} trigger={['click']}>
+              <Button loading={busy || zipping}>{zipping ? 'Preparing ZIP…' : `${selected.length} selected`} <DownOutlined /></Button>
             </Dropdown>
           </div>
         </div>
@@ -401,8 +427,10 @@ function ResultsPage({ location }) {
           {remembered ? <Radio.Group optionType="button" value={mine ? 'mine' : !view.user ? 'all' : null} aria-label="Whose tasks"
             options={[{ value: 'mine', label: 'My tasks' }, { value: 'all', label: 'All users' }]}
             onChange={event => { const user = event.target.value === 'mine' ? remembered : ''; setUserText(user); update({ user }); }} /> : null}
-          <AutoComplete value={userText} onChange={setUserText} className="dara-filter-user"
-            options={users.map(value => ({ value }))} filterOption={(input, option) => option.value.toLowerCase().includes(input.toLowerCase())}
+          <AutoComplete value={userText} onChange={setUserText} className="dara-filter-user" dropdownMatchSelectWidth={240}
+            options={users.map(value => ({ value, label: userCounts[value.toLowerCase()]
+              ? <span className="dara-user-option">{value}<span className="dara-num">{plural(userCounts[value.toLowerCase()], 'task')}</span></span> : value }))}
+            filterOption={(input, option) => option.value.toLowerCase().includes(input.toLowerCase())}
             onSelect={value => update({ user: value })}>
             <Input.Search placeholder="User contains…" allowClear aria-label="Filter by user (contains)" onSearch={value => update({ user: value.trim() })} />
           </AutoComplete>

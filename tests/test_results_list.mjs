@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   adoptedRwp, apiQuery, backQuery, chunks, deletable, displayName, exportFilename, filtersActive, formatDate, hasActiveRows,
-  mergeCsv, middleSplit, parseResultsView, partitionSelected, resultsSearch, retryable, rowStatusLine, verdictView,
+  mergeCsv, mergeUsers, middleSplit, parseResultsView, partitionSelected, resultsSearch, retryable, rowStatusLine, verdictView,
 } from '../src/dara/server/ui/src/components/resultsList.mjs';
 import { listContext, resultsHref } from '../src/dara/server/ui/src/components/sampleNav.mjs';
 import { leaveWarning, setLeaveGuard } from '../src/dara/server/ui/src/components/leaveGuard.mjs';
@@ -102,4 +102,11 @@ test('the leave guard asks only while a page registers unsaved work', () => {
   assert.equal(leaveWarning(), 'The pattern is not kept.');
   off();
   assert.equal(leaveWarning(), null);
+});
+
+test('user suggestions merge spellings that differ only in case', () => {
+  const first = mergeUsers([], ['amy', 'Bob', 'unknown', '', null]);
+  assert.deepEqual(first, ['amy', 'Bob']);
+  assert.equal(mergeUsers(first, ['Amy', 'bob']), first, 'nothing new: the same array');
+  assert.deepEqual(mergeUsers(first, ['carol']), ['amy', 'Bob', 'carol']);
 });

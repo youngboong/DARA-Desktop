@@ -19,7 +19,7 @@ import { TaskProgress } from '../components/PracticalControls';
 import ChemicalFormula from '../components/ChemicalFormula';
 import FitCautions from '../components/FitCautionsPanel';
 import { cautionDisplay, cautionRemedies, cautionSortValue, cautionTagColor, cautionTooltip, countCautions } from '../components/fitCautions.mjs';
-import { listContext, positionText, resultsHref, taskHref } from '../components/sampleNav.mjs';
+import { listContext, positionText, resultsHref, seriesOf, taskHref } from '../components/sampleNav.mjs';
 import { SMOOTH_WINDOWS, levelRank, missingCell, patternFiles, patternHref, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
 import { isIdentification, peakStatusText, phasesFoundText, refinedTasks, rirText, scherrerByPhase, sizeText } from '../components/identification.mjs';
 import { latticePercent, sourceInfo } from '../components/quickRanking.mjs';
@@ -958,13 +958,20 @@ function useSampleList(taskId) {
   return context;
 }
 
-/** Title row of every task state: Results (the list it came from) › Task n · sample, the sample steps, the actions. */
-function TaskTitle({ taskId, name, context, children = null }) {
+/**
+ * Title row of every task state: the list it came from (Results, or Series › name for a task
+ * opened from a series) › Task n · sample, the sample steps, the actions.
+ */
+function TaskTitle({ taskId, name, series = null, context, children = null }) {
   const position = positionText(context);
+  const seriesId = seriesOf(context);
+  const trail = seriesId ? <><a href="/series/" style={{ fontWeight: 400 }}>Series</a>{' › '}
+    <a href={`/series/?id=${encodeURIComponent(seriesId)}`} style={{ fontWeight: 400 }}>{series?.id === seriesId && series.name ? series.name : 'This series'}</a></>
+    : <a href={resultsHref(context)} style={{ fontWeight: 400 }}>Results</a>;
   return <TitleContriner className="dara-task-title">
-    <h2 style={{ margin: 0, fontSize: 'var(--dara-font-20)', overflowWrap: 'anywhere' }}><a href={resultsHref(context)} style={{ fontWeight: 400 }}>Results</a>{' › '}{`Task ${taskId}${name ? ` · ${name}` : ''}`}</h2>
+    <h2 style={{ margin: 0, fontSize: 'var(--dara-font-20)', overflowWrap: 'anywhere' }}>{trail}{' › '}{`Task ${taskId}${name ? ` · ${name}` : ''}`}</h2>
     <Space wrap align="center" style={{ justifyContent: 'flex-end' }}>
-      {position ? <nav aria-label="Samples of the Results list" className="dara-sample-nav">
+      {position ? <nav aria-label={seriesId ? 'Samples of the series' : 'Samples of the Results list'} className="dara-sample-nav">
         <Tooltip title="Previous sample ([ or Alt+←)"><Button size="small" type="text" icon={<LeftOutlined />} disabled={context.prev === null}
           href={context.prev === null ? undefined : taskHref(context.prev, context)}>Previous</Button></Tooltip>
         <span className="dara-num">{position}</span>
@@ -1510,7 +1517,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
 
   return (
     <>
-      <TaskTitle taskId={task_id} name={data.sample || data.task_label} context={sampleList}>
+      <TaskTitle taskId={task_id} name={data.sample || data.task_label} series={data.series} context={sampleList}>
         <Tooltip title="Downloads use the adopted fit (or the best fit)" placement="left">
           <span><DownloadMenu taskId={task_id} reportBlocked={reportBlocked} extraItems={[
             { key: 'csv', label: <a href={`${URL}/task/${task_id}/table.csv`}>Table (CSV)</a> },
@@ -2080,7 +2087,7 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
     if (key === 'report-html') downloadReport(task_id, undefined, 'html');
   };
   return <>
-    <TaskTitle taskId={task_id} name={data.sample || data.task_label} context={sampleList}>
+    <TaskTitle taskId={task_id} name={data.sample || data.task_label} series={data.series} context={sampleList}>
       <Dropdown trigger={['click']} menu={{ items: downloads, onClick: onDownload }}>
         <Button icon={<DownloadOutlined />}>Download <DownOutlined /></Button>
       </Dropdown>
@@ -2194,7 +2201,7 @@ function TaskPage({ location }) {
     <Layout hasSider={false} title={task_id ? `Task ${task_id}${name ? ` · ${name}` : ''}` : 'Result'}>
       <Container>
         {/* A finished task carries its own header with the actions (TaskDetail). */}
-        {data && data.status === 'COMPLETED' && !noResult ? null : task_id ? <TaskTitle taskId={task_id} name={name} context={sampleList}>
+        {data && data.status === 'COMPLETED' && !noResult ? null : task_id ? <TaskTitle taskId={task_id} name={name} series={data?.series} context={sampleList}>
           {data && !noResult && !['FIZZLED', 'READY', 'RUNNING', 'CANCELLING'].includes(data.status) ? <Button href={`/?clone_task=${task_id}`}>Rerun</Button> : null}
           {data && !['READY','RUNNING','CANCELLING'].includes(data.status) ? <TaskMoreMenu onDelete={deleteTask} /> : null}
         </TaskTitle> : null}

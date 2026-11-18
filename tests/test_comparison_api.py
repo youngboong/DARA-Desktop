@@ -81,3 +81,11 @@ def test_comparison_returns_useful_errors(monkeypatch, job, result, code):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(comparison_router.measured_pattern(7))
     assert exc.value.status_code == code
+
+
+def test_pattern_names_the_sample(monkeypatch):
+    job = {"uuid": "test", "job": {"name": "a.xy", "metadata": {"submission_settings": {"sample": "NCM811 batch 3"}},
+                                   "function_kwargs": {"xrd_data": {"angles": [10, 20], "intensities": [1, 2]}}}}
+    _stores(monkeypatch, job)
+    result = asyncio.run(comparison_router.measured_pattern(7))
+    assert (result["name"], result["sample"]) == ("a.xy", "NCM811 batch 3")
