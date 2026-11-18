@@ -39,7 +39,12 @@ COLUMN_DIGITS: dict[str, int] = {
     "rwp": 2, "rp_percent": 2, "rexp": 2, "gof": 2, "chi_squared": 2, "durbin_watson": 2,
     "wavelength": 5,
 }
-MULTI_TASK_EXTRA_COLUMNS = ["user", "submitted_on"]
+MULTI_TASK_EXTRA_COLUMNS = ["user", "submitted_on", "sample"]
+# Job states in the Results list's words (ui/src/components/resultsList.mjs STATE_TEXT).
+STATE_TEXT = {
+    "READY": "Queued", "RUNNING": "Running", "COMPLETED": "Completed", "FIZZLED": "Failed",
+    "CANCELLING": "Stopping", "CANCELLED": "Cancelled", "NOT_FOUND": "Not found",
+}
 RHOMBOHEDRAL_GROUPS = {146, 148, 155, 160, 161, 166, 167}
 
 
@@ -334,19 +339,24 @@ def _task_table_rows(task_id, task, summary, adopted_version) -> list[dict]:
     return rows
 
 
-def multi_task_rows(entries: list[tuple[int, dict | None, dict | None]]) -> list[dict]:
-    """Final-result rows for several tasks.
+def multi_task_rows(entries: list[tuple]) -> list[dict]:
+    """Rows of the adopted fit of several tasks (the final result when nothing is adopted).
 
-    ``entries`` holds ``(task_id, task_record_or_None, summary_or_None)``. A task
-    without a completed summary yields one ``status: ...`` row.
+    ``entries`` holds ``(task_id, task_record_or_None, summary_or_None[, adopted_version])``;
+    ``adopted_version`` is the stored record of an adopted re-refinement, as for
+    :func:`task_table_rows`, whose adoption rule is applied to each task. A task without a
+    completed summary yields one ``status: <Results-list state>`` row.
     """
     from dara.server.utils import convert_to_local_tz
 
     rows: list[dict] = []
-    for task_id, task, summary in entries:
+    for task_id, task, summary, *rest in entries:
+        adopted_version = rest[0] if rest else None
         extra = {}
         if task:
             extra["user"] = task.get("user") or ""
+            settings = ((task.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
+            extra["sample"] = settings.get("sample") or ""
             submitted = task.get("submitted_time")
             if submitted is not None:
                 try:
@@ -358,20 +368,15 @@ def multi_task_rows(entries: list[tuple[int, dict | None, dict | None]]) -> list
             row = {
                 "task_id": task_id,
                 "task_name": ((task or {}).get("job") or {}).get("name") or "",
-                "candidate": f"status: {status}",
+                "candidate": f"status: {STATE_TEXT.get(status, status)}",
                 **extra,
             }
             rows.append(row)
             continue
-        from dara.plot import display_formulas_scope
-
-        selection = ((task or {}).get("review") or {}).get("selection")
-        name = summary.get("task_label") or ((task or {}).get("job") or {}).get("name") or ""
-        with display_formulas_scope(summary.get("display_formulas")):
-            result_rows = _rows_for_result(
-                task_id, name, "final", None, _is_adopted(selection, "final", None),
-                summary["final_result"], _context(summary), summary.get("internal_standard"),
-            )
+        every = task_table_rows(task_id, task, summary, adopted_version)
+        result_rows = [row for row in every if row.get("adopted")] or [
+            row for row in every if row.get("candidate") == "final"
+        ]
         for row in result_rows:
             rows.append({**row, **extra})
     return rows

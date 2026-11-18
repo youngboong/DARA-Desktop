@@ -82,11 +82,25 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [
         "Check internet/proxy access to COD/Materials Project, or use uploaded CIFs.",
     ),
     (
+        # Texts of ray.exceptions (OutOfMemoryError, ObjectStoreFullError, WorkerCrashedError,
+        # NodeDiedError); before "memory", which "OutOfMemoryError" would match.
+        "ray_memory",
+        re.compile(
+            r"OutOfMemoryError|ObjectStoreFullError|object store is full|WorkerCrashedError|"
+            r"The worker died unexpectedly|NodeDiedError",
+            re.I,
+        ),
+        "The parallel workers ran short of memory",
+        "This is usually temporary: close other programs and retry with the same settings.",
+    ),
+    (
         "ray",
         re.compile(
             r"RaySystemError|GCS server|Failed to start the dashboard|"
             r"Failed to start the raylet|ray\.init(?:\(\))? (?:failed|timed out)|"
-            r"Could not (?:start|connect to) (?:the )?(?:Ray|GCS)",
+            r"Could not (?:start|connect to) (?:the )?(?:Ray|GCS)|"
+            # ray/_private/node.py: a busy computer delays the worker start-up
+            r"node timed out during startup|raylet failed to startup|GCS has become overloaded",
             re.I,
         ),
         "The parallel worker (Ray) could not start",
@@ -99,6 +113,11 @@ _RULES: list[tuple[str, re.Pattern, str, str]] = [
         "Close other programs, reduce candidate phases/structures, and rerun.",
     ),
 ]
+
+# Failures that a retry with the same settings usually clears (no input or setting is at fault).
+TEMPORARY_CODES = frozenset({"interrupted", "ray", "ray_memory"})
+# Directory part of an absolute path ("C:/Users/.../eflech" -> "eflech"): paths stay in the traceback.
+_DIRECTORY = re.compile(r"(?<![\w.])(?:[A-Za-z]:|/)[^'\"\s,\]]*[\\/]")
 
 _LAST_LINE = re.compile(r"^(?:[\w.]+\.)?([A-Za-z_]\w*(?:Error|Exception|Interrupt|Exit|Warning)?)\s*:")
 
@@ -184,23 +203,26 @@ def _remedy(code: str) -> dict | None:
 
 
 def summarize_failure(error_text: str | None) -> dict | None:
-    """Return ``{"code", "title", "hint", "detail", "remedy"}`` or ``None`` for empty input.
+    """Return ``{"code", "title", "hint", "detail", "remedy", "temporary"}`` or ``None`` for empty input.
 
     ``remedy`` is ``{"label"}`` when :func:`remedy_changes` can propose a fix, else ``None``.
+    ``temporary``: a retry with the same settings (``POST /api/task/{id}/retry``) usually works.
+    ``detail`` is the last error line without directories (the full text is the traceback).
     """
     if not error_text or not str(error_text).strip():
         return None
     text = str(error_text)
     last = _last_line(text)
-    detail = last[:300]
+    detail = _DIRECTORY.sub("", last)[:300]
     for code, pattern, title, hint in _RULES:
         match = pattern.search(text)
         if match:
             if "{0}" in title:
                 title = title.format(match.group(1))
+            temporary = code in TEMPORARY_CODES
             return {
                 "code": code, "title": title, "hint": hint, "detail": detail,
-                "remedy": _remedy(code),
+                "remedy": _remedy(code), "temporary": temporary,
             }
     # The exception type stays in `detail`; the title is read in the Results list.
     title = "Analysis stopped by an unexpected error" if _LAST_LINE.match(last) else "Analysis failed"
@@ -210,4 +232,5 @@ def summarize_failure(error_text: str | None) -> dict | None:
         "hint": "See the technical details below.",
         "detail": detail,
         "remedy": None,
+        "temporary": False,
     }

@@ -114,7 +114,10 @@ def context(monkeypatch):
 
 def test_review_persists_without_replacing_minimum_rwp(context):
     client, task, doc = context
-    assert client.get("/api/task/9/review").json() == {"selection": None, "notes": "", "updated_at": None}
+    assert client.get("/api/task/9/review").json() == {
+        "selection": None, "notes": "", "updated_at": None, "adopted_at": None, "adopted_by": None,
+        "previous": None, "history": [],
+    }
     response = client.put("/api/task/9/review", json={"selection": 1, "notes": "Chemistry supports candidate 2."})
     assert response.status_code == 200
     assert response.json()["updated_at"]
@@ -189,3 +192,18 @@ def test_report_lists_automated_cautions_with_escaped_text(context):
     assert "Fit residuals are high" in response.text
     clean = client.get("/api/task/9/report?idx=0")
     assert "Review cautions" not in clean.text and "Fit residuals are high" not in clean.text
+
+
+def test_adoption_keeps_who_when_and_the_replaced_selection(context):
+    client, task, _ = context
+    task["user"] = "kim"
+    first = client.put("/api/task/9/review", json={"selection": 1}).json()
+    assert first["adopted_by"] == "kim" and first["adopted_at"] and first["previous"] is None
+    notes = client.put("/api/task/9/review", json={"selection": 1, "notes": "n"}).json()
+    assert notes["adopted_at"] == first["adopted_at"] and len(notes["history"]) == 1  # notes only
+    second = client.put("/api/task/9/review", json={"selection": "best"}).json()
+    assert second["previous"] == {"selection": 1, "adopted_at": first["adopted_at"], "adopted_by": "kim"}
+    assert [entry["selection"] for entry in second["history"]] == [1, "best"]
+    for index in range(25):
+        client.put("/api/task/9/review", json={"selection": index % 2})
+    assert len(client.get("/api/task/9/review").json()["history"]) == review_router.ADOPTION_HISTORY_MAX

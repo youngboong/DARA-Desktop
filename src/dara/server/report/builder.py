@@ -1376,6 +1376,27 @@ def _scherrer_text(scherrer: dict) -> str:
     ) + f"; K = {scherrer.get('k', 0.89):g}"
 
 
+def _search_match_background_text(search_settings: dict, citations) -> str:
+    """Methods sentence on the background removed before the search-match (stored settings;
+    a task stored before they were recorded used the running-minimum background)."""
+    from dara.identification import LEGACY_BACKGROUND
+    from dara.search.prefilter import background_settings
+
+    try:
+        settings = background_settings((search_settings or {}).get("background") or LEGACY_BACKGROUND)
+    except ValueError:
+        return ""
+    if settings["anchors"]:
+        return (f"The background was a monotone cubic (PCHIP) curve through {len(settings['anchors'])} "
+                "points set by the analyst. ")
+    if settings["method"] == "sonneveld_visser":
+        return (f"The background was determined by the method of Sonneveld and Visser "
+                f"{citations.cite('sonneveld_visser')} (granularity {settings['granularity']}, "
+                f"bending factor {settings['bending_factor']:g}). ")
+    return ("The background was a running minimum over 3° 2θ smoothed by a running mean of the "
+            "same width. ")
+
+
 def build_identification_report_html(
     task_id: int, task: dict, document, review: dict, *, observed: list[dict], scherrer: dict,
     rir: dict, hkl_labels: bool = False,
@@ -1466,6 +1487,7 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
         f"Phases were identified by search-match with DARA {escape(_dara_version())} {dara_ref} "
         "without refinement: for each accepted reference structure a lattice scale, a 2θ shift and an "
         "intensity scale were fitted to the background-subtracted pattern; no structure was refined. ",
+        _search_match_background_text(search_settings, citations),
     ]
     if databases:
         text.append(

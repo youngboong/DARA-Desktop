@@ -100,6 +100,17 @@ def test_inspect_pattern_reports_quality_fields():
     assert {"coarse_step", "short_range"} <= codes
     assert set(payload["quality_stats"]) == {"median_step", "span", "snr_db", "data_points"}
     assert payload["format"] == "xy"
+    assert payload["preview"]["two_theta"][0] == 10.0 and len(payload["preview"]["two_theta"]) == angles.size
+
+
+def test_pattern_preview_keeps_peak_maxima():
+    import numpy as np
+
+    x = np.arange(10.0, 90.0, 0.005)  # 16000 points
+    y = 10 + 1000 * np.exp(-0.5 * ((x - 33.333) / 0.01) ** 2)
+    preview = api_router.pattern_preview(x, y)
+    assert len(preview["two_theta"]) == api_router.PREVIEW_POINTS
+    assert max(preview["intensity"]) == round(float(y.max()), 3)  # the narrow peak survives
 
 
 def test_inspect_pattern_rejects_garbage():

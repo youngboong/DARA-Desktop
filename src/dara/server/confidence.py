@@ -23,7 +23,7 @@ from dara.cif_names import cif_stem
 
 logger = logging.getLogger("dara.server.confidence")
 
-SCHEMA = 1
+SCHEMA = 2  # 2: one phase = same reduced formula, or same space group and close composition
 
 PRESENCE_CONFIDENT = 0.6
 SIGMA_CONFIDENT = 3.0
@@ -445,6 +445,42 @@ def _phase_keys(candidate: CandidateEvidence) -> dict[str, tuple]:
     return keys
 
 
+def merge_close_compositions(candidates) -> None:
+    """Give database records of one phase with slightly different formulas one formula.
+
+    Same phase = same reduced formula (any setting, see ``_phase_keys``), or the same database
+    space group and a composition within the Search-match "variant of" tolerance
+    (``quick_rank._close_composition``): Ti1.984O4 / TiO2 (both P4_2/mnm) and
+    Ti3.9996Fe8.0004O20 / TiFe2O5 (both Cmcm) are one phase each. Close compositions in
+    different space groups stay apart (Fe3O4 / Fe2O3). The shortest formula of a cluster
+    represents it. Rewrites ``identities`` in place; idempotent.
+    """
+    from dara.search.quick_rank import _close_composition
+
+    everything = {
+        identity for candidate in candidates for identity in candidate.identities.values()
+        if identity and identity[0] is not None and identity[1] is not None
+    }
+    representatives: list[tuple] = []
+    canonical: dict[tuple, str] = {}
+    for formula, number in sorted(everything, key=lambda item: (len(item[0]), item[0], item[1])):
+        rep = next(
+            (r for r in representatives if r[1] == number and _close_composition(formula, r[0])),
+            None,
+        )
+        if rep is None:
+            representatives.append((formula, number))
+        elif rep[0] != formula:
+            canonical[(formula, number)] = rep[0]
+    if not canonical:
+        return
+    for candidate in candidates:
+        candidate.identities = {
+            name: (canonical.get(identity, identity[0]), identity[1]) if identity else identity
+            for name, identity in candidate.identities.items()
+        }
+
+
 def _identity_set(candidate: CandidateEvidence) -> frozenset:
     return frozenset(_phase_keys(candidate).values())
 
@@ -766,6 +802,10 @@ def evaluate_confidence(
     """Return the ``confidence`` JSON block for ``target`` (``None`` on total failure)."""
     try:
         displayed = list(displayed or [])
+        try:
+            merge_close_compositions([target, *displayed])
+        except Exception:
+            logger.debug("Composition merge failed", exc_info=True)
         phases: dict[str, dict] = {}
         weights: dict[str, float | None] = {}
         for phase in target.identities:

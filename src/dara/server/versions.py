@@ -417,6 +417,7 @@ def build_version_summary(task: dict, document, record: dict, *, extra_uploaded=
         task, record.get("job_id") or record.get("version"), record.get("overrides"), extra_uploaded
     )
     summary = dict(summarize_document(job_view, view, persist_summary=False)["final_result"])
+    summary = renumber_version_confidence(document, summary)
     quality = summary.get("fit_quality") or {}
     summary.update(
         rexp=quality.get("rexp"), gof=quality.get("gof"), chi_squared=quality.get("chi_squared")
@@ -441,6 +442,53 @@ def build_version_summary(task: dict, document, record: dict, *, extra_uploaded=
             fit_cautions._caution("background_curve_scaled", "warning", shift_text, None)
         ]
     return encode_json(summary)
+
+
+_REASON_START = {"alternative": "{} without this phase", "structure_model_alternative": "{} fits almost"}
+
+
+def renumber_version_confidence(document, summary):
+    """Version confidence with candidates numbered as on the task page.
+
+    ``document_view`` prepends the version to the candidate list, so the confidence of a
+    version refers to candidates by their position in that list (source index + 1, a later
+    displayed number). Each referenced candidate is renumbered from its source index against
+    the task's candidate groups when its Rwp confirms it; the block is marked
+    ``"numbering": "task"`` so stored records are renumbered once (on read, not stored).
+    """
+    block = summary.get("confidence") if isinstance(summary, dict) else None
+    results = list(getattr(document, "results", None) or [])
+    if not isinstance(block, dict) or block.get("numbering") == "task" or not results:
+        return summary
+    from dara.server.api_router import _rwp_sort_value, displayed_number_of
+
+    block = deepcopy(block)
+    for phase in (block.get("phases") or {}).values():
+        evidence = phase.get("evidence") if isinstance(phase, dict) else None
+        for field, start in _REASON_START.items():
+            ref = (evidence or {}).get(field)
+            if not isinstance(ref, dict) or not isinstance(ref.get("source_index"), int):
+                continue
+            index = ref["source_index"] - 1
+            try:
+                confirmed = 0 <= index < len(results) and abs(
+                    _rwp_sort_value(results[index][1]) - float(ref.get("rwp"))
+                ) <= 0.006
+            except (TypeError, ValueError):
+                confirmed = False
+            if not confirmed:
+                continue
+            old, new = ref.get("candidate_number"), displayed_number_of(document, index)
+            ref.update(source_index=index, candidate_number=new)
+            if new is not None and old != new:
+                prefix, fresh = start.format(f"Candidate {old}"), start.format(f"Candidate {new}")
+                phase["reasons"] = [
+                    fresh + text[len(prefix):] if isinstance(text, str) and text.startswith(prefix)
+                    else text
+                    for text in phase.get("reasons") or []
+                ]
+    block["numbering"] = "task"
+    return {**summary, "confidence": block}
 
 
 def _curve_shift_caution(record: dict, refinement) -> str | None:

@@ -50,12 +50,20 @@ async def _load_completed_task(task_id: int):
         raise HTTPException(409, not_completed_detail(record.get("status"))) from error
 
 
+ADOPTION_HISTORY_MAX = 20
+
+
 def _review_metadata(task: dict) -> dict:
+    """Review payload; ``adopted_*``/``previous``/``history`` are absent from older records."""
     review = task.get("review") or {}
     return {
         "selection": review.get("selection"),
         "notes": review.get("notes", ""),
         "updated_at": review.get("updated_at"),
+        "adopted_at": review.get("adopted_at"),
+        "adopted_by": review.get("adopted_by"),
+        "previous": review.get("previous"),
+        "history": list(review.get("history") or []),
     }
 
 
@@ -104,21 +112,39 @@ async def save_review(task_id: int, update: ReviewUpdate):
         _refuse_quick_check(task, selection)
     if selection is not None:
         _select_refinement(document, selection, task)
-    review = {
-        "selection": selection,
-        "notes": update.notes,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
+    now = datetime.now(timezone.utc).isoformat()
     # Reload immediately before writing, preserving any unrelated task metadata.
     with get_worker_store() as store:
         current = store.query_one({"index": task_id})
         if current is None or current.get("uuid") != task.get("uuid"):
             raise HTTPException(404, "Task no longer exists")
-        if (current.get("review") or {}).get("selection") != selection:
+        old = current.get("review") or {}
+        review = {
+            "selection": selection,
+            "notes": update.notes,
+            "updated_at": now,
+            "adopted_at": old.get("adopted_at"),
+            "adopted_by": old.get("adopted_by"),
+            "previous": old.get("previous"),
+            "history": list(old.get("history") or []),
+        }
+        if old.get("selection") != selection:
             current["summary"] = None  # the results list shows the adopted fit: summarize again
+            # No login: the task's user field (the name given on submission) is the identity.
+            user = current.get("user") or None
+            if old.get("selection") is not None:
+                review["previous"] = {
+                    "selection": old.get("selection"),
+                    "adopted_at": old.get("adopted_at") or old.get("updated_at"),
+                    "adopted_by": old.get("adopted_by"),
+                }
+            review["adopted_at"], review["adopted_by"] = (now, user) if selection is not None else (None, None)
+            review["history"] = (
+                review["history"] + [{"selection": selection, "at": now, "by": user}]
+            )[-ADOPTION_HISTORY_MAX:]
         current["review"] = review
         store.update(current)
-    return review
+    return _review_metadata(current)
 
 
 def _number(value, digits=5) -> str:

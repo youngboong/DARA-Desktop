@@ -7,11 +7,20 @@ import pytest
 
 @pytest.fixture(autouse=True, scope="session")
 def _private_structure_caches(tmp_path_factory):
-    """Materials Project and stick caches of tests never touch the real cache folders."""
+    """Caches and server folders of tests never touch the user's real folders.
+
+    Every server folder derives from ``DaraServerSettings.montydb_path`` (default
+    ``~/.dara-server/montydb``): the task store, ``quick-refine``, ``task-checkpoints``,
+    ``instrument-profiles`` (registry) and ``reference-cifs``. Tests that need their own store
+    still set ``DARA_SERVER_MONTYDB_PATH`` per test (monkeypatch restores this one).
+    """
     root = tmp_path_factory.mktemp("structure-caches")
-    saved = {name: os.environ.get(name) for name in ("DARA_MP_CACHE_DIR", "DARA_STICK_CACHE_DIR")}
+    names = ("DARA_MP_CACHE_DIR", "DARA_STICK_CACHE_DIR", "DARA_SERVER_MONTYDB_PATH", "DARA_PEAK_CACHE_DIR")
+    saved = {name: os.environ.get(name) for name in names}
     os.environ["DARA_MP_CACHE_DIR"] = str(root / "mp")
     os.environ["DARA_STICK_CACHE_DIR"] = str(root / "sticks")
+    os.environ["DARA_SERVER_MONTYDB_PATH"] = str(root / "dara-server" / "montydb")
+    os.environ["DARA_PEAK_CACHE_DIR"] = str(root / "peak-cache")
     yield
     for name, value in saved.items():
         if value is None:

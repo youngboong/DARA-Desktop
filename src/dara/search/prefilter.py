@@ -164,10 +164,93 @@ def resolve_prefilter_enabled(
 # --------------------------------------------------------------------------- #
 # observed pattern
 # --------------------------------------------------------------------------- #
+BACKGROUND_METHODS = ("rolling_minimum", "sonneveld_visser")
+# "auto". Search-match benchmark (scripts/check_quick_rank.py --mp, 40 patterns, 94 true phases in
+# the pools; 2026-11-18): rolling minimum 86 recovered / 38 false picks of 135; Sonneveld-Visser at
+# granularity 20 (the value usually cited for HighScore) and bending factor 0: 90 / 27 of 130.
+# Bending factor 0 was the only one at least as good as the rolling minimum on both counts at
+# granularity 10, 20 and 30 (1 and 2: 7-12 false picks but 73-85 recovered).
+DEFAULT_BACKGROUND_METHOD = "sonneveld_visser"
+DEFAULT_GRANULARITY = 20
+DEFAULT_BENDING_FACTOR = 0.0
+SV_MAX_ITERATIONS = 5000
+
+
+def background_settings(raw=None) -> dict:
+    """Validated background settings ``{method, granularity, bending_factor, anchors}``.
+
+    ``method``: "auto" (the default method), "rolling_minimum" (running minimum over
+    ``PrefilterConfig.bkg_window_deg``, then a running mean) or "sonneveld_visser".
+    ``granularity`` (2..200) and ``bending_factor`` (0..50) belong to Sonneveld & Visser.
+    ``anchors``: optional user base points ``[[2theta, y], ...]`` (2..40, increasing) whose PCHIP
+    curve (``background_curve.curve``) replaces the automatic one. Raises ``ValueError``.
+    """
+    raw = dict(raw or {})
+    unknown = set(raw) - {"method", "granularity", "bending_factor", "anchors"}
+    if unknown:
+        raise ValueError(f"Unknown background setting(s): {', '.join(sorted(unknown))}")
+    method = str(raw.get("method") or "auto").strip().lower()
+    if method == "auto":
+        method = DEFAULT_BACKGROUND_METHOD
+    if method not in BACKGROUND_METHODS:
+        raise ValueError(f"Background method must be auto, {' or '.join(BACKGROUND_METHODS)}.")
+    granularity = raw.get("granularity", DEFAULT_GRANULARITY)
+    bending = raw.get("bending_factor", DEFAULT_BENDING_FACTOR)
+    if isinstance(granularity, bool) or not isinstance(granularity, (int, float)) or not 2 <= granularity <= 200:
+        raise ValueError("Granularity must be a number from 2 to 200.")
+    if isinstance(bending, bool) or not isinstance(bending, (int, float)) or not 0 <= bending <= 50:
+        raise ValueError("Bending factor must be a number from 0 to 50.")
+    anchors = raw.get("anchors") or None
+    if anchors is not None:
+        from dara.background_curve import validate_anchors
+
+        anchors = validate_anchors(anchors, lo=-math.inf, hi=math.inf)
+    return {"method": method, "granularity": int(round(granularity)), "bending_factor": float(bending),
+            "anchors": anchors}
+
+
+def sonneveld_visser(y, granularity: int, bending_factor: float, sigma: float) -> np.ndarray:
+    """Background of ``y`` (equally spaced samples) by the method of Sonneveld & Visser.
+
+    E. J. Sonneveld & J. W. Visser, J. Appl. Cryst. 8 (1975) 1-7. The paper's text was not
+    available here; this is the form commonly published for it and named in HighScore
+    ("granularity", "bending factor"; Match! uses the same method with cubic splines,
+    crystalimpact.com/match/help/idh_rawdata-proc_backgr_subtr.htm): every ``granularity``-th
+    point is a base point; repeatedly, a base point that lies above the mean of its two neighbours
+    by more than the allowed bending is replaced by that mean, until none changes; a cubic spline
+    through the base points is the background. The allowed bending is ``bending_factor`` times
+    the pattern's noise ``sigma`` (DARA's unit for it: 0 gives the stiffest curve). The end points
+    start at the lowest value of their first/last interval.
+    """
+    from scipy.interpolate import CubicSpline
+
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    stride = max(1, int(granularity))
+    index = np.unique(np.r_[np.arange(0, n, stride), n - 1])
+    base = y[index].copy()
+    if len(base) < 3:
+        return np.full(n, float(np.min(y)))
+    base[0] = float(np.min(y[: stride + 1]))
+    base[-1] = float(np.min(y[max(0, n - 1 - stride):]))
+    allowance = float(bending_factor) * (float(sigma) if np.isfinite(sigma) else 0.0)
+    for _ in range(SV_MAX_ITERATIONS):
+        mean = 0.5 * (base[:-2] + base[2:])
+        high = base[1:-1] > mean + allowance
+        if not high.any():
+            break
+        base[1:-1] = np.where(high, mean, base[1:-1])
+    return CubicSpline(index.astype(float), base, bc_type="natural")(np.arange(n, dtype=float))
+
+
 def observed_profile(
-    angles, intensities, *, wmin=None, wmax=None, excluded_ranges=None, config: PrefilterConfig = PrefilterConfig()
+    angles, intensities, *, wmin=None, wmax=None, excluded_ranges=None, config: PrefilterConfig = PrefilterConfig(),
+    background: dict | None = None,
 ) -> ObservedProfile:
-    """Background-subtracted, locally maximised pattern used by the amount bound."""
+    """Background-subtracted, locally maximised pattern used by the amount bound.
+
+    ``background``: validated :func:`background_settings`; ``None`` is the running-minimum
+    background (the phase search's prefilter), not the search-match default."""
     x = np.asarray(angles, dtype=float).ravel()
     y = np.asarray(intensities, dtype=float).ravel()
     n = min(len(x), len(y))
@@ -193,13 +276,22 @@ def observed_profile(
 
     m = max(1, 2 * round(config.smooth_half_width_deg / step) + 1)
     ys = uniform_filter1d(y, m, mode="nearest") if m > 1 else y
-    width = max(5, round(config.bkg_window_deg / step))
-    background = uniform_filter1d(minimum_filter1d(ys, width, mode="nearest"), width, mode="nearest")
-    net = ys - background
-
     diffs = np.diff(y)
     mad = float(np.median(np.abs(diffs - np.median(diffs))))
     sigma = 1.4826 * mad / math.sqrt(2.0) / math.sqrt(m)
+
+    # the phase search's prefilter and the instrument calibration keep the running minimum
+    settings = background or {"method": "rolling_minimum"}
+    if settings.get("anchors"):
+        from dara.background_curve import curve
+
+        background = curve(settings["anchors"], x)
+    elif settings.get("method") == "sonneveld_visser":
+        background = sonneveld_visser(ys, settings["granularity"], settings["bending_factor"], sigma)
+    else:
+        width = max(5, round(config.bkg_window_deg / step))
+        background = uniform_filter1d(minimum_filter1d(ys, width, mode="nearest"), width, mode="nearest")
+    net = ys - background
     window = max(1, round(2 * config.window_hw_deg / step)) + 1
     window_max = maximum_filter1d(net, window, mode="nearest")
 

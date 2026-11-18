@@ -69,7 +69,9 @@ def _create(content, **fields):
             "precursor_formulas": "[]", "wavelength": "Cu", "two_theta_min": None, "two_theta_max": None,
             "excluded_ranges": "[]", "instrument_profile": "Aeris-fds-Pixcel1d-Medipix3", "sample": "batch 7",
             "confirm_wavelength": False, **fields}
-    return identification_router.create_identification(UploadFile(io.BytesIO(content), filename="mix.xy"), **form)
+    if content is None:  # the stored pattern of another task (form field source_task_id)
+        return identification_router.create_identification(**form)
+    return identification_router.create_identification(pattern_file=UploadFile(io.BytesIO(content), filename="mix.xy"), **form)
 
 
 def test_identification_task_and_its_result_tools(server):
@@ -181,6 +183,77 @@ def test_identification_rejects_bad_input(server):
             with pytest.raises(HTTPException) as info:
                 await _create(server, **fields)
             assert info.value.status_code == 400 and text in str(info.value.detail)
+
+    asyncio.run(scenario())
+
+
+def test_identification_keeps_the_search_match_databases_for_a_rerun(server):
+    from dara.server import api_router
+
+    async def scenario():
+        stored = await _create(server, use_cod=True, use_mp=False, mp_e_hull_cutoff=0.1, max_mp_structures=40)
+        settings = (await api_router.rerun_settings(stored["wf_id"]))["settings"]
+        assert (settings["use_cod"], settings["use_mp"]) == (True, False)
+        assert (settings["mp_e_hull_cutoff"], settings["max_mp_structures"]) == (0.1, 40)
+        old = (await api_router.rerun_settings((await _create(server))["wf_id"]))["settings"]
+        assert (old["use_cod"], old["use_mp"], old["max_mp_structures"]) == (True, False, 100)  # as before
+        assert settings["analysis_mode"] == "identification" and settings["reference_ids"] == IDS
+        assert settings["background"]["method"] == "sonneveld_visser"  # the default, stored with the task
+
+    asyncio.run(scenario())
+
+
+def test_identification_from_a_stored_task_pattern_and_old_records_settings(server):
+    from fastapi import HTTPException
+
+    from dara.server import api_router
+
+    async def scenario():
+        first = await _create(server)
+        again = await _create(None, source_task_id=first["wf_id"])
+        assert again["status"] == "COMPLETED"
+        payload = await api_router.result(again["wf_id"])
+        assert payload["task_label"] == "mix.xy" and len(payload["phases"]) == 2
+        with pytest.raises(HTTPException) as info:
+            await _create(server, source_task_id=first["wf_id"])  # both a file and a task
+        assert info.value.status_code == 400
+
+    asyncio.run(scenario())
+    # identification tasks stored before the search-match settings were kept: an mp: structure means MP was on
+    old = {"analysis_mode": "identification", "reference_ids": ["cod:1", "mp:mp-19770"]}
+    assert api_router.stored_search_match({}, old) == {"use_mp": True}
+    assert api_router.stored_search_match({}, {**old, "reference_ids": ["cod:1"]}) == {}
+    assert api_router.stored_search_match({"search_match": {"use_mp": False}}, old) == {"use_mp": False}
+
+
+def test_task_search_match_takes_the_upload_options_and_the_stored_background(server, monkeypatch):
+    from fastapi import HTTPException
+
+    from dara.server import quick_rank_router as router_module
+
+    seen = []
+    monkeypatch.setattr(router_module, "_run", lambda params: seen.append(params) or {
+        "ranking": [], "combination": [], "caveats": []})
+    router_module._JOBS.clear()
+    background = {"method": "sonneveld_visser", "granularity": 20, "bending_factor": 1}
+
+    async def scenario():
+        stored = await _create(server, use_mp=False, background=json.dumps(background))
+        task_id = stored["wf_id"]
+        view = await router_module.quick_ranking_task(task_id)
+        assert view["wavelength_mismatch"] is None
+        assert seen[-1]["background"]["method"] == "sonneveld_visser" and seen[-1]["use_mp"] is False
+        request = router_module.TaskQuickRankingRequest(
+            elements=["zn", "o"], wavelength="Co", use_mp=True, max_mp_structures=40, two_theta_min=25.0,
+            background={"method": "rolling_minimum"})
+        await router_module.quick_ranking_task(task_id, request)
+        params = seen[-1]
+        assert params["elements"] == ["O", "Zn"] and params["wavelength"] == "Co" and params["use_mp"] is True
+        assert params["mp_limit"] == 40 and params["wmin"] == 25.0 and params["background"]["method"] == "rolling_minimum"
+        with pytest.raises(HTTPException) as info:
+            await router_module.quick_ranking_task(task_id, router_module.TaskQuickRankingRequest(
+                background={"method": "sonneveld_visser", "granularity": 1}))
+        assert info.value.status_code == 400 and "Granularity" in info.value.detail
 
     asyncio.run(scenario())
 

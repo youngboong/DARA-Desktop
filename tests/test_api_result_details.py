@@ -195,3 +195,18 @@ def test_completed_task_without_a_final_result_is_a_payload_not_a_404():
     assert payload["status"] == "COMPLETED" and payload["runtime_s"] == 90.0
     assert payload["search_summary"] == {"stage": "done"} and payload["candidate_summary"] == {"n": 3}
     assert "fits the pattern" in payload["message"]
+
+
+def test_preferred_orientation_states_the_bgmn_model_and_no_invented_strength():
+    from dara.result import PhaseResult
+
+    sphar = SimpleNamespace(gewicht_name="SPHAR4", gewicht=0.063431)
+    assert api_router._preferred_orientation(sphar) == {
+        "model": "SPHAR4", "spherical_harmonics_order": 4, "corrected": True, "mean_gewicht": 0.063431,
+        "strength": None,
+    }
+    plain = api_router._preferred_orientation(SimpleNamespace(gewicht_name=None, gewicht=(0.3, 0.01)))
+    assert plain["model"] is None and plain["corrected"] is False and plain["mean_gewicht"] is None
+    assert api_router._preferred_orientation(SimpleNamespace(gewicht_name="SPHAR0", gewicht=0.1))["corrected"] is False
+    # the listing line BGMN 4.2.22 writes for such a phase
+    assert PhaseResult.check_gewicht({"GEWICHT": "SPHAR4, MeanValue(GEWICHT)=0.0634310"})["GEWICHT_NAME"] == "SPHAR4"

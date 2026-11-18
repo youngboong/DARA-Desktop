@@ -61,6 +61,13 @@ REFERENCES: dict[str, dict] = {
         ),
         "doi": "10.1107/S0365110X65001081",
     },
+    "sonneveld_visser": {
+        "text": (
+            "E. J. Sonneveld, J. W. Visser, \"Automatic collection of powder data from photographs\", "
+            "J. Appl. Cryst. 8 (1975) 1–7."
+        ),
+        "doi": "10.1107/S0021889875009417",
+    },
     "hubbard_snyder": {
         "text": (
             "C. R. Hubbard, R. L. Snyder, \"RIR - Measurement and use in quantitative XRD\", "

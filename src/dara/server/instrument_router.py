@@ -123,6 +123,7 @@ async def build_profile(setup: InstrumentSetup):
 
 # Calibration jobs live in memory like quick-refine jobs; a server restart forgets them.
 _CALIBRATIONS = {}
+CALIBRATIONS_KEPT = 10  # finished jobs listed for a dialog that re-attaches after a reload
 _CALIBRATION_LOCK = threading.Lock()
 
 
@@ -156,12 +157,16 @@ async def calibrate_profile(
         "label": profile, "geometry": f"BGMN template {profile}", "radiation": wavelength}
     job_id = uuid4().hex[:12]
     job = {"id": job_id, "status": "running", "completed": 0, "total": instrument_profiles.SCAN_COMPILES,
-           "profile": profile, "standard": standard, "wavelength": wavelength}
+           "profile": profile, "standard": standard, "wavelength": wavelength,
+           "pattern": pattern_path.name, "started_at": datetime.now(timezone.utc).isoformat()}
     with _CALIBRATION_LOCK:  # one at a time: each compile already uses all cores
         if any(other["status"] == "running" for other in _CALIBRATIONS.values()):
             shutil.rmtree(folder, ignore_errors=True)
             raise HTTPException(409, "Another calibration is running; wait for it to finish.")
         _CALIBRATIONS[job_id] = job
+        finished = [key for key, other in _CALIBRATIONS.items() if other["status"] != "running"]
+        for key in finished[:max(0, len(_CALIBRATIONS) - CALIBRATIONS_KEPT)]:  # oldest finished first
+            del _CALIBRATIONS[key]
     threading.Thread(target=_run_calibration, args=(job, device, pattern_path, base), daemon=True,
                      name=f"dara-calibrate-{job_id}").start()
     return dict(job)
@@ -257,6 +262,16 @@ async def fwhm_curve(profile: str):
 @router.delete("/instrument-profiles/{profile}/fwhm-curve")
 async def delete_fwhm_curve(profile: str):
     return {"profile": profile, "deleted": instrument_profiles.delete_fwhm_curve(_profile_key(profile))}
+
+
+@router.get("/instrument-profiles/calibrate")
+async def calibration_jobs():
+    """Running and recent calibration jobs, newest first (the structure-library pattern: a dialog
+    reopened after a page reload finds its job here and polls it by ``id``)."""
+    with _CALIBRATION_LOCK:
+        jobs = [dict(job) for job in _CALIBRATIONS.values()]
+    jobs.reverse()
+    return {"jobs": jobs, "running": next((job["id"] for job in jobs if job["status"] == "running"), None)}
 
 
 @router.get("/instrument-profiles/calibrate/{job_id}")

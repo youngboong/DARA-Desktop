@@ -81,7 +81,8 @@ def run(args) -> dict:
         )
         pool_s = time.perf_counter() - started
         started = time.perf_counter()
-        ranked = quick_rank.rank(pattern.angles, pattern.intensities, pool.candidates, wavelength=wavelength)
+        ranked = quick_rank.rank(pattern.angles, pattern.intensities, pool.candidates, wavelength=wavelength,
+                                 background=args.background)
         score_s = time.perf_counter() - started
         ranking, combination = ranked["ranking"], ranked["combination"]
         allowed = {_reduced(a) for a in sample.get("allowed_extra", [])}
@@ -142,6 +143,8 @@ def main(argv=None) -> int:
     parser.add_argument("--include-theoretical", action="store_true", help="rank computed-only MP entries")
     parser.add_argument("--e-hull", type=float, default=0.05, help="e-hull cutoff (search default 0.05)")
     parser.add_argument("--json", type=Path, help="write the summary here")
+    parser.add_argument("--background", type=json.loads, default=None,
+                        help='background settings (JSON), e.g. {"method": "sonneveld_visser", "granularity": 20}')
     args = parser.parse_args(argv)
     summary = run(args)
     print("SUMMARY " + json.dumps(summary))

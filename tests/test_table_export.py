@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import re
 import io
 import json
 import zipfile
@@ -147,11 +148,28 @@ def test_multi_task_rows_include_status_rows():
         (3, None, None),
     ]
     rows = multi_task_rows(entries)
-    assert [row["candidate"] for row in rows] == ["final", "status: RUNNING", "status: NOT_FOUND"]
+    assert [row["candidate"] for row in rows] == ["final", "status: Running", "status: Not found"]
     assert rows[0]["adopted"] == "yes" and rows[0]["user"] == "me"
     assert rows[1]["task_name"] == "b.xy" and rows[1].get("phase") is None
     data = rows_to_csv(rows, TABLE_COLUMNS + MULTI_TASK_EXTRA_COLUMNS)
-    assert data.decode("utf-8-sig").splitlines()[0].endswith("user,submitted_on")
+    assert data.decode("utf-8-sig").splitlines()[0].endswith("user,submitted_on,sample")
+
+
+def test_multi_task_rows_follow_the_adopted_fit_like_the_single_task_table():
+    task = {"user": "me", "status": "COMPLETED", "job": {"name": "a.xy", "metadata": {
+        "submission_settings": {"sample": "batch 7"}}}}
+    candidate = multi_task_rows([(1, {**task, "review": {"selection": 7}}, _summary())])
+    assert [(row["candidate"], row["source_index"], row["adopted"]) for row in candidate] == [("2", 7, "yes")]
+    assert candidate[0]["rwp"] == 6.0 and candidate[0]["sample"] == "batch 7"
+    version = {"version": 3, "summary": _result(3.5)}
+    adopted = multi_task_rows([(1, {**task, "review": {"selection": "version:3"}}, _summary(), version)])
+    assert [(row["candidate"], row["rwp"]) for row in adopted] == [("version 3", 3.5)]
+    # nothing adopted (or the adopted version is gone): the automatic final fit
+    assert [row["candidate"] for row in multi_task_rows([(1, task, _summary())])] == ["final"]
+    gone = multi_task_rows([(1, {**task, "review": {"selection": "version:3"}}, _summary(), None)])
+    assert [row["candidate"] for row in gone] == ["final"]
+    failed = multi_task_rows([(2, {**task, "status": "FIZZLED"}, None)])
+    assert failed[0]["candidate"] == "status: Failed" and failed[0]["sample"] == "batch 7"
 
 
 def test_task_id_parser():
@@ -178,6 +196,9 @@ class _Store:
     def query_one(self, criteria, *args):
         return next((r for r in self.records if r.get("index") == criteria.get("index")), None)
 
+    def query(self, criteria, properties=None):
+        return [r for r in self.records if r.get("index") in criteria["index"]["$in"]]
+
 
 def test_csv_endpoints(monkeypatch):
     records = [
@@ -186,7 +207,10 @@ def test_csv_endpoints(monkeypatch):
     ]
     monkeypatch.setattr(api_router, "get_worker_store", lambda: _Store(records))
 
+    calls = []
+
     async def fake_result(task_id):
+        calls.append(task_id)
         return _summary()
 
     monkeypatch.setattr(api_router, "result", fake_result)
@@ -202,9 +226,16 @@ def test_csv_endpoints(monkeypatch):
     multi = asyncio.run(api_router.download_tasks_table(ids="1,2,99"))
     lines = multi.body.decode("utf-8-sig").splitlines()
     assert len(lines) == 1 + 1 + 1 + 1
-    assert lines[0].endswith("user,submitted_on")
-    assert "status: RUNNING" in lines[2] and "status: NOT_FOUND" in lines[3]
-    assert multi.headers["content-disposition"].endswith('dara_tasks_table.csv"')
+    assert lines[0].endswith("user,submitted_on,sample")
+    assert "status: Running" in lines[2] and "status: Not found" in lines[3]
+    assert re.search(r'dara_tasks_\d{8}_3\.csv"$', multi.headers["content-disposition"])
+    api_router._TABLE_ROWS.clear()
+    calls.clear()
+    first = asyncio.run(api_router.download_tasks_table(ids="1")).body
+    assert asyncio.run(api_router.download_tasks_table(ids="1")).body == first and calls == [1]  # kept
+    records[0]["review"] = {"selection": 7}  # another adoption: computed again
+    asyncio.run(api_router.download_tasks_table(ids="1"))
+    assert calls == [1, 1]
     with pytest.raises(HTTPException) as caught:
         asyncio.run(api_router.download_tasks_table(ids="1,x"))
     assert caught.value.status_code == 400

@@ -60,9 +60,10 @@ async def refuse_refinement_tools(request, call_next):
 
 @router.post("/identification")
 async def create_identification(
-    pattern_file: Annotated[UploadFile, File()],
     user: Annotated[str, Form()],
     reference_ids: Annotated[str, Form()],
+    pattern_file: Annotated[Optional[UploadFile], File()] = None,
+    source_task_id: Annotated[Optional[int], Form()] = None,
     elements: Annotated[str, Form()] = "[]",
     precursor_formulas: Annotated[str, Form()] = "[]",
     wavelength: Annotated[str, Form()] = "Cu",
@@ -72,15 +73,32 @@ async def create_identification(
     instrument_profile: Annotated[str, Form()] = "Aeris-fds-Pixcel1d-Medipix3",
     sample: Annotated[str, Form()] = "",
     confirm_wavelength: Annotated[bool, Form()] = False,
+    use_cod: Annotated[Optional[bool], Form()] = None,
+    use_mp: Annotated[Optional[bool], Form()] = None,
+    mp_e_hull_cutoff: Annotated[Optional[float], Form()] = None,
+    max_mp_structures: Annotated[Optional[int], Form()] = None,
+    include_theoretical: Annotated[Optional[bool], Form()] = None,
+    background: Annotated[str, Form()] = "",
 ):
     """Store the accepted search-match phases (``reference_ids``: JSON list of cached ``cod:<id>`` /
-    ``mp:<id>``, 1-12, order kept) as an identification task; returns ``{wf_id, status}``."""
+    ``mp:<id>``, 1-12, order kept) as an identification task; returns ``{wf_id, status}``.
+
+    The search-match's database settings (``use_cod``, ``use_mp``, ``mp_e_hull_cutoff``,
+    ``max_mp_structures``, ``include_theoretical``; each optional) are stored in
+    ``function_kwargs.search_match`` so ``/rerun-settings`` and a new search-match reproduce them.
+    ``background`` (JSON, as ``/api/quick-ranking``) is stored in ``search_kwargs.background``."""
     from dara.search.quick_rank import reference_path
     from dara.server.api_router import _available_instrument_profiles, _parse_string_list
-    from dara.server.quick_rank_router import _elements_and_precursors, read_upload
+    from dara.server.quick_rank_router import _elements_and_precursors, background_param, read_upload
     from dara.server.worker import add_task_record
 
     element_list, precursors = _elements_and_precursors(elements, precursor_formulas)
+    search_match = {key: value for key, value in {
+        "use_cod": use_cod, "use_mp": use_mp, "mp_e_hull_cutoff": mp_e_hull_cutoff,
+        "max_mp_structures": max_mp_structures, "include_theoretical": include_theoretical}.items()
+        if value is not None}
+    if not 0 <= search_match.get("mp_e_hull_cutoff", 0) <= 1 or not 1 <= search_match.get("max_mp_structures", 1) <= 1000:
+        raise HTTPException(status_code=400, detail="Invalid Materials Project limits")
     ids = list(dict.fromkeys(_parse_string_list(reference_ids)))
     if not 1 <= len(ids) <= MAX_PHASES:
         raise HTTPException(status_code=400, detail=f"Accept 1 to {MAX_PHASES} phases.")
@@ -97,14 +115,20 @@ async def create_identification(
         details = registered_profiles().get(instrument_profile)
     if details is None and instrument_profile not in _available_instrument_profiles():
         raise HTTPException(status_code=400, detail=f"Unknown instrument profile {instrument_profile}")
-    name, _, pattern, range_params = await read_upload(
-        pattern_file, two_theta_min, two_theta_max, excluded_ranges, None if confirm_wavelength else wavelength)
+    if (pattern_file is None) == (source_task_id is None):
+        raise HTTPException(status_code=400, detail="Upload a pattern or name a source task (one of them).")
+    if pattern_file is not None:
+        name, _, pattern, range_params = await read_upload(
+            pattern_file, two_theta_min, two_theta_max, excluded_ranges, None if confirm_wavelength else wavelength)
+    else:
+        name, pattern, range_params = _stored_pattern(
+            source_task_id, two_theta_min, two_theta_max, excluded_ranges, None if confirm_wavelength else wavelength)
     try:
         wavelength = float(wavelength)  # a number is a synchrotron wavelength in nm, as /api/submit
     except ValueError:
         pass
     search_kwargs = {"instrument_profile": instrument_profile, "wavelength": wavelength,
-                     "refinement_params": range_params}
+                     "refinement_params": range_params, "background": background_param(background)}
     settings = {"filename": name, "analysis_mode": MODE, "reference_ids": ids}
     if sample.strip():
         settings["sample"] = sample.strip()[:120]
@@ -116,7 +140,7 @@ async def create_identification(
         "uuid": str(uuid4()), "status": "RUNNING", "submitted_time": now, "start_time": now, "user": user,
         "job": {"name": name, "metadata": metadata, "function_kwargs": {
             "xrd_data": pattern.as_dict(), "elements": element_list, "precursors": precursors,
-            "analysis_mode": MODE, "search_kwargs": search_kwargs, "cif_dbs": [],
+            "analysis_mode": MODE, "search_kwargs": search_kwargs, "cif_dbs": [], "search_match": search_match,
         }},
     }
     index = add_task_record(record)
@@ -127,6 +151,28 @@ async def create_identification(
     with get_worker_store() as store:
         stored = store.query_one({"index": index}, ["status"]) or {}
     return {"message": "submitted", "wf_id": index, "status": stored.get("status", "RUNNING")}
+
+
+def _stored_pattern(task_id, two_theta_min, two_theta_max, excluded_ranges, wavelength=None):
+    """``(file name, pattern, range params)`` of a stored task's pattern (any state), with the
+    upload's checks: the analysis range, and with ``wavelength`` the XRDML wavelength check (400)."""
+    from pathlib import Path
+
+    from dara.analysis_range import validate_analysis_range
+    from dara.server.api_router import _saved_task_input, _wavelength_mismatch
+
+    record, _, pattern = _saved_task_input(task_id)
+    settings = ((record.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
+    name = Path(settings.get("filename") or (record.get("job") or {}).get("name") or "pattern.xy").name
+    if wavelength is not None:
+        mismatch = _wavelength_mismatch(pattern, Path(name), wavelength)
+        if mismatch:
+            raise HTTPException(status_code=400, detail=mismatch)
+    try:
+        range_params = validate_analysis_range(pattern.angles, two_theta_min, two_theta_max, excluded_ranges)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return name, pattern, range_params
 
 
 def _update_record(index: int, uuid: str, fields: dict) -> str | None:
@@ -150,7 +196,8 @@ def _compute(pattern, ids, search_kwargs):
     rng = search_kwargs["refinement_params"]
     cifs = reference_cifs(ids)
     return (cifs, *identify(pattern.angles, pattern.intensities, cifs, ids, wavelength=search_kwargs["wavelength"],
-                            wmin=rng.get("wmin"), wmax=rng.get("wmax"), excluded_ranges=rng.get("excluded_ranges")))
+                            wmin=rng.get("wmin"), wmax=rng.get("wmax"), excluded_ranges=rng.get("excluded_ranges"),
+                            background=search_kwargs.get("background")))
 
 
 async def _finish(index, uuid, pattern, ids, search_kwargs, elements, precursors) -> None:

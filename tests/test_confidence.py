@@ -177,7 +177,7 @@ def test_single_candidate_ignores_presence_and_is_high():
     target = _evidence("final", {A: (60.0, 0.5), B: (40.0, 0.5)}, 7.0)
     only = _evidence("candidate:0", {A: (60.0, 0.5), B: (40.0, 0.5)}, 7.0, number=1, source_index=0)
     block = _evaluate(target, [only])
-    assert block["schema"] == 1
+    assert block["schema"] == cf.SCHEMA
     phase = block["phases"][A]
     assert phase["level"] == "confident" and phase["label"] == "Confident"
     assert phase["evidence"]["presence_fraction"] is None  # a single displayed model
@@ -420,8 +420,8 @@ def test_summarize_document_attaches_confidence():
     assert list(block["phases"]) == ["CaF2_225_(cod_2300449)-0"]
     assert block["sample_displacement"]["level"] == "unknown"  # synthetic lst has no EPS2
     for entry in payload["all_results"]:
-        assert entry["confidence"]["schema"] == 1
-    assert cf.confidence_for_document(document)["schema"] == 1
+        assert entry["confidence"]["schema"] == cf.SCHEMA
+    assert cf.confidence_for_document(document)["schema"] == cf.SCHEMA
     fc.clear_lattice_flag_cache()
 
 
@@ -516,6 +516,31 @@ def test_alternative_lacking_the_formula_is_still_reported_with_setting_variants
     alternative = block["phases"][FE_167]["evidence"]["alternative"]
     assert alternative["candidate_number"] == 6
     assert block["phases"][FE_167]["level"] == "ambiguous"
+
+
+def test_non_stoichiometric_records_of_one_phase_are_the_same_phase():
+    # task 41: records of pseudobrookite and rutile with slightly different formulas
+    pb1, pb2 = "Ti3.9996Fe8.0004O20_63_(cod_2002302)-None", "TiFe2O5_63_(cod_1011342)-40"
+    ru1, ru2 = "Ti1.984O4_136_(cod_9001681)-None", "TiO2_136_(cod_9007432)-10"
+    target = _evidence("final", {pb1: (72.0, 0.3), ru1: (28.0, 0.3)}, 2.65)
+    displayed = [
+        _evidence("candidate:0", {pb1: (72.0, 0.3), ru1: (28.0, 0.3)}, 2.65, number=1, source_index=0),
+        _evidence("candidate:1", {pb1: (72.0, 0.3), ru2: (28.0, 0.3)}, 2.66, number=2, source_index=1),
+        _evidence("candidate:3", {pb2: (72.0, 0.3), ru2: (28.0, 0.3)}, 2.96, number=3, source_index=3),
+    ]
+    block = _evaluate(target, displayed)
+    for name in (pb1, ru1):
+        phase = block["phases"][name]
+        assert phase["evidence"]["presence_fraction"] == pytest.approx(1.0)
+        assert phase["evidence"]["alternative"] is None
+        assert phase["level"] == "confident", phase["reasons"]
+    assert block["overall"]["level"] == "high"
+    # close compositions in different space groups stay different phases (Fe3O4 / Fe2O3)
+    mag, hem = "Fe3O4_227_(cod_5)-0", "Fe2O3_167_(cod_6)-0"
+    t2 = _evidence("final", {mag: (100.0, 0.5)}, 5.0)
+    other = _evidence("candidate:1", {hem: (100.0, 0.5)}, 5.1, number=2, source_index=1)
+    same = _evidence("candidate:0", {mag: (100.0, 0.5)}, 5.0, number=1, source_index=0)
+    assert _evaluate(t2, [same, other])["phases"][mag]["evidence"]["presence_fraction"] == 0.5
 
 
 def test_summarize_document_candidates_get_hamilton_and_displacement():

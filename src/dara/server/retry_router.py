@@ -138,6 +138,8 @@ async def retry_task(task_id: int, request: RetryRequest | None = None):
     kwargs, rerun = plan["kwargs"], plan["rerun"]
     settings = dict(plan["settings"])
     user = settings.pop("user", "")
+    for key in ("reference_ids", "include_theoretical", "background"):  # search-match settings only
+        settings.pop(key, None)
     applied = None
     if request.apply_remedy and plan["changes"]:
         settings.update(plan["changes"])

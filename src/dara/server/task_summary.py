@@ -9,7 +9,9 @@ from html import unescape
 
 logger = logging.getLogger(__name__)
 
-SUMMARY_SCHEMA = 4  # single source of truth: every stale-summary check compares against this
+# single source of truth: every stale-summary check compares against this
+# (5: labels with the CIFs' conventional formulas and ``display_formulas`` kept with the digest)
+SUMMARY_SCHEMA = 5
 
 # Task uuids whose summary could not be refreshed; they are not retried until restart.
 SUMMARY_REFRESH_GAVE_UP: set[str] = set()
@@ -29,9 +31,11 @@ def _label(phase_name: str) -> str:
     try:
         from dara.plot import phase_display_name
 
-        return unescape(re.sub(r"<[^>]+>", "", phase_display_name(phase_name)))
+        text = unescape(re.sub(r"<[^>]+>", "", phase_display_name(phase_name)))
     except Exception:
         return str(phase_name)
+    # pymatgen writes hydroxides as (HO); the task page shows (OH) (ui composition.mjs, same rule)
+    return text.replace("(HO)", "(OH)")
 
 
 def _provenance_digest(phase_name: str) -> dict:
@@ -77,12 +81,23 @@ def _phase_digests(final) -> list[dict]:
 
 
 def _adopted_view(document, task: dict | None):
-    """``(document view of the adopted version, selection)``; ``(document, None)`` without one.
+    """``(document view of the adopted fit, selection)``; ``(document, None)`` without one.
 
-    The results list shows the adopted fit when a re-refinement version was adopted.
+    The results list shows the adopted fit: a re-refinement version, or a candidate (an integer
+    selection, ``document.results[selection]``) shown as the final result, as the task page does.
     """
     if not isinstance(task, dict) or not task.get("uuid"):
         return document, None
+    selection = (task.get("review") or {}).get("selection")
+    if isinstance(selection, int) and not isinstance(selection, bool):
+        results = list(getattr(document, "results", None) or [])
+        if not 0 <= selection < len(results):
+            return document, None
+        refinement = results[selection][1]
+        return document.model_copy(update={
+            "final_result": refinement, "best_rwp": refinement.lst_data.rwp,
+            "pinned_result_index": selection,  # the adopted record represents its candidate group
+        }), selection
     try:
         from dara.server import versions
         from dara.server.api_router import _adopted_version_record
@@ -117,12 +132,27 @@ def compact_summary(document, runtime_s: float | None, task: dict | None = None)
     with display_formulas_scope(formulas):
         summary = _compact_summary(view, document, runtime_s)
     summary["adopted"] = adopted
+    summary["display_formulas"] = dict(formulas)
     return summary
 
 
 def identification_summary(document, runtime_s: float | None) -> dict:
     """The results-list digest of an identification result: the keys of a refinement's digest with
     no Rwp, GOF or weight fractions, and ``analysis_mode``."""
+    from dara.plot import display_formulas_scope
+    from dara.server.display_formula import cif_display_formulas
+
+    try:
+        formulas = cif_display_formulas(getattr(document, "input_cifs", None) or [])
+    except Exception:  # noqa: BLE001 - labels then keep the names' formulas
+        formulas = {}
+    with display_formulas_scope(formulas):
+        summary = _identification_summary(document, runtime_s)
+    summary["display_formulas"] = dict(formulas)
+    return summary
+
+
+def _identification_summary(document, runtime_s: float | None) -> dict:
     names = [phase["name"] for phase in document.phases]
     return {
         "schema": SUMMARY_SCHEMA,
@@ -205,6 +235,17 @@ def runtime_seconds(start, end) -> float | None:
         return None
 
 
+def summary_is_current(summary, record: dict | None) -> bool:
+    """A stored digest of the current schema that describes the adopted candidate, if any (a digest
+    stored before candidate adoptions were summarized describes the automatic fit)."""
+    if not isinstance(summary, dict) or summary.get("schema", 0) < SUMMARY_SCHEMA:
+        return False
+    selection = ((record or {}).get("review") or {}).get("selection")
+    if isinstance(selection, int) and not isinstance(selection, bool):
+        return summary.get("adopted") == selection
+    return True
+
+
 def refresh_stale_summary(record: dict, open_store) -> dict | None:
     """Return a current-schema summary of a completed task, upgrading and persisting a stale one.
 
@@ -217,13 +258,16 @@ def refresh_stale_summary(record: dict, open_store) -> dict | None:
     uuid = record.get("uuid")
     if record.get("status") != "COMPLETED":
         return summary
-    if summary is not None and summary.get("schema", 0) >= SUMMARY_SCHEMA:
+    if summary_is_current(summary, record):
         return summary
     if not uuid or uuid in SUMMARY_REFRESH_GAVE_UP:
         return summary
     try:
         runtime = runtime_seconds(record.get("start_time"), record.get("end_time"))
-        adopted = str((record.get("review") or {}).get("selection")).startswith("version:")
+        selection = (record.get("review") or {}).get("selection")
+        adopted = str(selection).startswith("version:") or (
+            isinstance(selection, int) and not isinstance(selection, bool)
+        )
         fresh = (
             summarize_stored_result(uuid, runtime, record)
             if adopted
@@ -235,7 +279,7 @@ def refresh_stale_summary(record: dict, open_store) -> dict | None:
         return summary
     if not isinstance(fresh, dict):
         return summary
-    if fresh.get("schema", 0) < SUMMARY_SCHEMA:
+    if not summary_is_current(fresh, record):  # e.g. an adopted candidate index that no longer exists
         SUMMARY_REFRESH_GAVE_UP.add(uuid)
     try:
         with open_store() as store:

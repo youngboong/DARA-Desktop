@@ -65,6 +65,7 @@ from dara.server.table_export import (
 from dara.server.task_summary import (
     SUMMARY_SCHEMA,
     compact_summary,
+    summary_is_current,
     SUMMARY_REFRESH_GAVE_UP,
     refresh_stale_summary,
     runtime_seconds,
@@ -423,6 +424,28 @@ def _add_status_fields(entry, refinement, name, index, extra, spec, b1_spec, ref
     )
 
 
+def _preferred_orientation(phase) -> dict:
+    """Preferred-orientation model of a refined phase, as far as the BGMN listing states it.
+
+    BGMN's ``GEWICHT=SPHARx`` is the positive-definite spherical-harmonics correction of order
+    x (Bergmann, Monecke & Kleeberg, J. Appl. Cryst. 34 (2001) 16-19; bgmn.de/variables.html).
+    The ``.lst`` reports it as ``GEWICHT=SPHAR4, MeanValue(GEWICHT)=...`` only: neither the
+    coefficients nor the factor of each reflection (BGMN gives ``GEWICHT(h,k,l)`` only as a GOAL
+    the control file would have to request), so no texture strength is derived here
+    (``strength`` stays null). ``model`` null: a plain isotropic scale factor.
+    """
+    model = getattr(phase, "gewicht_name", None)
+    match = re.fullmatch(r"SPHAR(\d+)", str(model or "").upper())
+    order = int(match.group(1)) if match else None
+    return {
+        "model": model,
+        "spherical_harmonics_order": order,
+        "corrected": bool(order),  # SPHAR0 is the isotropic value
+        "mean_gewicht": _value_and_esd(getattr(phase, "gewicht", None))[0] if order else None,
+        "strength": None,
+    }
+
+
 def _phase_refinement_details(
     refinement, b1_spec=None, *, spec=None, references=None
 ) -> dict[str, dict]:
@@ -489,6 +512,7 @@ def _phase_refinement_details(
             "rphase": phase.rphase,
             "grain_sizes": grain_sizes,
             "crystallite_size_status": crystallite_size_status(extra, grain_sizes, b1_value),
+            "preferred_orientation": _preferred_orientation(phase),
         }
         try:
             _add_status_fields(output[name], refinement, name, index, extra, spec, b1_value, references)
@@ -813,6 +837,49 @@ def _parse_string_list(value: str | None) -> list[str]:
     return [str(item).strip() for item in parsed if str(item).strip()]
 
 
+def element_symbols(tokens) -> list[str]:
+    """Sorted distinct element symbols of a user's element list (submit, estimate, search-match).
+
+    Every comma-, semicolon- or space-separated token is one element symbol, accepted as typed
+    ("Co") or in lower case ("co" -> "Co"). Not guessed: a lone two-letter lower-case token that
+    also reads as two one-letter elements ("no": N + O or nobelium) and any other spelling
+    ("CO", "Xx"). Raises ``HTTPException(400)`` naming the symbols it cannot read.
+    """
+    from pymatgen.core import Element
+
+    words = [word for token in tokens for word in re.split(r"[\s,;]+", str(token)) if word]
+    symbols, unknown = set(), []
+    for word in words:
+        if Element.is_valid_symbol(word):
+            symbols.add(word)
+            continue
+        if word.islower() and Element.is_valid_symbol(word.capitalize()):
+            if len(words) == 1 and len(word) == 2 and all(Element.is_valid_symbol(c.upper()) for c in word):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"'{word}' can be one element or two: write {word.capitalize()} "
+                    f"or {word[0].upper()}, {word[1].upper()}.",
+                )
+            symbols.add(word.capitalize())
+            continue
+        unknown.append(word)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown element symbol{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}. "
+            "Enter one symbol per entry, e.g. Co, Zn, O.",
+        )
+    return sorted(symbols)
+
+
+def formula_elements(formulas) -> list[str]:
+    """Element symbols of formulas, through :func:`element_symbols` (an "Xx" in a formula is a
+    pymatgen dummy species, not an element)."""
+    return element_symbols(
+        getattr(element, "symbol", str(element)) for formula in formulas for element in Composition(formula).elements
+    )
+
+
 @router.get("/instrument-profiles")
 async def instrument_profiles():
     """Return the instrument profiles actually bundled with this server."""
@@ -884,7 +951,27 @@ async def inspect_pattern(pattern_file: Annotated[UploadFile, File()]):
         "load_warnings": load_warnings,
         "quality_checks": quality_checks,
         "quality_stats": quality_stats,
+        "preview": pattern_preview(pattern.angles, pattern.intensities),
     }
+
+
+PREVIEW_POINTS = 2000
+
+
+def pattern_preview(angles, intensities, points: int = PREVIEW_POINTS) -> dict:
+    """``{two_theta, intensity}`` for a quick plot: at most ``points`` samples, the highest one of
+    each run of consecutive samples (peak maxima survive; plain striding can drop them)."""
+    x = np.asarray(angles, dtype=float)
+    y = np.asarray(intensities, dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    x, y = x[keep], y[keep]
+    order = np.argsort(x, kind="stable")
+    x, y = x[order], y[order]
+    if len(x) > points:
+        edges = np.linspace(0, len(x), points + 1).astype(int)
+        index = [start + int(np.argmax(y[start:end])) for start, end in zip(edges[:-1], edges[1:]) if end > start]
+        x, y = x[index], y[index]
+    return {"two_theta": [round(float(v), 4) for v in x], "intensity": [round(float(v), 3) for v in y]}
 
 
 def _saved_task_input(task_id: int) -> tuple[dict, dict, object]:
@@ -959,6 +1046,20 @@ DEFAULT_CANDIDATE_PREFILTER = True
 DEFAULT_SCREENING_TIMEOUT_S = 300.0
 
 
+def stored_search_match(kwargs: dict, saved: dict) -> dict:
+    """Database settings of an identification task's search-match (``function_kwargs.search_match``).
+
+    A task stored before they were recorded keeps only its accepted ``reference_ids``: an ``mp:``
+    structure among them shows that Materials Project was searched (COD stays the default)."""
+    stored = kwargs.get("search_match")
+    if stored:
+        return dict(stored)
+    if saved.get("analysis_mode") != "identification":
+        return {}
+    ids = [str(ref) for ref in saved.get("reference_ids") or []]
+    return {"use_mp": True} if any(ref.startswith("mp:") for ref in ids) else {}
+
+
 def _rerun_settings(record: dict, kwargs: dict, pattern) -> dict:
     """Return an explicit UI allowlist; credentials and private DB config stay server-side."""
     raw_job = record.get("job", {})
@@ -970,8 +1071,11 @@ def _rerun_settings(record: dict, kwargs: dict, pattern) -> dict:
     dbs = kwargs.get("cif_dbs") or []
     classes = {db.get("@class") for db in dbs if isinstance(db, dict)}
     mp_db = next((db for db in dbs if isinstance(db, dict) and db.get("@class") == "MaterialsProjectDatabase"), {})
+    ranked = stored_search_match(kwargs, saved)
     mode = saved.get("analysis_mode", kwargs.get("analysis_mode", "reaction" if predict else "elemental"))
-    if mode not in {"elemental", "reaction", "known_mixture"}:
+    # "identification": a search-match result; the UI reopens Search-match on the stored pattern
+    # (POST /api/task/{id}/quick-ranking) instead of the submit form.
+    if mode not in {"elemental", "reaction", "known_mixture", "identification"}:
         mode = "elemental"
     settings = {
         "user": record.get("user", ""),
@@ -984,10 +1088,16 @@ def _rerun_settings(record: dict, kwargs: dict, pattern) -> dict:
         "wavelength": search.get("wavelength", "Cu"),
         "temperature": predict.get("temp", 1073) - 273,
         "atmosphere": saved.get("atmosphere", {"O_air": "air", "O": "oxygen"}.get(predict.get("open_elem"), "inert")),
-        "use_cod": "CODDatabase" in classes or (not dbs and not kwargs.get("cifs") and not kwargs.get("additional_cifs")),
-        "use_mp": "MaterialsProjectDatabase" in classes,
-        "mp_e_hull_cutoff": kwargs.get("database_e_hull_filter", mp_db.get("e_hull_filter", 0.05)),
-        "max_mp_structures": mp_db.get("max_structures", 100),
+        # An identification task stores the databases of its search-match in ``search_match``.
+        "use_cod": ranked.get(
+            "use_cod",
+            "CODDatabase" in classes or (not dbs and not kwargs.get("cifs") and not kwargs.get("additional_cifs")),
+        ),
+        "use_mp": ranked.get("use_mp", "MaterialsProjectDatabase" in classes),
+        "mp_e_hull_cutoff": ranked.get(
+            "mp_e_hull_cutoff", kwargs.get("database_e_hull_filter", mp_db.get("e_hull_filter", 0.05))
+        ),
+        "max_mp_structures": ranked.get("max_mp_structures", mp_db.get("max_structures", 100)),
         "two_theta_min": refine.get("wmin"),
         "two_theta_max": refine.get("wmax"),
         "excluded_ranges": refine.get("excluded_ranges", []),
@@ -1010,6 +1120,11 @@ def _rerun_settings(record: dict, kwargs: dict, pattern) -> dict:
         "internal_standard": saved.get("internal_standard"),
         "sample": saved.get("sample"),
         "phase_set_from": saved.get("phase_set_from"),
+        # search-match settings (identification tasks): accepted structures, theoretical MP
+        # entries, background (prefilter.background_settings; null: the default)
+        "reference_ids": saved.get("reference_ids") or [],
+        "include_theoretical": bool(ranked.get("include_theoretical", False)),
+        "background": search.get("background"),
     }
     angles = np.asarray(pattern.angles, dtype=float)
     finite = angles[np.isfinite(angles)]
@@ -1037,6 +1152,8 @@ LAB_WAVELENGTHS_ANGSTROM = {
     "Cu": 1.540598, "Co": 1.789010, "Cr": 2.289760, "Fe": 1.936042, "Mo": 0.70930,
 }
 WAVELENGTH_TOLERANCE_ANGSTROM = 0.03
+# Anodes a Rietveld refinement accepts: BGMN ships CU/CO/CR/FE/MO.LAM (no AG or NI profile).
+REFINEMENT_ANODES = ("Cu", "Co", "Cr", "Fe", "Mo")
 
 
 def _selected_wavelength_angstrom(wavelength: str) -> float | None:
@@ -1223,19 +1340,10 @@ def build_submission_job(
             raise HTTPException(status_code=400, detail="Invalid precursor formulas")
         if analysis_mode == "known_mixture":  # the 12-phase limit counts distinct formulas
             precursor_formulas = known_phases.distinct_formulas(precursor_formulas)
-        try:
-            elements = sorted({str(Element(element)) for element in elements})
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid element symbols")
+        elements = element_symbols(elements)
 
         if not elements and precursor_formulas:
-            elements = sorted(
-                {
-                    str(element)
-                    for formula in precursor_formulas
-                    for element in Composition(formula).elements
-                }
-            )
+            elements = formula_elements(precursor_formulas)
 
         if analysis_mode in {"reaction", "known_mixture"} and not precursor_formulas:
             raise HTTPException(
@@ -1273,7 +1381,13 @@ def build_submission_job(
         try:
             wavelength = float(wavelength)
         except ValueError:
-            pass
+            # BGMN reads the emission profile from <ANODE>.LAM: only these anodes ship one.
+            if str(wavelength).strip().capitalize() not in REFINEMENT_ANODES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No BGMN emission profile for anode '{wavelength}': choose "
+                    f"{', '.join(REFINEMENT_ANODES)} or enter the wavelength in nm.",
+                )
 
         cif_dbs = []
         if use_cod and not phase_set_cifs:
@@ -1794,14 +1908,9 @@ async def _estimate_submission(request: EstimateRequest) -> dict:
         [Composition(p) for p in precursors]
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid precursor formulas")
-    try:
-        elements = sorted({str(Element(element)) for element in elements})
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid element symbols")
+    elements = element_symbols(elements)
     if not elements and precursors:
-        elements = sorted(
-            {str(el) for formula in precursors for el in Composition(formula).elements}
-        )
+        elements = formula_elements(precursors)
     if mode in {"reaction", "known_mixture"} and not precursors:
         raise HTTPException(
             status_code=400,
@@ -2046,8 +2155,7 @@ def _final_lattice_flags(job: dict, document) -> list[dict]:
 
 def _backfill_summary(job: dict, document, runtime) -> None:
     """Persist the results-list summary for tasks finished before it existed."""
-    existing = job.get("summary")
-    if isinstance(existing, dict) and existing.get("schema", 0) >= SUMMARY_SCHEMA:
+    if summary_is_current(job.get("summary"), job):
         return
     try:
         summary = compact_summary(document, runtime, job)
@@ -2212,11 +2320,18 @@ def enrich_version_summary(task: dict, document, record: dict, summary):
 
     A summary saved before the refinement status, size/strain, lattice states and weight flags
     existed is recomputed from the stored refinement (the stored record is not changed).
+    Candidates referenced by its confidence are numbered as on the task page.
     """
+    from dara.server.versions import renumber_version_confidence
+
+    summary = renumber_version_confidence(document, summary)
     details = summary.get("phase_details") if isinstance(summary, dict) else None
-    if not isinstance(details, dict) or all(
+    confidence = summary.get("confidence") if isinstance(summary, dict) else None
+    # verdicts stored before the current phase-identity rule (confidence SCHEMA) are judged again
+    stale_verdicts = isinstance(confidence, dict) and confidence.get("schema", 0) < confidence_module.SCHEMA
+    if not isinstance(details, dict) or (not stale_verdicts and all(
         isinstance(item, dict) and "refinement_status" in item for item in details.values()
-    ):
+    )):
         return summary
     number = record.get("version") or record.get("index")
     key = (task.get("uuid"), number)
@@ -3171,6 +3286,19 @@ def _resolve_adopted(document, job: dict) -> tuple | None:
     return selection, refinement, resolved, record
 
 
+async def _adopted_version_for_table(job: dict) -> dict | None:
+    """Stored record of the adopted version with its summary brought up to date, or ``None``."""
+    adopted = _adopted_version_record(job)
+    if adopted is not None and isinstance(adopted.get("summary"), dict):
+        from dara.server import quick_refine
+
+        adopted = dict(adopted)
+        adopted["summary"] = enrich_version_summary(
+            job, await quick_refine.load_document(job["uuid"]), adopted, adopted["summary"]
+        )
+    return adopted
+
+
 @router.get("/task/{task_id}/table.csv")
 async def download_task_table(task_id: int):
     """Flat CSV with one row per (candidate, phase) of a completed task."""
@@ -3181,15 +3309,7 @@ async def download_task_table(task_id: int):
     if job["status"] != "COMPLETED":
         raise HTTPException(status_code=409, detail=not_completed_detail(job["status"]))
     summary = await result(task_id)
-    adopted = _adopted_version_record(job)
-    if adopted is not None and isinstance(adopted.get("summary"), dict):
-        from dara.server import quick_refine
-
-        adopted = dict(adopted)
-        adopted["summary"] = enrich_version_summary(
-            job, await quick_refine.load_document(job["uuid"]), adopted, adopted["summary"]
-        )
-    rows = task_table_rows(task_id, job, summary, adopted)
+    rows = task_table_rows(task_id, job, summary, await _adopted_version_for_table(job))
     filename = download_name(task_id, job["job"]["name"], "table", ext="csv")
     return _csv_response(rows_to_csv(rows, TABLE_COLUMNS), filename)
 
@@ -3561,25 +3681,53 @@ def _parse_task_ids(ids: str | None) -> list[int]:
     return parsed
 
 
+# Worker-record fields the bulk table reads (the stored pattern is left out).
+TABLE_TASK_FIELDS = ["index", "uuid", "status", "user", "submitted_time", "job.name", "job.metadata",
+                     "review", "internal_standard", "end_time"]
+_TABLE_ROWS: "OrderedDict[str, list]" = OrderedDict()
+_TABLE_ROWS_MAX = 256
+
+
 @router.get("/tasks/table.csv")
 async def download_tasks_table(ids: str = Query(...)):
-    """Final-result rows for several tasks; unfinished tasks get a status row."""
+    """Rows of the adopted fit of several tasks; unfinished tasks get a status row.
+
+    A finished task's rows depend only on its stored result, adoption and internal standard:
+    they are kept (``_TABLE_ROWS``) under those, so a repeated export recomputes nothing.
+    """
     task_ids = _parse_task_ids(ids)
-    entries = []
+    with get_worker_store() as worker_store:  # one query, without the stored patterns
+        jobs = {
+            job["index"]: job
+            for job in worker_store.query(criteria={"index": {"$in": task_ids}}, properties=TABLE_TASK_FIELDS)
+        }
+    rows = []
     for task_id in task_ids:
-        with get_worker_store() as worker_store:
-            job = worker_store.query_one({"index": task_id})
-        summary = None
-        if job is not None and job["status"] == "COMPLETED":
+        job = jobs.get(task_id)
+        if job is None or job["status"] != "COMPLETED":
+            rows += multi_task_rows([(task_id, job, None)])
+            continue
+        record = _adopted_version_record(job)
+        key = json.dumps([
+            job.get("uuid"), (job.get("review") or {}).get("selection"), _internal_standard_spec(job),
+            None if record is None else [record.get("version") or record.get("index"), str(record.get("created_at"))],
+            (job.get("job") or {}).get("metadata", {}).get("submission_settings", {}).get("sample"), job.get("user"),
+        ], default=str, sort_keys=True)
+        cached = _TABLE_ROWS.get(key)
+        if cached is None:
             try:
                 summary = await result(task_id)
             except HTTPException:
                 summary = None
-        entries.append((task_id, job, summary))
-    rows = multi_task_rows(entries)
-    return _csv_response(
-        rows_to_csv(rows, TABLE_COLUMNS + MULTI_TASK_EXTRA_COLUMNS), "dara_tasks_table.csv"
-    )
+            cached = multi_task_rows([(task_id, job, summary, await _adopted_version_for_table(job))])
+            _TABLE_ROWS[key] = cached
+            while len(_TABLE_ROWS) > _TABLE_ROWS_MAX:
+                _TABLE_ROWS.popitem(last=False)
+        else:
+            _TABLE_ROWS.move_to_end(key)
+        rows += deepcopy(cached)
+    filename = f"dara_tasks_{time.strftime('%Y%m%d')}_{len(task_ids)}.csv"
+    return _csv_response(rows_to_csv(rows, TABLE_COLUMNS + MULTI_TASK_EXTRA_COLUMNS), filename)
 
 
 @router.delete("/task/{task_id}")
@@ -3732,10 +3880,7 @@ def _refresh_listed_summaries(tasks: list[dict]) -> dict[int, dict | None]:
     for task in tasks:
         if budget <= 0:
             break
-        summary = task.get("summary")
-        if task.get("status") != "COMPLETED" or (
-            isinstance(summary, dict) and summary.get("schema", 0) >= SUMMARY_SCHEMA
-        ):
+        if task.get("status") != "COMPLETED" or summary_is_current(task.get("summary"), task):
             continue
         if not task.get("uuid") or task["uuid"] in SUMMARY_REFRESH_GAVE_UP:
             continue
@@ -3750,6 +3895,52 @@ def _refresh_listed_summaries(tasks: list[dict]) -> dict[int, dict | None]:
     return fresh
 
 
+LIST_SORT_KEYS = ("name", "submitted", "rwp", "gof", "verdict")
+LIST_VERDICTS = ("high", "check", "expert", "no-fit")
+_VERDICT_ORDER = {"high": 0, "check": 1, "expert": 2}
+
+
+def _list_sort_value(task: dict, key: str):
+    """Sort value of a Results row; ``None`` (no value) always sorts last."""
+    summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
+    if key == "name":
+        return str((task.get("job") or {}).get("name") or "").lower()
+    if key == "submitted":
+        stamp = task.get("submitted_time")
+        return stamp.timestamp() if hasattr(stamp, "timestamp") else None
+    if key == "rwp":
+        value = summary.get("final_rwp", summary.get("best_rwp"))
+    elif key == "gof":
+        value = summary.get("gof")
+    else:
+        value = _VERDICT_ORDER.get(summary.get("confidence_overall"))
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _list_verdict(task: dict) -> str:
+    summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
+    level = summary.get("confidence_overall")
+    return level if level in _VERDICT_ORDER else "no-fit"
+
+
+def _row_progress(task: dict) -> dict | None:
+    """Stage text and percent of a running task (the progress file the task page reads)."""
+    from dara.server.task_control_router import task_directory
+
+    try:
+        state = json.loads((task_directory(task["uuid"]) / "progress.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    completed, total = state.get("completed"), state.get("total")
+    percent = None
+    if isinstance(completed, (int, float)) and isinstance(total, (int, float)) and total > 0:
+        percent = max(0, min(100, round(100 * completed / total)))
+    return {"stage": state.get("stage"), "percent": percent}
+
+
 @router.get("/tasks")
 async def get_all_tasks(
     page: int = Query(1, ge=1),
@@ -3757,15 +3948,43 @@ async def get_all_tasks(
     user: Optional[str] = None,
     name: Optional[str] = None,
     state: Optional[str] = None,
+    verdict: Optional[str] = None,
+    sort: Optional[str] = None,
+    order: Optional[str] = None,
+    analysis_mode: Optional[str] = None,
 ):
+    """One page of the Results list.
+
+    ``user``: case-insensitive substring ("unknown": tasks without a user). ``name``: file or
+    sample name substring. ``state``, ``verdict`` (high, check, expert, no-fit: no confidence
+    verdict) and ``analysis_mode`` (elemental, reaction, known_mixture, identification) take
+    comma-separated values. ``sort`` (name, submitted, rwp, gof, verdict) and ``order`` (asc,
+    desc; default desc for submitted, else asc) apply across all pages; rows without a value
+    sort last. Rows add ``source_task_id``, ``progress`` (running), ``queue_position`` (queued).
+    """
+    def values(text):
+        return [item.strip() for item in (text or "").split(",") if item.strip()]
+
+    sort = (sort or "submitted").strip().lower()
+    if sort not in LIST_SORT_KEYS:
+        raise HTTPException(status_code=400, detail=f"sort must be one of {', '.join(LIST_SORT_KEYS)}")
+    order = (order or ("desc" if sort == "submitted" else "asc")).strip().lower()
+    if order not in ("asc", "desc"):
+        raise HTTPException(status_code=400, detail="order must be asc or desc")
+    verdicts = [item.lower() for item in values(verdict)]
+    if any(item not in LIST_VERDICTS for item in verdicts):
+        raise HTTPException(status_code=400, detail=f"verdict must be among {', '.join(LIST_VERDICTS)}")
     # Calculate the skip value based on the page and limit
     skip = (page - 1) * limit
 
     query_dict = {}
-    if user is not None:
-        query_dict["user"] = user
     if user == "unknown":
         query_dict["user"] = None
+    elif user is not None and user.strip():
+        query_dict["user"] = {"$regex": re.escape(user.strip()), "$options": "i"}
+    modes = values(analysis_mode)
+    if modes:
+        query_dict["job.metadata.submission_settings.analysis_mode"] = {"$in": modes}
     if name is not None and name.strip():
         # Literal, case-insensitive substring match on the pattern file name.
         # file name or sample name (literal, case-insensitive substring)
@@ -3775,21 +3994,47 @@ async def get_all_tasks(
     if states:
         # Status filter of the Results table, applied before paging so it covers every page.
         query_dict["status"] = {"$in": states}
-    with get_worker_store() as worker_store:
-        tasks = list(
-            worker_store.query(
-                criteria=query_dict, properties=LIST_TASK_FIELDS,
-                sort={"submitted_time": -1}, skip=skip, limit=limit
+    total_tasks = None
+    if sort == "submitted" and not verdicts:
+        with get_worker_store() as worker_store:
+            tasks = list(
+                worker_store.query(
+                    criteria=query_dict, properties=LIST_TASK_FIELDS,
+                    sort={"submitted_time": -1 if order == "desc" else 1}, skip=skip, limit=limit
+                )
             )
-        )
+    else:
+        # Verdict filter and summary-based sorts: filter and order every matching row, then page.
+        with get_worker_store() as worker_store:
+            light = list(worker_store.query(
+                criteria=query_dict, properties=["index", "summary", "job.name", "submitted_time"]))
+        if verdicts:
+            light = [task for task in light if _list_verdict(task) in verdicts]
+        present = [task for task in light if _list_sort_value(task, sort) is not None]
+        present.sort(key=lambda task: (_list_sort_value(task, sort), task["index"]), reverse=order == "desc")
+        ordered = present + [task for task in light if _list_sort_value(task, sort) is None]
+        total_tasks = len(ordered)
+        wanted = [task["index"] for task in ordered[skip:skip + limit]]
+        with get_worker_store() as worker_store:
+            by_index = {
+                task["index"]: task
+                for task in worker_store.query(criteria={"index": {"$in": wanted}}, properties=LIST_TASK_FIELDS)
+            }
+        tasks = [by_index[index] for index in wanted if index in by_index]
 
     tasks_result = []
     refreshed = _refresh_listed_summaries(tasks)
+    queue: list[str] = []
+    if any(task.get("status") == "READY" for task in tasks):
+        from dara.server.worker import get_all_pending_jobs
+
+        queue = get_all_pending_jobs(sort_by_submitted_time=True)
 
     for task in tasks:
         index = task["index"]
         state = task["status"]
         summary = refreshed.get(index, task.get("summary"))
+        settings = ((task.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
         tasks_result.append(
             {
                 "fw_id": index,
@@ -3806,11 +4051,17 @@ async def get_all_tasks(
                 "error_summary": (
                     summarize_failure(task.get("error")) if state == "FIZZLED" else None
                 ),
+                "source_task_id": settings.get("source_task_id", settings.get("retry_of")),
+                "progress": _row_progress(task) if state in ("RUNNING", "CANCELLING") else None,
+                "queue_position": (
+                    queue.index(task["uuid"]) + 1 if state == "READY" and task.get("uuid") in queue else None
+                ),
             }
         )
 
-    with get_worker_store() as worker_store:
-        total_tasks = worker_store.count(query_dict)
+    if total_tasks is None:
+        with get_worker_store() as worker_store:
+            total_tasks = worker_store.count(query_dict)
 
     # Return the tasks data
     return {

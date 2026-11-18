@@ -43,7 +43,7 @@ def populated(tmp_path, monkeypatch):
     # A fresh store object per call, as in production.
     monkeypatch.setattr(api_router, "get_worker_store", lambda: _store(tmp_path))
     # Never touch the real result store: refreshing a stale summary fails unless a test says otherwise.
-    def no_result(uuid, runtime_s):
+    def no_result(uuid, runtime_s, task=None):
         raise LookupError("no stored result")
 
     monkeypatch.setattr("dara.server.task_summary.summarize_stored_result", no_result)
@@ -83,7 +83,7 @@ def test_series_and_list_share_the_summary_schema_constant():
 def test_list_refreshes_stale_summaries_and_persists_them(populated, monkeypatch):
     calls = []
 
-    def fresh(uuid, runtime_s):
+    def fresh(uuid, runtime_s, task=None):
         calls.append(uuid)
         return {"schema": SUMMARY_SCHEMA, "best_rwp": 1.5, "gof": 1.1, "phases": [],
                 "confidence_overall": "check"}
@@ -102,7 +102,7 @@ def test_list_refreshes_stale_summaries_and_persists_them(populated, monkeypatch
 def test_list_refresh_is_bounded_per_request(populated, monkeypatch):
     calls = []
 
-    def fresh(uuid, runtime_s):
+    def fresh(uuid, runtime_s, task=None):
         calls.append(uuid)
         return {"schema": SUMMARY_SCHEMA, "best_rwp": 1.5}
 
@@ -118,7 +118,7 @@ def test_list_refresh_is_bounded_per_request(populated, monkeypatch):
 def test_list_refresh_failure_keeps_the_old_summary_and_is_not_retried(populated, monkeypatch):
     calls = []
 
-    def boom(uuid, runtime_s):
+    def boom(uuid, runtime_s, task=None):
         calls.append(uuid)
         raise LookupError("gone")
 
@@ -186,3 +186,78 @@ def test_sample_name_is_listed_and_searchable(populated):
     assert payload["tasks"][0]["sample"] == "NCM811 batch 3"
     assert {task["fw_id"] for task in _list(name="BiFeO3")["tasks"]} == {1, 3}  # file names still match
     assert {task["fw_id"]: task["sample"] for task in _list()["tasks"]}[1] is None
+
+
+def test_adopted_candidate_is_the_listed_fit_and_an_older_digest_is_stale():
+    from dara.server.task_summary import summary_is_current
+
+    class Doc(SimpleNamespace):
+        def model_copy(self, update):
+            return Doc(**{**vars(self), **update})
+
+    def fit(rwp, name):
+        return SimpleNamespace(lst_data=SimpleNamespace(rwp=rwp, rexp=2.0, phases_results={name: SimpleNamespace()}))
+
+    automatic, adopted = fit(3.01, "Y2O3_206_(cod_1)-0"), fit(3.12, "Y2O3_199_(cod_2)-0")
+    document = Doc(best_rwp=3.01, results=[([], automatic), ([], adopted)], final_result=automatic)
+    summary = compact_summary(document, 1.0, {"uuid": "u", "review": {"selection": 1}})
+    assert summary["adopted"] == 1 and summary["final_rwp"] == 3.12
+    assert summary["final_phases"] == ["Y2O3_199_(cod_2)-0"] and summary["n_candidates"] == 2
+    record = {"review": {"selection": 1}}
+    assert summary_is_current(summary, record)
+    assert not summary_is_current({**summary, "adopted": None}, record)  # stored before this rule
+    assert summary_is_current({**summary, "adopted": None}, {"review": {"selection": "best"}})
+    assert not summary_is_current({**summary, "schema": SUMMARY_SCHEMA - 1}, {})
+
+
+def test_list_filters_and_sorts_across_pages(tmp_path, monkeypatch):
+    base = datetime(2026, 5, 1, tzinfo=timezone.utc)
+
+    def summary(rwp, gof, level):
+        return {"schema": SUMMARY_SCHEMA, "final_rwp": rwp, "gof": gof, "confidence_overall": level}
+
+    records = [
+        {"uuid": "a", "index": 1, "status": "COMPLETED", "user": "Verify", "submitted_time": base,
+         "job": {"name": "b.xy", "metadata": {"submission_settings": {"analysis_mode": "elemental"}}},
+         "summary": summary(5.0, 1.5, "check")},
+        {"uuid": "b", "index": 2, "status": "COMPLETED", "user": "verify-2", "submitted_time": base.replace(day=2),
+         "job": {"name": "A.xy", "metadata": {"submission_settings": {
+             "analysis_mode": "known_mixture", "source_task_id": 1}}},
+         "summary": summary(3.0, 2.5, "high")},
+        {"uuid": "c", "index": 3, "status": "COMPLETED", "user": "amy", "submitted_time": base.replace(day=3),
+         "job": {"name": "c.xy", "metadata": {"submission_settings": {"analysis_mode": "identification"}}},
+         "summary": summary(None, None, None)},
+        {"uuid": "d", "index": 4, "status": "READY", "user": "amy", "submitted_time": base.replace(day=4),
+         "job": {"name": "d.xy"}},
+        {"uuid": "e", "index": 5, "status": "READY", "user": "amy", "submitted_time": base.replace(day=5),
+         "job": {"name": "e.xy"}},
+    ]
+    with _store(tmp_path) as store:
+        for record in records:
+            store.update(record)
+    monkeypatch.setattr(api_router, "get_worker_store", lambda: _store(tmp_path))
+    from dara.server import worker
+
+    monkeypatch.setattr(worker, "get_worker_store", lambda: _store(tmp_path))
+    assert _list(user="verify")["total_tasks"] == 2  # case-insensitive substring
+    assert _list(user="VERIFY-")["total_tasks"] == 1
+    assert [t["fw_id"] for t in _list(sort="rwp")["tasks"]][:2] == [2, 1]  # no Rwp sorts last
+    assert [t["fw_id"] for t in _list(sort="rwp", order="desc")["tasks"]][:2] == [1, 2]
+    assert [t["fw_id"] for t in _list(sort="name")["tasks"]] == [2, 1, 3, 4, 5]
+    assert [t["fw_id"] for t in _list(sort="verdict", limit=1, page=2)["tasks"]] == [1]  # high, check, ...
+    assert [t["fw_id"] for t in _list(verdict="high,check")["tasks"]] == [2, 1]
+    assert _list(verdict="no-fit")["total_tasks"] == 3
+    assert [t["fw_id"] for t in _list(analysis_mode="identification")["tasks"]] == [3]
+    rows = {t["fw_id"]: t for t in _list()["tasks"]}
+    assert rows[2]["source_task_id"] == 1 and rows[1]["source_task_id"] is None
+    assert (rows[4]["queue_position"], rows[5]["queue_position"]) == (1, 2) and rows[1]["queue_position"] is None
+    for bad in ({"sort": "colour"}, {"order": "up"}, {"verdict": "great"}):
+        with pytest.raises(Exception) as caught:
+            _list(**bad)
+        assert getattr(caught.value, "status_code", None) == 400
+
+
+def test_list_labels_write_hydroxides_as_on_the_task_page():
+    from dara.server.task_summary import _label
+
+    assert _label("La(HO)3_176_(mp_mp-625394)-0").startswith("La(OH)3")

@@ -469,3 +469,170 @@ def test_combination_stops_when_no_significant_peak_is_left_unexplained():
     # a real minor phase leaves its peaks unexplained, so the search goes on to it
     x, y = _pattern([(A_D, A_I, 20000, 1.0), (B_D, B_I, 12000, 1.0), (C_D, C_I, 3000, 1.0)])
     assert [c["formula"] for c in qr.rank(x, y, cands)["combination"]] == ["Aa", "Bb", "Cc"]
+
+
+def test_ranking_reports_a_wavelength_mismatch_without_blocking(monkeypatch):
+    import io
+
+    from fastapi import UploadFile
+
+    from dara.server import api_router
+    from dara.server import quick_rank_router as router_module
+
+    seen = []
+    monkeypatch.setattr(router_module, "_run", lambda params: {
+        "ranking": [], "combination": [], "caveats": ["COD only."]})
+    monkeypatch.setattr(api_router, "_wavelength_mismatch", lambda pattern, path, wavelength: seen.append(
+        (path.name, wavelength)) or {"code": "wavelength_mismatch", "message": "Recorded 1.5406 A, chosen 1.7890 A.",
+                                     "recorded_angstrom": 1.5406, "selected_angstrom": 1.789})
+    router_module._JOBS.clear()
+
+    async def scenario():
+        view = await router_module.quick_ranking_upload(
+            UploadFile(io.BytesIO((DATA / "BiFeO3.xy").read_bytes()), filename="BiFeO3.xy"),
+            elements='["Bi","Fe","O"]', precursor_formulas="[]", wavelength="Co", two_theta_min=None,
+            two_theta_max=None, excluded_ranges="[]", include_theoretical=False, use_cod=True, use_mp=False,
+            mp_e_hull_cutoff=0.05, max_mp_structures=100)
+        for _ in range(50):
+            if view["status"] == "done":
+                break
+            view = await router_module.quick_ranking_status(view["job_id"])
+        return view
+
+    view = asyncio.run(scenario())
+    assert seen == [("BiFeO3.xy", "Co")]
+    assert view["status"] == "done" and view["wavelength_mismatch"]["selected_angstrom"] == 1.789
+    assert view["caveats"] == ["Recorded 1.5406 A, chosen 1.7890 A.", "COD only."]
+
+
+def test_refinement_takes_every_anode_with_a_bgmn_profile(tmp_path, monkeypatch):
+    from fastapi import HTTPException
+
+    from dara.server import api_router
+    from dara.xrd import load_pattern
+
+    monkeypatch.setenv("DARA_COD_CACHE_DIR", str(tmp_path))
+    (tmp_path / "1234567.cif").write_text((DATA / "BiFeO3.cif").read_text())
+    pattern = load_pattern(DATA / "BiFeO3.xy")
+    lam = Path(api_router.__file__).parents[1] / "bgmn" / "BGMNwin"
+    for anode in api_router.REFINEMENT_ANODES:
+        assert (lam / f"{anode.upper()}.LAM").exists() or not lam.exists()
+        job = api_router.build_submission_job(pattern, "BiFeO3.xy", use_mp=False, wavelength=anode,
+                                              reference_ids='["cod:1234567"]')
+        assert job.function_kwargs["search_kwargs"]["wavelength"] == anode
+    with pytest.raises(HTTPException) as info:
+        api_router.build_submission_job(pattern, "BiFeO3.xy", use_mp=False, wavelength="Ag",
+                                        reference_ids='["cod:1234567"]')
+    assert info.value.status_code == 400 and "Ag" in info.value.detail
+    assert qr.wavelength_lines("Ag")[0] == pytest.approx(0.5594075)  # the search-match takes Ag
+
+
+def test_reference_library_cifs_are_ranked_and_handed_on(tmp_path, monkeypatch):
+    import io
+
+    from fastapi import HTTPException, UploadFile
+
+    from dara.server import quick_rank_router as router_module
+
+    monkeypatch.setenv("DARA_SERVER_MONTYDB_PATH", str(tmp_path / "montydb"))
+    library = tmp_path / "reference-cifs"
+    library.mkdir()
+    item = "ab" * 16
+    (library / f"{item}.cif").write_text((DATA / "BiFeO3.cif").read_text())
+    (library / "registry.json").write_text(json.dumps({"items": [
+        {"id": item, "filename": "mine.cif", "formula": "BiFeO3", "spacegroup_number": 161}]}))
+    monkeypatch.setattr(router_module, "WAIT_S", 0.1)
+    router_module._JOBS.clear()
+
+    def upload(ids):
+        return router_module.quick_ranking_upload(
+            UploadFile(io.BytesIO((DATA / "BiFeO3.xy").read_bytes()), filename="BiFeO3.xy"),
+            elements='["Bi","Fe","O"]', precursor_formulas="[]", wavelength="Cu", two_theta_min=None,
+            two_theta_max=None, excluded_ranges="[]", include_theoretical=False, use_cod=False, use_mp=False,
+            mp_e_hull_cutoff=0.05, max_mp_structures=100, library_cif_ids=json.dumps(ids))
+
+    async def scenario():
+        view = await upload([item])
+        for _ in range(600):
+            if view["status"] != "pending":
+                break
+            view = await router_module.quick_ranking_status(view["job_id"])
+        with pytest.raises(HTTPException) as info:
+            await upload(["cd" * 16])
+        assert info.value.status_code == 400 and "cd" * 16 in info.value.detail
+        return view
+
+    view = asyncio.run(scenario())
+    assert view["status"] == "done", view
+    top = view["ranking"][0]
+    assert top["source"] == f"lib:{item}" and top["source_kind"] == "lib" and top["spacegroup"] == 161
+    cif = qr.reference_cifs([f"lib:{item}"])[0]
+    assert cif.filename.endswith(f"(lib_{item})")
+
+
+def test_sonneveld_visser_background_follows_a_curved_base_under_peaks():
+    from dara.search.prefilter import background_settings, observed_profile, sonneveld_visser
+
+    x = np.arange(10.0, 80.0, 0.02)
+    base = 200.0 + 3000.0 * np.exp(-(x - 10.0) / 3.0) + 0.5 * (x - 10.0)  # low-angle rise
+    peaks = sum(5000.0 * np.exp(-0.5 * ((x - c) / 0.06) ** 2) for c in (14.0, 31.7, 36.2, 47.5, 56.6, 62.9))
+    y = base + peaks
+    curve = sonneveld_visser(y, 20, 1.0, 5.0)
+    under = np.zeros_like(x, bool)
+    for c in (31.7, 36.2, 47.5, 56.6, 62.9):
+        under |= np.abs(x - c) < 0.05
+    assert np.max(np.abs(curve[under] - base[under])) < 0.05 * 5000  # does not ride up the peaks
+    assert abs(curve[np.searchsorted(x, 11.0)] - base[np.searchsorted(x, 11.0)]) < 150  # follows the rise
+    assert np.all(sonneveld_visser(base, 20, 0.0, 1.0) <= base.max())
+    settings = background_settings({"method": "auto"})
+    assert settings == {"method": "sonneveld_visser", "granularity": 20, "bending_factor": 0.0, "anchors": None}
+    for bad in ({"method": "magic"}, {"granularity": 1}, {"bending_factor": -1}, {"colour": 1},
+                {"anchors": [[20, 1]]}):
+        with pytest.raises(ValueError):
+            background_settings(bad)
+    flat = background_settings({"anchors": [[10.0, 100.0], [80.0, 100.0]]})
+    profile = observed_profile(x, y, background=flat)
+    assert np.allclose(profile.background, 100.0)  # the analyst's base points replace the automatic curve
+    sv = observed_profile(x, y, background=background_settings({"method": "sonneveld_visser"}))
+    assert sv.usable and sv.background.shape == x.shape
+
+
+def test_flat_pattern_is_rejected_before_the_pool_is_listed(monkeypatch):
+    def no_pool(*args, **kwargs):
+        raise AssertionError("the pool must not be built for a flat pattern")
+
+    monkeypatch.setattr(qr, "build_pool", no_pool)
+    x = np.arange(10, 80, 0.01)
+    out = qr.quick_ranking(x, np.full_like(x, 100.0), elements=["Fe", "O"], use_mp=False)
+    assert out["status"] == "done" and out["ranking"] == [] and "too flat" in out["caveats"][0]
+    assert out["_candidates"] == [] and out["pool"]["candidates"] == 0
+
+
+def test_background_preview_of_a_job_without_ranking(monkeypatch):
+    import io
+
+    from fastapi import HTTPException, UploadFile
+
+    from dara.server import quick_rank_router as router_module
+
+    monkeypatch.setattr(router_module, "_run", lambda params: {"ranking": [], "combination": [], "caveats": []})
+    router_module._JOBS.clear()
+
+    async def scenario():
+        view = await router_module.quick_ranking_upload(
+            UploadFile(io.BytesIO((DATA / "BiFeO3.xy").read_bytes()), filename="BiFeO3.xy"),
+            elements='["Bi","Fe","O"]', precursor_formulas="[]", wavelength="Cu", two_theta_min=None,
+            two_theta_max=None, excluded_ranges="[]", include_theoretical=False, use_cod=True, use_mp=False,
+            mp_e_hull_cutoff=0.05, max_mp_structures=100)
+        curve = await router_module.quick_ranking_background(
+            view["job_id"], {"method": "sonneveld_visser", "granularity": 10, "bending_factor": 2})
+        assert curve["settings"]["granularity"] == 10 and len(curve["two_theta"]) == len(curve["intensity"]) > 100
+        assert set(curve) == {"two_theta", "observed", "intensity", "settings"}
+        with pytest.raises(HTTPException) as info:
+            await router_module.quick_ranking_background(view["job_id"], {"method": "spline"})
+        assert info.value.status_code == 400
+        with pytest.raises(HTTPException) as info:
+            await router_module.quick_ranking_background("nope", None)
+        assert info.value.status_code == 404
+
+    asyncio.run(scenario())

@@ -276,7 +276,7 @@ def test_no_suggestions_when_everything_is_set(databases, stub):
 
 def test_validation_errors(databases, stub):
     for fields, detail in [
-        ({"elements": ["Xx"]}, "Invalid element symbols"),
+        ({"elements": ["Xx"]}, "Unknown element symbol: Xx. Enter one symbol per entry, e.g. Co, Zn, O."),
         ({"precursor_formulas": ["notaformula!"]}, "Invalid precursor formulas"),
         ({"analysis_mode": "nonsense"}, "Invalid analysis mode"),
         ({"mp_e_hull_cutoff": 2}, "MP E-hull cutoff must be 0 to 1 eV/atom"),
@@ -286,6 +286,23 @@ def test_validation_errors(databases, stub):
         with pytest.raises(HTTPException) as info:
             _estimate(**{"elements": ["Bi"], **fields})
         assert info.value.status_code == 400 and info.value.detail == detail
+
+
+def test_element_symbols_are_case_normalised_or_named_when_unknown():
+    from dara.server.api_router import element_symbols, formula_elements
+
+    assert element_symbols(["co", " zn", "O"]) == ["Co", "O", "Zn"]
+    assert element_symbols(["co zn o"]) == ["Co", "O", "Zn"]  # one entry, space separated
+    assert element_symbols(["Bi;fe"]) == ["Bi", "Fe"]
+    for tokens, text in [(["no"], "'no' can be one element or two: write No or N, O."),
+                         (["Co", "Xx", "QQ"], "Unknown element symbols: Xx, QQ."),
+                         (["CO"], "Unknown element symbol: CO.")]:
+        with pytest.raises(HTTPException) as info:
+            element_symbols(tokens)
+        assert info.value.status_code == 400 and info.value.detail.startswith(text)
+    assert element_symbols(["no", "o"]) == ["No", "O"]  # separated entries are one symbol each
+    with pytest.raises(HTTPException):
+        formula_elements(["XxO2"])
 
 
 def test_elements_are_derived_from_precursors(databases, stub):

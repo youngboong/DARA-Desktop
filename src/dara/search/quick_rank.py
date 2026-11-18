@@ -46,6 +46,7 @@ from dara.search.prefilter import (
     PrefilterConfig,
     _in_ranges,
     _merge_reflections,
+    background_settings,
     candidate_bound,
     observed_profile,
     simulate_reflections,
@@ -346,6 +347,7 @@ def build_pool(
     fetch: bool = False,
     should_stop=None,
     progress=None,
+    extra=(),
 ) -> Pool:
     """Candidates of the normal phase search with sticks (cache first, then simulation).
 
@@ -353,6 +355,8 @@ def build_pool(
     search and the structure library use; one that cannot be fetched is skipped and counted.
     ``progress(phase, done, total)`` reports "listing", "downloading" and "simulating".
     ``should_stop()`` ends the pool early (between downloads and between simulations).
+    ``extra`` are the user's own structures (``lib:<id>`` reference-library CIFs), ranked with
+    the database candidates whatever their elements.
     """
     from dara import known_phases
     from dara.structure_db import cod_cache_dir, cod_candidate_rows, mp_cache_dir
@@ -408,7 +412,8 @@ def build_pool(
             spacegroup=row.get("spacegroup"), path=path,
             e_above_hull=row.get("e_above_hull"), theoretical=bool(row.get("theoretical")),
         ))
-    pool.rows = len(cod_rows) + len(mp_rows)
+    entries.extend(extra)
+    pool.rows = len(cod_rows) + len(mp_rows) + len(extra)
     if fetch and missing:
         pool.downloaded = len(missing) - pool.missing_cif
         pool.unavailable = pool.missing_cif
@@ -486,11 +491,15 @@ class _Context:
     window: int = 1  # samples of the window_max filter
 
 
-def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges) -> tuple[_Context | None, str | None]:
-    """``(context, None)`` of a pattern for scoring, or ``(None, caveat)`` when it cannot be ranked."""
+def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges,
+             background=None) -> tuple[_Context | None, str | None]:
+    """``(context, None)`` of a pattern for scoring, or ``(None, caveat)`` when it cannot be ranked.
+
+    ``background``: ``prefilter.background_settings`` (validated) or ``None`` for the default."""
     lam1, lam2 = wavelength_lines(wavelength)
     profile = observed_profile(
-        angles, intensities, wmin=wmin, wmax=wmax, excluded_ranges=excluded_ranges, config=CONFIG
+        angles, intensities, wmin=wmin, wmax=wmax, excluded_ranges=excluded_ranges, config=CONFIG,
+        background=background,
     )
     if not profile.usable or profile.net is None:
         return None, "The pattern is too short or too flat to rank candidates."
@@ -626,7 +635,8 @@ def group_rows(scored: list[tuple[Candidate, dict]], flags: bool = True) -> list
         groups.setdefault((cand.formula, cand.spacegroup), []).append((cand, result))
     rows = []
     for key, members in groups.items():
-        experimental = [m for m in members if m[0].kind == "cod"]
+        # the user's own structure represents its group, then COD (experimental) over MP
+        experimental = [m for m in members if m[0].kind == "lib"] or [m for m in members if m[0].kind == "cod"]
         cand, result = (experimental or members)[0]
         rows.append({"key": key, "candidate": cand, "best": result, "members": members, "flags": []})
     rows.sort(key=lambda row: -row["best"]["score"])
@@ -669,6 +679,7 @@ def _row_payload(rank: int, row: dict, lam1: float, lo: float, hi: float) -> dic
         "formula": cand.formula,
         "spacegroup": cand.spacegroup,
         "source": cand.source,
+        "source_kind": cand.kind,  # "cod", "mp" or "lib" (the user's reference library)
         "sources": sources[:20],
         "score": round(result["score"], 4),
         "explained": round(result["explained"], 4),
@@ -711,16 +722,21 @@ def rank(
     wmax=None,
     excluded_ranges=None,
     max_rows: int = MAX_ROWS,
+    background=None,
 ) -> dict:
     """Rank candidates and combine the best ones; see the module docstring.
 
-    Returns ``{ranking, combination, fwhm, profile, caveats}``. ``profile`` is the net
-    (background-removed) pattern, decimated, for an overlay of the sticks.
+    Returns ``{ranking, combination, fwhm, profile, background, caveats}``. ``profile`` is the
+    net (background-removed) pattern, decimated, for an overlay of the sticks; ``background`` the
+    curve that was removed (:func:`background_view`). ``background``: settings for
+    ``prefilter.background_settings`` (``None``: the default method).
     """
+    settings = background_settings(background)
     ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
-                           excluded_ranges=excluded_ranges)
+                           excluded_ranges=excluded_ranges, background=settings)
     if ctx is None:
-        return {"ranking": [], "combination": [], "fwhm": None, "profile": None, "caveats": [caveat]}
+        return {"ranking": [], "combination": [], "fwhm": None, "profile": None,
+                "background": {"settings": settings}, "caveats": [caveat]}
     profile, x, lam1, fwhm = ctx.profile, ctx.x, ctx.lam1, ctx.fwhm
     usable = [c for c in candidates if c.sticks is not None]
 
@@ -771,7 +787,20 @@ def rank(
         "combination": combination,
         "fwhm": round(fwhm, 3),
         "profile": _decimated(x, np.maximum(profile.net, 0.0)),
+        "background": background_view(profile, settings),
         "caveats": [],
+    }
+
+
+def background_view(profile, settings: dict) -> dict:
+    """The removed background, decimated like ``profile``: ``two_theta``, ``observed`` (the
+    smoothed pattern it was taken from), ``intensity`` (the curve) and the ``settings`` used."""
+    stride = max(1, len(profile.angles) // 3000)
+    return {
+        "two_theta": [round(float(v), 4) for v in profile.angles[::stride]],
+        "observed": [round(float(v), 2) for v in (profile.net + profile.background)[::stride]],
+        "intensity": [round(float(v), 2) for v in profile.background[::stride]],
+        "settings": settings,
     }
 
 
@@ -812,7 +841,7 @@ def residual_maxima(ctx: _Context, lines=()) -> list[list[float]]:
 
 
 def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu", wmin=None, wmax=None,
-                  excluded_ranges=None, max_rows: int = MAX_ROWS) -> dict:
+                  excluded_ranges=None, max_rows: int = MAX_ROWS, background=None) -> dict:
     """One more step of the greedy combination (:func:`rank`) for any selection.
 
     The models of the ``selected`` sources are subtracted from the net pattern in the given order,
@@ -826,11 +855,12 @@ def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu",
     for source in selected:
         if source not in by_source:
             raise KeyError(source)
+    settings = background_settings(background)
     ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
-                           excluded_ranges=excluded_ranges)
+                           excluded_ranges=excluded_ranges, background=settings)
     if ctx is None:
         return {"explained": None, "steps": [], "profile": None, "unexplained_peaks": [], "next": [],
-                "caveats": [caveat]}
+                "background": {"settings": settings}, "caveats": [caveat]}
     steps, lines = [], []
     for source in selected:
         result = _score(ctx, by_source[source])
@@ -846,6 +876,7 @@ def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu",
         "explained": round(1.0 - float(ctx.residual.sum()) / ctx.total, 4),
         "steps": steps,
         "profile": _decimated(ctx.x, ctx.residual),
+        "background": background_view(ctx.profile, settings),
         "unexplained_peaks": residual_maxima(ctx, np.concatenate(lines) if lines else ()),
         "next": [_row_payload(i + 1, row, ctx.lam1, lo, hi) for i, row in enumerate(rows[:max_rows])],
         "caveats": [],
@@ -885,6 +916,8 @@ def quick_ranking(
     include_theoretical: bool = False,
     progress=None,
     should_stop=None,
+    extra_candidates=(),
+    background=None,
 ) -> dict:
     """Pool (missing CIFs downloaded) + ranking in the response shape of ``/api/quick-ranking``.
 
@@ -902,10 +935,18 @@ def quick_ranking(
     stopped = should_stop or (lambda: False)
     if stopped():
         raise Cancelled()
+    settings = background_settings(background)
+    ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
+                           excluded_ranges=excluded_ranges, background=settings)
+    if ctx is None:  # a too short or flat pattern: nothing is listed, downloaded or simulated
+        return {"status": "done", "pool": Pool().summary(), "ranking": [], "combination": [], "fwhm": None,
+                "profile": None, "background": {"settings": settings},
+                "elapsed_s": round(time.perf_counter() - started, 3), "pool_s": 0.0, "caveats": [caveat],
+                "_candidates": []}
     pool = build_pool(
         elements, precursors, lam1, two_theta_range, e_hull_cutoff=e_hull_cutoff,
         use_cod=use_cod, use_mp=use_mp, mp_limit=mp_limit, include_theoretical=include_theoretical,
-        fetch=True, should_stop=should_stop, progress=progress,
+        fetch=True, should_stop=should_stop, progress=progress, extra=list(extra_candidates),
     )
     if stopped():
         raise Cancelled()
@@ -916,7 +957,7 @@ def quick_ranking(
     for _ in range(4):
         result = rank(
             angles, intensities, candidates, wavelength=wavelength, wmin=wmin, wmax=wmax,
-            excluded_ranges=excluded_ranges,
+            excluded_ranges=excluded_ranges, background=background,
         )
         # a suggested structure with an impossible density makes the refinement of the whole
         # selection fail: drop it and rank again
@@ -937,6 +978,7 @@ def quick_ranking(
         "combination": result["combination"],
         "fwhm": result["fwhm"],
         "profile": result["profile"],
+        "background": result["background"],
         "elapsed_s": round(time.perf_counter() - started, 3),
         "pool_s": round(pool_s, 3),
         "caveats": pool.caveats + result["caveats"],
@@ -948,15 +990,21 @@ def quick_ranking(
 # reference ids -> CIFs ("Refine selected")
 # --------------------------------------------------------------------------- #
 def reference_path(ref: str) -> Path:
-    """Cached CIF of ``cod:<id>`` / ``mp:<material id>``; ``KeyError(ref)`` when malformed or not cached."""
+    """Cached CIF of ``cod:<id>`` / ``mp:<material id>``, or the reference-library CIF of
+    ``lib:<id>``; ``KeyError(ref)`` when malformed or not available."""
     import re
 
     from dara.structure_db import cod_cache_dir, is_valid_cif_file, mp_cache_dir
 
-    match = re.fullmatch(r"(cod):(\d{5,9})|(mp):((?:mp|mvc)-\d+)", ref)
+    match = re.fullmatch(r"(cod):(\d{5,9})|(mp):((?:mp|mvc)-\d+)|lib:([0-9a-f]{32})", ref)
     if not match:
         raise KeyError(ref)
-    path = cod_cache_dir() / f"{match.group(2)}.cif" if match.group(1) else mp_cache_dir() / f"{match.group(4)}.cif"
+    if match.group(5):
+        from dara.server.reference_library_router import library_directory
+
+        path = library_directory() / f"{match.group(5)}.cif"
+    else:
+        path = cod_cache_dir() / f"{match.group(2)}.cif" if match.group(1) else mp_cache_dir() / f"{match.group(4)}.cif"
     if not is_valid_cif_file(path):
         raise KeyError(ref)
     return path

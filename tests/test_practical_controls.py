@@ -204,6 +204,9 @@ def test_calibration_needs_device_file_and_keeps_original(tmp_path, monkeypatch)
         threading.Event().wait(0.05)
     done = asyncio.run(instrument_router.calibration_status(job['id']))
     assert done['status'] == 'done', done
+    listed = asyncio.run(instrument_router.calibration_jobs())  # a reloaded dialog finds the job
+    assert listed['jobs'][0]['id'] == job['id'] and listed['running'] is None
+    assert listed['jobs'][0]['pattern'] == 'si.xy' and listed['jobs'][0]['started_at']
     stored = done['result']
     calibration = stored['calibration']
     assert stored['label'].startswith('Lab D8 · calibrated (LaB6, ') and stored['id'] != built['id']

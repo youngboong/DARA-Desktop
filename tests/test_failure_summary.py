@@ -82,6 +82,27 @@ def test_ray_startup_signatures_still_match():
         assert summarize_failure(_tb(last))["code"] == "ray"
 
 
+def test_ray_start_up_and_memory_failures_are_temporary_and_paths_stay_in_the_traceback():
+    startup = summarize_failure(_tb(
+        "Exception: The current node timed out during startup. This could happen because some of the "
+        "raylet failed to startup or the GCS has become overloaded."))
+    assert startup["code"] == "ray" and startup["temporary"] is True
+    memory = summarize_failure(_tb(
+        "ray.exceptions.OutOfMemoryError: Task was killed due to the node running low on memory."))
+    assert memory["code"] == "ray_memory" and memory["temporary"] is True
+    crashed = summarize_failure(_tb("ray.exceptions.WorkerCrashedError: The worker died unexpectedly while "
+                                    "executing this task."))
+    assert crashed["code"] == "ray_memory"
+    assert summarize_failure(_tb("ValueError: unrelated"))["temporary"] is False
+    timeout = summarize_failure(_tb(
+        "subprocess.TimeoutExpired: Command '['C:/Users/a/dara/bgmn/BGMNwin/eflech', "
+        "'C:/Users/a/AppData/Local/Temp/tmpj1/control.sav']' timed out after 1800 seconds"))
+    assert timeout["detail"] == "subprocess.TimeoutExpired: Command '['eflech', 'control.sav']' timed out after 1800 seconds"
+    denied = summarize_failure(_tb("PermissionError: [Errno 13] Permission denied: 'C:\\Users\\a\\Temp\\tmpzo'"))
+    assert denied["detail"] == "PermissionError: [Errno 13] Permission denied: 'tmpzo'"
+    assert summarize_failure(_tb("RuntimeError: 1106/1185 a/b/c done"))["detail"] == "RuntimeError: 1106/1185 a/b/c done"
+
+
 def test_detail_prefers_exception_line_over_trailing_link():
     text = (
         "Traceback (most recent call last):\n"

@@ -92,13 +92,16 @@ class IdentificationDocument(MSONable):
 
     @cached_property
     def final_result(self) -> IdentificationFit:
-        from dara.search.prefilter import observed_profile
+        from dara.search.prefilter import background_settings, observed_profile
         from dara.search.quick_rank import CONFIG
 
         x, y = _sorted_pattern(self.xrd_data)
         rng = self._range()
+        # the background of the search-match (stored with the task; older tasks: the default)
         profile = observed_profile(x, y, wmin=rng.get("wmin"), wmax=rng.get("wmax"),
-                                   excluded_ranges=rng.get("excluded_ranges"), config=CONFIG)
+                                   excluded_ranges=rng.get("excluded_ranges"), config=CONFIG,
+                                   background=background_settings(
+                                       (self.search_kwargs or {}).get("background") or LEGACY_BACKGROUND))
         keep = (x >= profile.lo) & (x <= profile.hi)
         rows, phases = [], {}
         structures = {cif.filename: cif for cif in self.input_cifs}
@@ -157,8 +160,12 @@ class IdentificationDocument(MSONable):
         return fig
 
 
+# Background of identification tasks stored before the settings were recorded (the default then).
+LEGACY_BACKGROUND = {"method": "rolling_minimum"}
+
+
 def identify(angles, intensities, cifs, sources, *, wavelength="Cu", wmin=None, wmax=None,
-             excluded_ranges=None) -> tuple[list[dict], float]:
+             excluded_ranges=None, background=None) -> tuple[list[dict], float]:
     """``(phases, explained)`` of the accepted reference structures ``cifs`` (``sources``: their
     ``cod:``/``mp:`` ids, cached, in the same order).
 
@@ -171,8 +178,10 @@ def identify(angles, intensities, cifs, sources, *, wavelength="Cu", wmin=None, 
     from dara.search import quick_rank as qr
     from dara.search.prefilter import _merge_reflections
 
+    from dara.search.prefilter import background_settings
+
     ctx, caveat = qr._context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
-                              excluded_ranges=excluded_ranges)
+                              excluded_ranges=excluded_ranges, background=background_settings(background))
     if ctx is None:
         raise ValueError(caveat)
     lam1, lo, hi = ctx.lam1, ctx.profile.lo, ctx.profile.hi

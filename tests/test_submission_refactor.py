@@ -9,6 +9,7 @@ import pytest
 from fastapi import HTTPException
 
 from dara.server import api_router
+from dara.server import confidence
 from dara.server import fit_cautions as fc
 from dara.xrd import load_pattern
 
@@ -165,7 +166,7 @@ def test_summarize_document_matches_result_and_never_touches_store(monkeypatch):
     payload = api_router.summarize_document(job, document, persist_summary=False)
     assert payload["status"] == "COMPLETED"
     assert payload["final_result"]["confidence"]["overall"]["level"] in {"high", "check", "expert"}
-    assert payload["all_results"][0]["confidence"]["schema"] == 1
+    assert payload["all_results"][0]["confidence"]["schema"] == confidence.SCHEMA
 
     worker, results = _Store([job]), _Store([{"uuid": "u-sum", "output": document}])
     worker.update = lambda value: None

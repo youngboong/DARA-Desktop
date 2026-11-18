@@ -191,6 +191,27 @@ def load_library_cifs(ids: list[str]) -> list[Cif]:
     return cifs
 
 
+def library_candidates(ids: list[str]) -> list:
+    """Search-match candidates (``lib:<id>``) of library CIFs, in the order given; ``KeyError(id)``
+    for an unknown id. Formula and space group come from the registry (read when the CIF was added)."""
+    from dara.search.quick_rank import Candidate, _reduced
+
+    with _lock:
+        known = {item.get("id"): item for item in _read_registry()}
+    out = []
+    for item_id in dict.fromkeys(ids):
+        item = known.get(item_id) if isinstance(item_id, str) and _ID_PATTERN.match(item_id) else None
+        path = library_directory() / f"{item_id}.cif"
+        if item is None or not path.is_file():
+            raise KeyError(item_id)
+        number = item.get("spacegroup_number")
+        out.append(Candidate(
+            source=f"lib:{item_id}", formula=_reduced(item.get("formula") or path.stem),
+            spacegroup=int(number) if number is not None else None, path=path,
+        ))
+    return out
+
+
 # --------------------------------------------------------------------------- reference search
 _COD_QUERY = re.compile(r"^\s*(?:cod[\s_:-]*)?(\d{5,9})\s*$", re.IGNORECASE)
 _COD_ROWS_BY_ID: dict | None = None

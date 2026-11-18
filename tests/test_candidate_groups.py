@@ -127,7 +127,7 @@ def test_single_displayed_candidate_has_no_presence_fraction():
     phases = payload["final_result"]["confidence"]["phases"]
     assert all(v["evidence"]["presence_fraction"] is None for v in phases.values())
     # confidence of the merged-away result is judged against the same displayed set
-    assert cf.confidence_for_selection(doc, 1)["schema"] == 1
+    assert cf.confidence_for_selection(doc, 1)["schema"] == cf.SCHEMA
     fc.clear_lattice_flag_cache()
 
 
@@ -170,3 +170,23 @@ def test_table_marks_the_representative_row_for_an_adopted_merged_result(documen
     assert adopted == {"1 · other reference (cod_9012546)"}
     rows = table_export.task_table_rows(4, {"review": {"selection": 1}}, summary)
     assert {row["candidate"] for row in rows if row["adopted"] == "yes"} == {"1"}
+
+
+def test_version_confidence_is_renumbered_against_the_task_candidates(document):
+    # groups: #1 = {1, 0}, #2 = 2 (Rwp 7.00), #3 = 3. A version view prepends the version, so
+    # a stored verdict named source 3 / "Candidate 3" for the 7.00 candidate (source 2).
+    stored = {"confidence": {"phases": {A1: {
+        "reasons": ["Candidate 3 without this phase fits almost as well (Rwp 7.0% vs 6.9%).", "x"],
+        "evidence": {"alternative": {"candidate_number": 3, "source_index": 3, "rwp": 7.0}},
+    }}}}
+    out = versions.renumber_version_confidence(document, stored)
+    phase = out["confidence"]["phases"][A1]
+    assert phase["evidence"]["alternative"] == {"candidate_number": 2, "source_index": 2, "rwp": 7.0}
+    assert phase["reasons"][0].startswith("Candidate 2 without this phase")
+    assert out["confidence"]["numbering"] == "task"
+    assert versions.renumber_version_confidence(document, out) is out  # renumbered once
+    # an Rwp that does not confirm the candidate leaves the record as it is
+    wrong = {"confidence": {"phases": {A1: {"reasons": [], "evidence": {
+        "alternative": {"candidate_number": 3, "source_index": 3, "rwp": 9.9}}}}}}
+    kept = versions.renumber_version_confidence(document, wrong)
+    assert kept["confidence"]["phases"][A1]["evidence"]["alternative"]["source_index"] == 3
