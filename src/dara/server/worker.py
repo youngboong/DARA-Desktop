@@ -211,25 +211,27 @@ def execute_job(uuid):
             ray.shutdown()
 
 
-def add_job_to_queue(job, user):
-    """Add a job to the queue for remote execution."""
+def add_task_record(record: dict) -> int:
+    """Store a new task record under the next task id; returns the id."""
     with get_worker_store() as worker_store:
         newest = next(
             iter(worker_store.query(properties=["index"], sort={"index": -1}, limit=1)),
             None,
         )
         next_index = (newest["index"] if newest else 0) + 1
-        worker_store.update(
-            {
-                "uuid": job.uuid,
-                "job": job.as_dict(),
-                "status": "READY",
-                "submitted_time": datetime.now(tz=timezone.utc),
-                "index": next_index,
-                "user": user,
-            }
-        )
+        worker_store.update({**record, "index": next_index})
     return next_index  # task IDs remain unique even after older tasks are deleted
+
+
+def add_job_to_queue(job, user):
+    """Add a job to the queue for remote execution."""
+    return add_task_record({
+        "uuid": job.uuid,
+        "job": job.as_dict(),
+        "status": "READY",
+        "submitted_time": datetime.now(tz=timezone.utc),
+        "user": user,
+    })
 
 
 def get_all_pending_jobs(sort_by_submitted_time=False):

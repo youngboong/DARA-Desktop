@@ -186,12 +186,16 @@ def _refine_phase(name, reflections, rows, lam, cells, refinement, shift, zero, 
     if cell is None:
         entry["note"] = "No refined cell for this phase"
         return entry
-    try:
-        lattice = _phase_refinement_details(refinement).get(name, {}).get("lattice_parameters") or {}
-    except Exception:  # noqa: BLE001 - the comparison values are an addition
-        lattice = {}
-    entry["rietveld"] = {**{k: {"value": v["value"], "esd": v["esd"]} for k, v in lattice.items()},
-                         "volume": cr.volume(cell)}
+    if getattr(refinement, "identification", False):
+        # no Rietveld fit to compare with; the reflections sit at the search-match's own shift of this phase
+        shift = {**shift, "eps1": 0.0, "eps2": refinement.lst_data.phases_results[name].eps2}
+    else:
+        try:
+            lattice = _phase_refinement_details(refinement).get(name, {}).get("lattice_parameters") or {}
+        except Exception:  # noqa: BLE001 - the comparison values are an addition
+            lattice = {}
+        entry["rietveld"] = {**{k: {"value": v["value"], "esd": v["esd"]} for k, v in lattice.items()},
+                             "volume": cr.volume(cell)}
     system = cr.crystal_system(getattr(refinement.lst_data.phases_results[name], "spacegroup_no", None), cell)
     entry["crystal_system"] = system
     mismatch = _position_mismatch(mine, cell, lam, shift)
@@ -261,7 +265,8 @@ async def _cell_refinement(task_id, sel, phase, zero, displacement, correct_with
     return task, selection, {
         "task_id": task_id, "selection": selection, "wavelength": wavelength, "wavelength_angstrom": lam,
         "refine_zero": zero, "refine_displacement": displacement, "weights": weights, "correction": correction,
-        "rietveld_shift": {k: shift[k] for k in ("zero_deg", "displacement_mm", "radius_mm")},
+        "rietveld_shift": None if getattr(refinement, "identification", False)
+        else {k: shift[k] for k in ("zero_deg", "displacement_mm", "radius_mm")},
         "phases": phases,
     }
 

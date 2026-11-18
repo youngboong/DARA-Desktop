@@ -481,6 +481,36 @@ class _Context:
     fwhm: float
     lam1: float
     lam2: float | None
+    window: int = 1  # samples of the window_max filter
+
+
+def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges) -> tuple[_Context | None, str | None]:
+    """``(context, None)`` of a pattern for scoring, or ``(None, caveat)`` when it cannot be ranked."""
+    lam1, lam2 = wavelength_lines(wavelength)
+    profile = observed_profile(
+        angles, intensities, wmin=wmin, wmax=wmax, excluded_ranges=excluded_ranges, config=CONFIG
+    )
+    if not profile.usable or profile.net is None:
+        return None, "The pattern is too short or too flat to rank candidates."
+    x = profile.angles
+    valid = (x >= profile.lo) & (x <= profile.hi) & ~_in_ranges(x, profile.excluded)
+    residual = np.where(valid, np.maximum(profile.net, 0.0), 0.0)
+    total = float(residual.sum())
+    if total <= 0:
+        return None, "No net intensity above the background."
+    window = max(1, round(2 * CONFIG.window_hw_deg / profile.step)) + 1
+    samples = np.arange(len(x), dtype=float)
+    return _Context(
+        profile=replace(profile, window_max=maximum_filter1d(residual, window, mode="nearest")),
+        x=x, index_of=lambda t: np.interp(t, x, samples), residual=residual, total=total,
+        fwhm=estimate_fwhm(x, residual, profile.step), lam1=lam1, lam2=lam2, window=window,
+    ), None
+
+
+def _subtract(ctx: _Context, model) -> None:
+    """Remove an accepted phase's model from the residual (one step of the greedy combination)."""
+    ctx.residual = np.maximum(ctx.residual - model, 0.0)
+    ctx.profile = replace(ctx.profile, window_max=maximum_filter1d(ctx.residual, ctx.window, mode="nearest"))
 
 
 def _positions(d, scale, shift, lam):
@@ -653,6 +683,22 @@ def _row_payload(rank: int, row: dict, lam1: float, lo: float, hi: float) -> dic
     }
 
 
+def _score_rows(ctx: _Context, candidates, excluded_keys, flags: bool = True) -> list[dict]:
+    """Score every candidate against the current residual, grouped (:func:`group_rows`)."""
+    scored = []
+    for cand in candidates:
+        if (cand.formula, cand.spacegroup) in excluded_keys:
+            continue
+        try:
+            result = _score(ctx, cand)
+        except Exception:  # noqa: BLE001
+            logger.debug("Scoring %s failed", cand.source, exc_info=True)
+            continue
+        if result is not None:
+            scored.append((cand, result))
+    return group_rows(scored, flags)
+
+
 def rank(
     angles,
     intensities,
@@ -669,43 +715,15 @@ def rank(
     Returns ``{ranking, combination, fwhm, profile, caveats}``. ``profile`` is the net
     (background-removed) pattern, decimated, for an overlay of the sticks.
     """
-    lam1, lam2 = wavelength_lines(wavelength)
-    profile = observed_profile(
-        angles, intensities, wmin=wmin, wmax=wmax, excluded_ranges=excluded_ranges, config=CONFIG
-    )
-    if not profile.usable or profile.net is None:
-        return {"ranking": [], "combination": [], "fwhm": None, "profile": None,
-                "caveats": ["The pattern is too short or too flat to rank candidates."]}
-    x = profile.angles
-    valid = (x >= profile.lo) & (x <= profile.hi) & ~_in_ranges(x, profile.excluded)
-    residual = np.where(valid, np.maximum(profile.net, 0.0), 0.0)
-    total = float(residual.sum())
-    if total <= 0:
-        return {"ranking": [], "combination": [], "fwhm": None, "profile": None,
-                "caveats": ["No net intensity above the background."]}
-    fwhm = estimate_fwhm(x, residual, profile.step)
-    window = max(1, round(2 * CONFIG.window_hw_deg / profile.step)) + 1
-    samples = np.arange(len(x), dtype=float)
-    ctx = _Context(
-        profile=replace(profile, window_max=maximum_filter1d(residual, window, mode="nearest")),
-        x=x, index_of=lambda t: np.interp(t, x, samples), residual=residual, total=total,
-        fwhm=fwhm, lam1=lam1, lam2=lam2,
-    )
+    ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
+                           excluded_ranges=excluded_ranges)
+    if ctx is None:
+        return {"ranking": [], "combination": [], "fwhm": None, "profile": None, "caveats": [caveat]}
+    profile, x, lam1, fwhm = ctx.profile, ctx.x, ctx.lam1, ctx.fwhm
     usable = [c for c in candidates if c.sticks is not None]
 
     def score_all(excluded_keys, flags=True):
-        scored = []
-        for cand in usable:
-            if (cand.formula, cand.spacegroup) in excluded_keys:
-                continue
-            try:
-                result = _score(ctx, cand)
-            except Exception:  # noqa: BLE001
-                logger.debug("Scoring %s failed", cand.source, exc_info=True)
-                continue
-            if result is not None:
-                scored.append((cand, result))
-        return group_rows(scored, flags)
+        return _score_rows(ctx, usable, excluded_keys, flags)
 
     rows = score_all(set())
     ranking = [_row_payload(i + 1, row, lam1, profile.lo, profile.hi) for i, row in enumerate(rows[:max_rows])]
@@ -734,8 +752,7 @@ def rank(
             "flags": list(top["flags"]) + (["weak"] if gain < WEAK_GAIN else []),
         })
         picked.add(top["key"])
-        ctx.residual = np.maximum(ctx.residual - top["best"]["model"], 0.0)
-        ctx.profile = replace(ctx.profile, window_max=maximum_filter1d(ctx.residual, window, mode="nearest"))
+        _subtract(ctx, top["best"]["model"])
     picked_sources = {c["source"] for c in combination}
     for row in ranking:
         if row["source"] in picked_sources:
@@ -744,15 +761,88 @@ def rank(
         if weak:
             row["flags"].append("weak")
 
-    stride = max(1, len(x) // 3000)
     return {
         "ranking": ranking,
         "combination": combination,
         "fwhm": round(fwhm, 3),
-        "profile": {
-            "two_theta": [round(float(v), 4) for v in x[::stride]],
-            "net": [round(float(v), 2) for v in np.maximum(profile.net, 0.0)[::stride]],
-        },
+        "profile": _decimated(x, np.maximum(profile.net, 0.0)),
+        "caveats": [],
+    }
+
+
+def _decimated(x, values) -> dict:
+    stride = max(1, len(x) // 3000)
+    return {"two_theta": [round(float(v), 4) for v in x[::stride]],
+            "net": [round(float(v), 2) for v in values[::stride]]}
+
+
+def _line_positions(ctx: _Context, cand: Candidate, result: dict) -> np.ndarray:
+    """K-alpha1 and K-alpha2 positions of a scored candidate's displayed sticks (rel >= 0.01)."""
+    keep = result["rel"] >= 0.01
+    d = cand.sticks[2][keep]
+    return np.concatenate([_positions(d, result["scale"], result["shift"], lam)[0]
+                           for lam in (ctx.lam1, ctx.lam2) if lam])
+
+
+def residual_maxima(ctx: _Context, lines=()) -> list[list[float]]:
+    """``[2theta, height]`` of the residual's local maxima (over the scoring window) that are above
+    the ranking's noise floor (``ObservedProfile.floor``: 6 sigma or 3 % of the strongest net peak)
+    and significant by the unexplained-peak classification (``peak_significance``: 8 sigma and 2 %),
+    except those on one of ``lines`` (the accepted phases' line positions): within max(0.1°, model
+    FWHM), the peak list's assignment rule (``peak_list.observed_peak_rows``). A peak on an
+    accepted line is assigned, whatever its intensity, as a peak list assigns it."""
+    from dara.export.peak_list import ASSIGN_TOLERANCE_DEG
+    from dara.server.peak_significance import SIGNIFICANT_REL, SIGNIFICANT_SNR
+
+    profile = ctx.profile
+    floor = max(profile.floor, SIGNIFICANT_SNR * profile.sigma, SIGNIFICANT_REL * profile.net_max)
+    res, top = ctx.residual, profile.window_max
+    rising = res > np.r_[-np.inf, res[:-1]]  # first sample of a flat top only
+    index = np.flatnonzero((res >= top) & rising & (res > floor))
+    lines = np.asarray(lines, dtype=float)
+    if lines.size:
+        tolerance = max(ASSIGN_TOLERANCE_DEG, ctx.fwhm)
+        index = [i for i in index if np.min(np.abs(lines - ctx.x[i])) > tolerance]
+    return [[round(float(ctx.x[i]), 3), round(float(res[i]), 2)] for i in index]
+
+
+def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu", wmin=None, wmax=None,
+                  excluded_ranges=None, max_rows: int = MAX_ROWS) -> dict:
+    """One more step of the greedy combination (:func:`rank`) for any selection.
+
+    The models of the ``selected`` sources are subtracted from the net pattern in the given order,
+    as the combination subtracts its picks. Returns ``explained`` (share of the net intensity the
+    selection explains together), ``steps`` (``source``, ``gain`` of each), ``profile`` (the
+    residual, decimated like the ranking's), ``unexplained_peaks`` (:func:`residual_maxima`) and
+    ``next``: ranking rows scored against the residual without the selection's (formula, space
+    group) groups. Raises ``KeyError(source)`` for a source that is not a scored candidate.
+    """
+    by_source = {c.source: c for c in candidates if c.sticks is not None}
+    for source in selected:
+        if source not in by_source:
+            raise KeyError(source)
+    ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
+                           excluded_ranges=excluded_ranges)
+    if ctx is None:
+        return {"explained": None, "steps": [], "profile": None, "unexplained_peaks": [], "next": [],
+                "caveats": [caveat]}
+    steps, lines = [], []
+    for source in selected:
+        result = _score(ctx, by_source[source])
+        model = None if result is None else result["model"]
+        steps.append({"source": source, "gain": 0.0 if model is None else round(result["explained"], 4)})
+        if model is not None:
+            lines.append(_line_positions(ctx, by_source[source], result))
+            _subtract(ctx, model)
+    keys = {(by_source[s].formula, by_source[s].spacegroup) for s in selected}
+    rows = _score_rows(ctx, list(by_source.values()), keys)
+    lo, hi = ctx.profile.lo, ctx.profile.hi
+    return {
+        "explained": round(1.0 - float(ctx.residual.sum()) / ctx.total, 4),
+        "steps": steps,
+        "profile": _decimated(ctx.x, ctx.residual),
+        "unexplained_peaks": residual_maxima(ctx, np.concatenate(lines) if lines else ()),
+        "next": [_row_payload(i + 1, row, ctx.lam1, lo, hi) for i, row in enumerate(rows[:max_rows])],
         "caveats": [],
     }
 
@@ -845,38 +935,42 @@ def quick_ranking(
         "elapsed_s": round(time.perf_counter() - started, 3),
         "pool_s": round(pool_s, 3),
         "caveats": pool.caveats + result["caveats"],
+        "_candidates": candidates,  # the ranked pool, kept by the router for residual steps; not JSON
     }
 
 
 # --------------------------------------------------------------------------- #
 # reference ids -> CIFs ("Refine selected")
 # --------------------------------------------------------------------------- #
+def reference_path(ref: str) -> Path:
+    """Cached CIF of ``cod:<id>`` / ``mp:<material id>``; ``KeyError(ref)`` when malformed or not cached."""
+    import re
+
+    from dara.structure_db import cod_cache_dir, is_valid_cif_file, mp_cache_dir
+
+    match = re.fullmatch(r"(cod):(\d{5,9})|(mp):((?:mp|mvc)-\d+)", ref)
+    if not match:
+        raise KeyError(ref)
+    path = cod_cache_dir() / f"{match.group(2)}.cif" if match.group(1) else mp_cache_dir() / f"{match.group(4)}.cif"
+    if not is_valid_cif_file(path):
+        raise KeyError(ref)
+    return path
+
+
 def reference_cifs(ids) -> list:
     """Cached CIFs for ``cod:<id>`` / ``mp:<material id>`` in the order given.
 
     Each CIF is named like a search candidate (``Fe2O3_167_(cod_1234)``) so the result keeps
     its provenance. Raises ``KeyError(id)`` for a malformed id or a structure not cached.
     """
-    import re
-
     from dara.cif import Cif
-    from dara.structure_db import cod_cache_dir, is_valid_cif_file, mp_cache_dir, mp_cache_rows
+    from dara.structure_db import mp_cache_rows
 
     cifs = []
     for ref in dict.fromkeys(str(ref).strip() for ref in ids):
-        match = re.fullmatch(r"(cod):(\d{5,9})|(mp):((?:mp|mvc)-\d+)", ref)
-        if not match:
-            raise KeyError(ref)
-        if match.group(1):
-            code = match.group(2)
-            path = cod_cache_dir() / f"{code}.cif"
-            tag = f"cod_{code}"
-        else:
-            code = match.group(4)
-            path = mp_cache_dir() / f"{code}.cif"
-            tag = f"mp_{code}"
-        if not is_valid_cif_file(path):
-            raise KeyError(ref)
+        path = reference_path(ref)
+        code = path.stem
+        tag = f"{ref.split(':', 1)[0]}_{code}"
         cif = Cif.from_file(path)
         structure = cif.to_structure()
         row = mp_cache_rows().get(code) if tag.startswith("mp_") else None

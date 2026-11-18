@@ -22,6 +22,7 @@ from dara.server.quick_refine import router as quick_refine_router
 from dara.server.versions_router import router as versions_router
 from dara.server.update_router import router as update_router
 from dara.server.annotations_router import router as annotations_router
+from dara.server import identification_router
 from dara.server.setting import get_dara_server_settings
 from dara.server.worker import worker_process
 
@@ -138,6 +139,8 @@ app.include_router(versions_router)
 app.include_router(update_router)
 app.include_router(annotations_router)
 app.include_router(presence.router)
+app.include_router(identification_router.router)
+app.middleware("http")(identification_router.refuse_refinement_tools)  # 409 for refinement-only tools
 
 _OPTIONAL_ROUTERS = (
     "dara.server.export_router",             # W2

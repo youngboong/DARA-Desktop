@@ -8,6 +8,8 @@ shape until the ranking is done. The same inputs reuse a running job, or a finis
 ``REUSE_DONE_S``. The pending view carries ``phase`` ("listing", "downloading", "simulating",
 "ranking"), ``done`` and ``total`` (0 when unknown); ``DELETE /api/quick-ranking/{job_id}``
 stops the job at its next check and forgets it (downloaded files stay).
+``POST /api/quick-ranking/{job_id}/residual`` accepts phases and searches again against what is
+left (``quick_rank.residual_step``) on the finished job's pool.
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from dara.utils import get_logger
 
@@ -40,18 +42,23 @@ _JOBS_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()  # one ranking at a time: stick simulation is CPU and memory heavy
 
 
-def _run(params: dict) -> dict:
-    from dara.search.quick_rank import quick_ranking
+def _add_symbols(rows) -> None:
     from dara.server.api_router import _spacegroup_symbol
 
-    with _RUN_LOCK:
-        result = quick_ranking(**params)
-    for row in result["ranking"] + result["combination"]:
+    for row in rows:
         number = row.get("spacegroup")
         try:
             row["spacegroup_symbol"] = _spacegroup_symbol(number) if number else None
         except Exception:  # noqa: BLE001
             row["spacegroup_symbol"] = None
+
+
+def _run(params: dict) -> dict:
+    from dara.search.quick_rank import quick_ranking
+
+    with _RUN_LOCK:
+        result = quick_ranking(**params)
+    _add_symbols(result["ranking"] + result["combination"])
     return result
 
 
@@ -77,7 +84,7 @@ async def _start_and_wait(params: dict, key_parts) -> dict:
             job = None  # the library or the MP key may have changed since
         if job is None:
             job = {"status": "pending", "started": time.monotonic(), "result": None, "error": None, "task": None,
-                   "progress": ("listing", 0, 0), "cancel": threading.Event()}
+                   "progress": ("listing", 0, 0), "cancel": threading.Event(), "params": params}
             _JOBS[job_id] = job
             while len(_JOBS) > _JOBS_MAX:
                 _JOBS.popitem(last=False)
@@ -93,9 +100,11 @@ async def _start_and_wait(params: dict, key_parts) -> dict:
 
         async def runner():
             try:
-                job["result"] = await asyncio.to_thread(
+                result = await asyncio.to_thread(
                     _run, {**params, "progress": progress, "should_stop": job["cancel"].is_set}
                 )
+                job["candidates"] = result.pop("_candidates", None)  # pool of the residual steps
+                job["result"] = result
                 job["finished"] = time.monotonic()
                 job["status"] = "done"
             except Cancelled:
@@ -155,6 +164,35 @@ def _elements_and_precursors(elements_raw, precursors_raw) -> tuple[list[str], l
     return elements, precursors
 
 
+async def read_upload(pattern_file, two_theta_min, two_theta_max, excluded_ranges, wavelength=None):
+    """``(file name, bytes, pattern, range params)`` of an uploaded pattern (400 when unreadable or
+    the range is invalid); with ``wavelength`` also 400 when the file names another anode
+    (``/api/submit``'s check)."""
+    from dara.analysis_range import validate_analysis_range
+    from dara.xrd import load_pattern
+
+    name = Path(pattern_file.filename or "pattern.xy").name
+    content = await pattern_file.read()
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / name
+        path.write_bytes(content)
+        try:
+            pattern = load_pattern(path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Could not read pattern: {exc}")
+        if wavelength is not None:
+            from dara.server.api_router import _wavelength_mismatch
+
+            mismatch = _wavelength_mismatch(pattern, path, wavelength)
+            if mismatch:
+                raise HTTPException(status_code=400, detail=mismatch)
+    try:
+        range_params = validate_analysis_range(pattern.angles, two_theta_min, two_theta_max, excluded_ranges)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return name, content, pattern, range_params
+
+
 @router.post("/quick-ranking")
 async def quick_ranking_upload(
     pattern_file: Annotated[UploadFile, File()],
@@ -170,25 +208,10 @@ async def quick_ranking_upload(
     mp_e_hull_cutoff: Annotated[float, Form()] = 0.05,
     max_mp_structures: Annotated[int, Form()] = 100,
 ):
-    from dara.analysis_range import validate_analysis_range
-    from dara.xrd import load_pattern
-
     element_list, precursors = _elements_and_precursors(elements, precursor_formulas)
     if not 0 <= mp_e_hull_cutoff <= 1 or not 1 <= max_mp_structures <= 1000:
         raise HTTPException(status_code=400, detail="Invalid Materials Project limits")
-    name = Path(pattern_file.filename or "pattern.xy").name
-    content = await pattern_file.read()
-    with tempfile.TemporaryDirectory() as folder:
-        path = Path(folder) / name
-        path.write_bytes(content)
-        try:
-            pattern = load_pattern(path)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Could not read pattern: {exc}")
-    try:
-        range_params = validate_analysis_range(pattern.angles, two_theta_min, two_theta_max, excluded_ranges)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    name, content, pattern, range_params = await read_upload(pattern_file, two_theta_min, two_theta_max, excluded_ranges)
     params = _common_params(
         pattern, elements=element_list, precursors=precursors, wavelength=wavelength,
         range_params=range_params, e_hull=mp_e_hull_cutoff, use_cod=use_cod, use_mp=use_mp,
@@ -238,6 +261,39 @@ async def quick_ranking_status(job_id: str):
     if task is not None and not task.done():
         await asyncio.wait({task}, timeout=2.0)
     return _job_view(job_id, job)
+
+
+class ResidualRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    selected: list[str] = Field(default_factory=list, max_length=12)
+
+
+@router.post("/quick-ranking/{job_id}/residual")
+async def quick_ranking_residual(job_id: str, request: ResidualRequest):
+    """Accept ``selected`` (source ids, in order) and look at what is left: the share of the net
+    intensity they explain together, the residual net pattern, its unexplained peaks and the
+    ranking against the residual (``next``), as one more step of the greedy combination. Reuses
+    the finished job's pool; nothing is downloaded or simulated."""
+    from dara.search.quick_rank import residual_step
+
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+    if job is None or job["cancel"].is_set():
+        raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
+    if job["status"] != "done" or not job.get("candidates"):
+        raise HTTPException(status_code=409, detail="The search-match has not finished.")
+    params = job["params"]
+    selected = list(dict.fromkeys(source.strip() for source in request.selected))
+    try:
+        result = await asyncio.to_thread(
+            residual_step, params["angles"], params["intensities"], job["candidates"], selected,
+            wavelength=params["wavelength"], wmin=params["wmin"], wmax=params["wmax"],
+            excluded_ranges=params["excluded_ranges"],
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"{exc.args[0]} is not a ranked structure of this search-match.")
+    _add_symbols(result["next"])
+    return {"job_id": job_id, "selected": selected, **result}
 
 
 @router.delete("/quick-ranking/{job_id}")

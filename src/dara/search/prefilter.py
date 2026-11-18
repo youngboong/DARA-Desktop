@@ -85,6 +85,7 @@ class ObservedProfile:
     n_points: int
     config: PrefilterConfig = field(default_factory=PrefilterConfig)
     net: np.ndarray | None = None  # background-subtracted (smoothed) pattern, not clipped
+    background: np.ndarray | None = None  # the background subtracted from the smoothed pattern
 
     @property
     def usable(self) -> bool:
@@ -208,6 +209,7 @@ def observed_profile(
     return ObservedProfile(
         angles=x, window_max=window_max, lo=lo, hi=hi, step=step, sigma=float(sigma),
         net_max=net_max, excluded=excluded, n_points=int(in_range.sum()), config=config, net=net,
+        background=background,
     )
 
 

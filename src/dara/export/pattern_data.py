@@ -28,16 +28,21 @@ def xy_bytes(angles, intensities, header: str) -> bytes:
 def fit_csv_bytes(plot_data, wavelength) -> bytes:
     """CSV of the fit curves (``FIT_COLUMNS`` plus one column per phase contribution, without
     background; the header names a phase by its formula, or by its full name when two phases
-    share a formula). UTF-8 with BOM like the other CSV downloads."""
+    share a formula). UTF-8 with BOM like the other CSV downloads. Without a calculated curve
+    (an identification result) the calculated and difference columns are left out."""
     x = np.asarray(plot_data.x, dtype=float)
     observed = np.asarray(plot_data.y_obs, dtype=float)
-    calculated = np.asarray(plot_data.y_calc, dtype=float)
     lam = wavelength_angstrom(wavelength)
     d = lam / (2 * np.sin(np.radians(x / 2))) if lam else np.full(x.shape, np.nan)
-    columns = [x, d, observed, calculated, np.asarray(plot_data.y_bkg, dtype=float), observed - calculated]
+    background = np.asarray(plot_data.y_bkg, dtype=float)
+    if plot_data.y_calc is None:
+        names, columns = ["two_theta_deg", "d_angstrom", "observed", "background"], [x, d, observed, background]
+    else:
+        calculated = np.asarray(plot_data.y_calc, dtype=float)
+        names, columns = list(FIT_COLUMNS), [x, d, observed, calculated, background, observed - calculated]
     structs = plot_data.structs or {}
     labels = [_label(name) for name in structs]
-    header = list(FIT_COLUMNS) + [
+    header = names + [
         label if labels.count(label) == 1 else name for name, label in zip(structs, labels)
     ]
     columns += [np.asarray(curve, dtype=float) for curve in structs.values()]

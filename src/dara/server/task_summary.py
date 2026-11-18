@@ -106,6 +106,8 @@ def compact_summary(document, runtime_s: float | None, task: dict | None = None)
     from dara.plot import display_formulas_scope
     from dara.server.display_formula import task_display_formulas
 
+    if getattr(document, "analysis_mode", None) == "identification":
+        return identification_summary(document, runtime_s)
     view, adopted = _adopted_view(document, task)
     uuid = (task or {}).get("uuid")
     try:
@@ -116,6 +118,28 @@ def compact_summary(document, runtime_s: float | None, task: dict | None = None)
         summary = _compact_summary(view, document, runtime_s)
     summary["adopted"] = adopted
     return summary
+
+
+def identification_summary(document, runtime_s: float | None) -> dict:
+    """The results-list digest of an identification result: the keys of a refinement's digest with
+    no Rwp, GOF or weight fractions, and ``analysis_mode``."""
+    names = [phase["name"] for phase in document.phases]
+    return {
+        "schema": SUMMARY_SCHEMA,
+        "analysis_mode": "identification",
+        "best_rwp": None, "final_rwp": None, "gof": None,
+        "final_phases": names,
+        "final_phase_labels": [_label(name) for name in names],
+        "n_candidates": 0,
+        "runtime_s": _finite(runtime_s),
+        "phases": [{
+            "name": phase["name"], "label": _label(phase["name"]), "weight_percent": None,
+            "weight_esd_percent": None, "spacegroup_number": phase.get("spacegroup"), "lattice": {},
+            "provenance": _provenance_digest(phase["name"]),
+        } for phase in document.phases],
+        "confidence_overall": None,
+        "adopted": None,
+    }
 
 
 def _compact_summary(document, original, runtime_s: float | None) -> dict:

@@ -2067,7 +2067,9 @@ async def result(task_id: int):
     if isinstance(payload, dict):
         with get_worker_store() as worker_store:
             job = worker_store.query_one({"index": task_id}) or {}
-        payload["sample"] = (((job.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}).get("sample")
+        settings = ((job.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
+        payload["sample"] = settings.get("sample")
+        payload["identified_from"] = settings.get("identified_from")  # refinement of an identification task
     return payload
 
 
@@ -2128,6 +2130,10 @@ async def _result(task_id: int):
     if d is None:
         raise HTTPException(status_code=404, detail="Task result not found")
     d = MontyDecoder().process_decoded(d["output"])
+    if getattr(d, "analysis_mode", None) == "identification":  # search-match result, no refinement
+        from dara.server.identification_router import identification_payload
+
+        return await identification_payload(job, d)
     payload = summarize_document(job, d)
     # Reference name -> conventional formula from its CIF (display only, e.g. NH4H2PO4 for
     # PH6NO4_...), incl. references added by versions. Here, not in summarize_document:
@@ -3629,7 +3635,11 @@ def _plot_json(uuid: str, idx: int | None) -> str:
     if stored is None:
         raise HTTPException(status_code=404, detail="Task not found")
     document = MontyDecoder().process_decoded(stored["output"])
-    if idx is None:
+    if getattr(document, "analysis_mode", None) == "identification":
+        if idx is not None:
+            raise HTTPException(status_code=404, detail="Index out of range")
+        figure = document.figure()  # observed, background, reference sticks
+    elif idx is None:
         if document.final_result is None:
             raise HTTPException(status_code=404, detail="Final result not found")
         figure = document.final_result.visualize()

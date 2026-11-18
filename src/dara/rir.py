@@ -79,7 +79,9 @@ def reflection_lines(structure, wavelength_a: float, *, anomalous=None, two_thet
     ``|F|²·m·(1 + cos²2θ)/(sin²θ·cosθ)`` (Hubbard & Snyder 1988 eq. 2 without the constant factors);
     every reciprocal-lattice point is summed, so the multiplicity is implicit. ``f = f0 + f' + i·f''``
     with ``f0`` from pymatgen's parameters (as its XRDCalculator) and ``anomalous`` = ``{element: f'+if''}``.
-    Reflections closer than ``merge_deg`` are summed as one line.
+    Reflections closer than ``merge_deg`` are summed as one line. ``multiplicity`` counts the
+    reciprocal-lattice points of the strongest reflection of a line: its symmetry-equivalent set
+    when the intensities obey Friedel's law (no ``anomalous``).
     """
     from pymatgen.analysis.diffraction.xrd import ATOMIC_SCATTERING_PARAMS
 
@@ -115,21 +117,24 @@ def reflection_lines(structure, wavelength_a: float, *, anomalous=None, two_thet
     keep = intensity > 1e-9 * intensity.max() if len(intensity) else intensity > 0  # drop extinct reflections
     two_theta, intensity, g, hkl = two_theta[keep], intensity[keep], g[keep], hkl[keep]
     if not len(two_theta):
-        return {"two_theta": two_theta, "intensity": intensity, "d": g, "hkl": []}
+        return {"two_theta": two_theta, "intensity": intensity, "d": g, "hkl": [], "multiplicity": []}
     group = np.cumsum(np.r_[True, np.diff(two_theta) > merge_deg]) - 1
     total = np.bincount(group, intensity)
-    names, d_values = [], []
+    names, d_values, multiplicity = [], [], []
     for number in range(len(total)):
         members = np.flatnonzero(group == number)
         top = members[intensity[members] >= 0.999 * intensity[members].max()]
-        index = max(top, key=lambda i: tuple(hkl[i]))  # (1 1 1) rather than (-1 -1 1) among equivalents
+        # (1 1 1) rather than (-1 -1 1), hexagonal (1 1 0) rather than (2 -1 0), among equivalents
+        index = max(top, key=lambda i: (-int(np.sum(hkl[i] < 0)), tuple(hkl[i])))
         names.append(tuple(int(v) for v in hkl[index]))
         d_values.append(1 / g[index])
+        multiplicity.append(len(top))
     return {
         "two_theta": np.bincount(group, intensity * two_theta) / total,
         "intensity": total,
         "d": np.array(d_values),
         "hkl": names,
+        "multiplicity": multiplicity,
     }
 
 
