@@ -48,7 +48,7 @@ assert.equal(rows[1].spacegroupText, 62, 'no symbol: the number');
 assert.equal(rows[0].scoreText, '34 %');
 assert.deepEqual(rankingRows(null), []);
 
-assert.equal(combinationText(response.combination), 'Y2O3 35 % + YFeO3 5 % (weak)');
+assert.equal(combinationText(response.combination), 'Y2O3 + YFeO3 (weak)', 'phase names only: a gain is no amount');
 assert.equal(poolText(response), 'Ranked 54 candidates (COD 50, MP 4) in 1.2 s · 2 simulated now · 3 not downloaded');
 
 // selection: weak picks are not ticked by default; refine keeps ranking order
@@ -164,4 +164,52 @@ test('intensity range of a zoom window', async () => {
   const profile = { two_theta: [10, 11, 12, 13], net: [5, 50, 20, 900] };
   assert.deepEqual(windowRange(profile, [10.5, 12.5]), [0, 55.00000000000001]);
   assert.equal(windowRange(profile, [20, 30]), null);
+});
+
+test('suggestion: names only, weak picks offered, routine theoretical note in the pool line', async () => {
+  const { suggestedKeys, weakNotSelected, rankingNotes } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  assert.deepEqual(suggestedKeys(response), ['cod:1513300', 'mp:mp-1']);
+  assert.deepEqual(weakNotSelected(response, ['cod:1513300']), [{ key: 'mp:mp-1', formula: 'YFeO3' }]);
+  assert.deepEqual(weakNotSelected(response, ['cod:1513300', 'mp:mp-1']), []);
+  const withNote = { ...response, caveats: ['21 computed-only (theoretical) Materials Project structures are hidden; tick it.', 'COD unreachable'] };
+  assert.deepEqual(rankingNotes(withNote), ['COD unreachable']);
+  assert.match(poolText(withNote), / · 21 theoretical hidden$/);
+});
+
+test('wavelength mismatch of a ranking: anode names from either shape', async () => {
+  const { mismatchView } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  assert.deepEqual(mismatchView({ recorded: 'Cu', chosen: 'Co' }), { recorded: 'Cu', chosen: 'Co' });
+  assert.deepEqual(mismatchView({ code: 'wavelength_mismatch', recorded_angstrom: 1.5406, selected_angstrom: 1.78901 }), { recorded: 'Cu', chosen: 'Co' });
+  assert.deepEqual(mismatchView({ recorded_angstrom: 1.5406, selected_angstrom: 0.72932 }), { recorded: 'Cu', chosen: '0.7293 Å' });
+  assert.equal(mismatchView(null), null);
+  assert.equal(mismatchView({ recorded_angstrom: null }), null);
+});
+
+test('background view: measured and background only when the response carries the curve; settings clamped', async () => {
+  const { backgroundTraces, backgroundSettings } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  assert.equal(backgroundTraces(undefined), null, 'older servers: no toggle');
+  assert.equal(backgroundTraces({ settings: { method: 'rolling_minimum' } }), null, 'an unrankable pattern: settings only');
+  const traces = backgroundTraces({ two_theta: [10, 20], observed: [11, 12], intensity: [10, 10] });
+  assert.deepEqual(traces.map(trace => trace.name), ['Measured', 'Background']);
+  assert.deepEqual(traces[1].y, [10, 10]);
+  assert.equal(backgroundTraces({ two_theta: [10, 20], observed: [1], intensity: [1, 2] }), null);
+  assert.deepEqual(backgroundSettings(null), { method: 'auto', granularity: 20, bending_factor: 1 });
+  assert.deepEqual(backgroundSettings({ method: 'sonneveld_visser', granularity: 400, bending_factor: -1 }),
+    { method: 'sonneveld_visser', granularity: 200, bending_factor: 0 });
+  assert.equal(backgroundSettings({ method: 'rolling_minimum' }).method, 'auto', 'the server default is "auto"');
+});
+
+test('stored-pattern ranking: the setup options as typed JSON', async () => {
+  const { taskRankingBody } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  assert.deepEqual(taskRankingBody([
+    ['source_task_id', '121'], ['elements', '["Co","O"]'], ['precursor_formulas', '[]'], ['wavelength', 'Cu'],
+    ['two_theta_min', '15'], ['excluded_ranges', '[[20,21]]'], ['use_cod', 'true'], ['use_mp', 'false'],
+    ['mp_e_hull_cutoff', '0.05'], ['max_mp_structures', '100'], ['library_cif_ids', '[]'], ['include_theoretical', 'false'],
+    ['background', '{"method":"sonneveld_visser","granularity":30}'],
+  ]), {
+    include_theoretical: false, library_cif_ids: [], elements: ['Co', 'O'], precursor_formulas: [], wavelength: 'Cu',
+    two_theta_min: 15, excluded_ranges: [[20, 21]], use_cod: true, use_mp: false, mp_e_hull_cutoff: 0.05,
+    max_mp_structures: 100, background: { method: 'sonneveld_visser', granularity: 30 },
+  });
+  assert.deepEqual(taskRankingBody([['include_theoretical', 'true']]), { include_theoretical: true, library_cif_ids: [], elements: [], precursor_formulas: [] });
 });

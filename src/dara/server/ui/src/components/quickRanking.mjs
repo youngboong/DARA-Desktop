@@ -2,7 +2,7 @@
 import { TRAY_LINES } from './composition.mjs';
 
 export const MAX_REFINE = 12; // Known-phase refinement takes at most 12 phases
-const PREVIEW_COLOR = '#1c1f1d';
+const PREVIEW_COLOR = '#c99a2e'; // --dara-shell-mark: apart from the grey measured line and the TRAY_LINES of selected phases
 
 const FLAG_COLORS = { picked: 'green', weak: 'orange', polymorph: 'purple', theoretical: 'gold' };
 
@@ -53,10 +53,13 @@ export function rankingRows(response) {
   }));
 }
 
-/** One line summary of the greedy combination ("Fe2O3 34 % + ZnO 12 % (weak)"). */
+/**
+ * One line summary of the greedy combination ("Fe2O3 + ZnO (weak)"). Phase names only: a step's
+ * gain is a share of the intensity explained, not an amount, and read as wt% beside a formula.
+ */
 export function combinationText(combination) {
   return (combination || [])
-    .map(step => `${step.formula} ${percent(step.gain)}${step.weak ? ' (weak)' : ''}`)
+    .map(step => `${step.formula}${step.weak ? ' (weak)' : ''}`)
     .join(' + ');
 }
 
@@ -110,7 +113,7 @@ export function overlayTraces(response, selectedKeys, colors = assignColors({}, 
       connectgaps: false, hoverinfo: 'name',
       line: selected
         ? { color: colors[key] || TRAY_LINES[0], width: key === focusedKey ? 3 : 2 }
-        : { color: PREVIEW_COLOR, width: 1.5, dash: 'dot' },
+        : { color: PREVIEW_COLOR, width: 2, dash: 'dot' },
     });
   });
   return traces;
@@ -123,11 +126,30 @@ export function refineSelection(response, selectedKeys) {
   return { referenceIds: rows.map(row => row.source), formulas: rows.map(row => row.formula) };
 }
 
-/** Rows ticked by default: the greedy combination's non-weak picks. */
-export function defaultSelection(response) {
-  const picked = new Set((response?.combination || []).filter(step => !step.weak).map(step => step.source));
+const comboKeys = (response, steps) => {
+  const picked = new Set(steps.map(step => step.source));
   return (response?.ranking || []).filter(row => picked.has(row.source)).map(rowKey).slice(0, MAX_REFINE);
+};
+
+/** Rows ticked by default: the greedy combination's non-weak picks. */
+export const defaultSelection = response => comboKeys(response, (response?.combination || []).filter(step => !step.weak));
+
+/** Every suggested row, weak picks included ("Use suggestion"). */
+export const suggestedKeys = response => comboKeys(response, response?.combination || []);
+
+/** Weak suggested phases that are not selected: `[{key, formula}]` for the "not selected" notice. */
+export function weakNotSelected(response, selectedKeys) {
+  const chosen = new Set(selectedKeys || []);
+  const known = new Set((response?.ranking || []).map(rowKey));
+  return (response?.combination || [])
+    .filter(step => step.weak && known.has(step.source) && !chosen.has(step.source))
+    .map(step => ({ key: step.source, formula: step.formula }));
 }
+
+const HIDDEN_THEORETICAL = /^(\d+) computed-only \(theoretical\) .* hidden/;
+
+/** The caveats of a ranking without the routine "N theoretical structures hidden" note (it goes into the pool line). */
+export const rankingNotes = response => (response?.caveats || []).filter(text => !HIDDEN_THEORETICAL.test(text));
 
 /** Pool line: "Ranked 54 candidates (COD 50, MP 4) in 1.2 s · 12 downloaded now · 3 unavailable". */
 export function poolText(response) {
@@ -140,6 +162,8 @@ export function poolText(response) {
   if (pool.simulated) parts.push(`${pool.simulated} simulated now`);
   if (pool.unavailable > 0) parts.push(`${pool.unavailable} unavailable`);
   if (pool.missing_cif) parts.push(`${pool.missing_cif} not downloaded`);
+  const hidden = (response.caveats || []).map(text => HIDDEN_THEORETICAL.exec(text)).find(Boolean);
+  if (hidden) parts.push(`${hidden[1]} theoretical hidden`);
   return parts.join(' · ');
 }
 
@@ -235,4 +259,75 @@ export function windowRange(profile, range) {
     if (x >= range[0] && x <= range[1] && Number.isFinite(y)) top = Math.max(top, y);
   });
   return top > 0 ? [0, top * 1.1] : null;
+}
+
+// Kα1 of the lab anodes (Å), as the setup lists them.
+const ANODES = { Cu: 1.540598, Co: 1.78901, Cr: 2.28976, Fe: 1.936042, Mo: 0.7093 };
+const anodeOf = angstrom => (Number.isFinite(angstrom)
+  ? Object.keys(ANODES).find(name => Math.abs(ANODES[name] - angstrom) < 0.002) || `${angstrom.toFixed(4)} Å` : null);
+
+/**
+ * `{recorded, chosen}` of a ranking's `wavelength_mismatch` (anode names where they match one, else
+ * "0.7293 Å"), from `{recorded, chosen}` or `{recorded_angstrom, selected_angstrom}`; null without one.
+ */
+export function mismatchView(mismatch) {
+  if (!mismatch || typeof mismatch !== 'object') return null;
+  const recorded = mismatch.recorded ?? anodeOf(mismatch.recorded_angstrom);
+  const chosen = mismatch.chosen ?? anodeOf(mismatch.selected_angstrom);
+  return recorded && chosen ? { recorded: String(recorded), chosen: String(chosen) } : null;
+}
+
+/**
+ * Traces of the "Background" view (HighScore's measured pattern with its background): the measured
+ * (smoothed) pattern and the curve the ranking removed, from the response's `background`
+ * (`{two_theta, observed, intensity}`); null when the server sends no curve.
+ */
+export function backgroundTraces(view) {
+  const x = view?.two_theta;
+  if (!x?.length || view.observed?.length !== x.length || view.intensity?.length !== x.length) return null;
+  return [
+    { type: 'scatter', mode: 'lines', name: 'Measured', x, y: view.observed, line: { color: '#4a504c', width: 1 }, hoverinfo: 'x+y' },
+    { type: 'scatter', mode: 'lines', name: 'Background', x, y: view.intensity, line: { color: PREVIEW_COLOR, width: 2 }, hoverinfo: 'x+y' },
+  ];
+}
+
+/**
+ * Background settings of the search-match with the server's defaults and limits: `method` "auto"
+ * (the default method) or "sonneveld_visser" (HighScore's: granularity 2..200, bending factor 0..50).
+ */
+export function backgroundSettings(settings) {
+  const granularity = Number(settings?.granularity);
+  const bending = Number(settings?.bending_factor);
+  return {
+    method: settings?.method === 'sonneveld_visser' ? 'sonneveld_visser' : 'auto',
+    granularity: Number.isFinite(granularity) ? Math.min(200, Math.max(2, Math.round(granularity))) : 20,
+    bending_factor: Number.isFinite(bending) ? Math.min(50, Math.max(0, bending)) : 1,
+  };
+}
+
+const json = (value, fallback) => { try { return JSON.parse(value); } catch (_) { return fallback; } };
+const number = value => (value === null || value === undefined || value === '' ? undefined : Number(value));
+
+/**
+ * JSON body of `POST /task/{id}/quick-ranking` (a stored pattern) from the multipart ranking request
+ * the setup builds (`entries` of its FormData): the same options, typed.
+ */
+export function taskRankingBody(entries) {
+  const form = Object.fromEntries(entries || []);
+  const body = {
+    include_theoretical: form.include_theoretical === 'true',
+    library_cif_ids: json(form.library_cif_ids, []),
+    elements: json(form.elements, []),
+    precursor_formulas: json(form.precursor_formulas, []),
+    wavelength: form.wavelength === undefined ? undefined : String(form.wavelength),
+    two_theta_min: number(form.two_theta_min),
+    two_theta_max: number(form.two_theta_max),
+    excluded_ranges: json(form.excluded_ranges, undefined),
+    use_cod: form.use_cod === undefined ? undefined : form.use_cod === 'true',
+    use_mp: form.use_mp === undefined ? undefined : form.use_mp === 'true',
+    mp_e_hull_cutoff: number(form.mp_e_hull_cutoff),
+    max_mp_structures: number(form.max_mp_structures),
+    background: form.background ? json(form.background, undefined) : undefined,
+  };
+  return Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined));
 }

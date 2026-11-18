@@ -457,3 +457,39 @@ code {
 .dara-ident-summary .dara-ident-open {
   color: var(--dara-review);
 }
+
+/* What a confirmation will run (Submit's long-run and series dialog): label / value rows. */
+.dara-confirm-summary {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--dara-space-1) var(--dara-space-4);
+  margin: var(--dara-space-2) 0 0;
+}
+
+.dara-confirm-summary dt {
+  color: var(--dara-text-secondary);
+}
+
+.dara-confirm-summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Search-match "Determine background" popover (rendered outside the workspace). */
+.dara-qr-bg-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dara-space-1);
+  width: 280px;
+}
+
+.dara-qr-bg-form > label {
+  display: flex;
+  justify-content: space-between;
+  margin-top: var(--dara-space-2);
+}
+
+.dara-qr-bg-form > .ant-btn {
+  align-self: flex-start;
+  margin-top: var(--dara-space-2);
+}

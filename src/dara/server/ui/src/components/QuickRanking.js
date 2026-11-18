@@ -1,14 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Loadable from 'react-loadable';
 import styled from 'styled-components';
-import { Button, Progress, Spin, Switch, Table, Tag, Tooltip } from 'antd';
+import { Alert, Button, Popover, Progress, Radio, Slider, Spin, Switch, Table, Tag, Tooltip } from 'antd';
 import { ArrowLeftOutlined, CloseOutlined, PlusOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import ChemicalFormula from './ChemicalFormula';
 import { progressPercent } from './structureLibrary.mjs';
 import {
-  MAX_REFINE, SORTERS, assignColors, defaultSelection, nextMatches, overlayTraces, percent, pollDelay, poolText, progressText,
-  rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, toggleKey, unexplainedMarkers, unexplainedStatus,
-  windowRange, withResidualProfile, zoomWindow,
+  MAX_REFINE, SORTERS, assignColors, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
+  progressText, rankingNotes, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, suggestedKeys, toggleKey,
+  mismatchView, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withResidualProfile, zoomWindow,
 } from './quickRanking.mjs';
 
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <div className="dara-qr-plot-area" /> });
@@ -20,7 +20,9 @@ const cancelJob = id => { if (id) fetch(`${URL}/quick-ranking/${id}`, { method: 
 /**
  * State of the quick ranking (search-match) of the submission page; it lives with the page, so the
  * last ranking survives "Back to setup". `buildRequest()` returns the multipart body (pattern file,
- * elements, formulas, wavelength, range) or throws an Error with a user message.
+ * elements, formulas, wavelength, range) or throws an Error with a user message; a body with
+ * `source_task_id` and no file ranks the stored pattern of that task (a rerun).
+ * Opening the workspace pushes a history entry, so the browser's Back returns to the setup.
  */
 export function useQuickRanking(buildRequest) {
   const [shown, setShown] = useState(false);
@@ -35,6 +37,10 @@ export function useQuickRanking(buildRequest) {
   const run = useRef(0);
   const job = useRef(null);
   const scroll = useRef(0);
+  const status = useRef(state.status);
+  status.current = state.status;
+  const ownBack = useRef(false); // a history.back() of close(): its popstate is not the user's Back
+  const background = useRef(null); // accepted "Background…" settings, sent with every ranking request
 
   const setSelected = keys => {
     setSelectedKeys(keys);
@@ -43,6 +49,7 @@ export function useQuickRanking(buildRequest) {
   const request = includeTheoretical => {
     const body = buildRequest();
     body.set('include_theoretical', String(includeTheoretical));
+    if (background.current) body.set('background', JSON.stringify(background.current));
     return body;
   };
   let currentKey = null;
@@ -63,8 +70,11 @@ export function useQuickRanking(buildRequest) {
     }
     const key = requestKey(body.entries());
     setState({ status: 'pending', key, progress: {} });
+    const storedTask = body.get('source_task_id');
     try {
-      let response = await fetch(`${URL}/quick-ranking`, { method: 'POST', body });
+      let response = await fetch(storedTask ? `${URL}/task/${storedTask}/quick-ranking` : `${URL}/quick-ranking`, storedTask
+        ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(taskRankingBody(body.entries())) }
+        : { method: 'POST', body });
       let data = await response.json();
       for (let attempt = 0; response.ok && data.status === 'pending'; attempt += 1) {
         if (sequence !== run.current) { cancelJob(data.job_id); return; }
@@ -93,6 +103,22 @@ export function useQuickRanking(buildRequest) {
   };
 
   useEffect(() => () => { run.current += 1; cancelJob(job.current); }, []);
+
+  const closeView = restoreScroll => {
+    if (status.current === 'pending') cancel();
+    setShown(false);
+    if (restoreScroll) requestAnimationFrame(() => window.scrollTo(0, scroll.current));
+  };
+  // Browser Back from the workspace: back to the setup, as "Back to setup".
+  useEffect(() => {
+    const onPop = event => {
+      if (ownBack.current) { ownBack.current = false; return; }
+      if (!event.state?.daraQuick) closeView(true);
+    };
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // What is left after the selected phases: unexplained peaks and the best matches for them.
   // Debounced; answered in well under a second from the finished job's pool.
@@ -131,18 +157,23 @@ export function useQuickRanking(buildRequest) {
     open() {
       scroll.current = window.scrollY;
       setShown(true);
+      if (!window.history.state?.daraQuick) window.history.pushState({ ...(window.history.state || {}), daraQuick: true }, '');
       window.scrollTo(0, 0);
       if (!ranked && state.status !== 'pending') start(theoretical);
     },
     /** Back to the setup; a pending ranking is cancelled. */
     close(restoreScroll = true) {
-      if (state.status === 'pending') cancel();
-      setShown(false);
-      if (restoreScroll) requestAnimationFrame(() => window.scrollTo(0, scroll.current));
+      closeView(restoreScroll);
+      if (window.history.state?.daraQuick) { ownBack.current = true; window.history.back(); }
     },
     toggleTheoretical(checked) {
       setTheoretical(checked);
       start(checked);
+    },
+    /** Ranks again with HighScore-style background settings ({method, granularity, bending_factor, anchors}). */
+    rankWithBackground(settings) {
+      background.current = settings;
+      start(theoretical);
     },
     /** `onRefine({referenceIds, formulas})` resolves to whether a refinement was submitted. */
     async refine(onRefine) {
@@ -153,7 +184,7 @@ export function useQuickRanking(buildRequest) {
       } finally {
         setRefining(false);
       }
-      if (submitted) setShown(false);
+      return submitted; // on success the page opens the new task
     },
     /** `onIdentify({referenceIds})` (selection order) saves the identification; resolves to whether it was saved. */
     async identify(onIdentify) {
@@ -167,12 +198,35 @@ export function useQuickRanking(buildRequest) {
   };
 }
 
-/** Steps of the greedy suggestion: "Fe2O3 34 % + ZnO 12 % (weak)" with formula subscripts. */
+/**
+ * Steps of the greedy suggestion with formula subscripts: "Fe2O3 + ZnO (weak)". Names only: a step's
+ * gain is a share of the intensity explained, and a percentage beside a formula reads as an amount.
+ */
 function Suggestion({ combination }) {
-  return combination.map((step, index) => <React.Fragment key={step.source}>
-    {index ? ' + ' : ''}<ChemicalFormula formula={step.formula} /> <span className="dara-num">{percent(step.gain)}</span>
-    {step.weak ? ' (weak)' : ''}
-  </React.Fragment>);
+  return <span title={combinationText(combination)}>{combination.map((step, index) => <React.Fragment key={step.source}>
+    {index ? ' + ' : ''}<ChemicalFormula formula={step.formula} />{step.weak ? ' (weak)' : ''}
+  </React.Fragment>)}</span>;
+}
+
+/**
+ * HighScore's "Determine Background" for the search-match: the default method, or Sonneveld & Visser
+ * with HighScore's granularity and bending factor; "Accept" ranks again with them and shows the curve.
+ */
+function BackgroundForm({ initial, onAccept }) {
+  const [settings, setSettings] = useState(() => backgroundSettings(initial));
+  const set = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
+  const tuned = settings.method === 'sonneveld_visser';
+  return <div className="dara-qr-bg-form">
+    <Radio.Group size="small" value={settings.method} optionType="button" onChange={event => set('method', event.target.value)}
+      options={[{ value: 'auto', label: 'Automatic' }, { value: 'sonneveld_visser', label: 'Granularity / bending' }]} />
+    <label htmlFor="dara-qr-granularity">Granularity <span className="dara-num">{settings.granularity}</span></label>
+    <Slider id="dara-qr-granularity" min={2} max={200} value={settings.granularity} disabled={!tuned}
+      onChange={value => set('granularity', value)} tooltip={{ formatter: null }} />
+    <label htmlFor="dara-qr-bending">Bending factor <span className="dara-num">{settings.bending_factor}</span></label>
+    <Slider id="dara-qr-bending" min={0} max={50} step={0.5} value={settings.bending_factor} disabled={!tuned}
+      onChange={value => set('bending_factor', value)} tooltip={{ formatter: null }} />
+    <Button type="primary" size="small" onClick={() => onAccept(tuned ? settings : { method: 'auto' })}>Accept and rank again</Button>
+  </div>;
 }
 
 /** "Ia-3 (206)" with the symbol set as a space group; a bare number when there is no symbol. */
@@ -198,9 +252,8 @@ function ResidualPanel({ residual, rows, selected, setSelected }) {
       <ul>{next.map(row => <li key={row.key}>
         <div className="dara-qr-phase">
           <div><ChemicalFormula formula={row.formula} /> <span className="meta"><SpaceGroup row={row} /></span></div>
-          <div className="meta">{`${row.sourceLabel} · ${row.peaksText} peaks`}</div>
+          <div className="meta">{`${row.sourceLabel} · ${row.peaksText} peaks · explains ${row.scoreText} of the rest`}</div>
         </div>
-        <span className="dara-num">{row.scoreText}</span>
         <Tooltip title={row.inRanking ? null : 'Not in the ranked list'}>
           <Button size="small" icon={<PlusOutlined />} disabled={!row.inRanking || selected.includes(row.key) || selected.length >= MAX_REFINE}
             onClick={() => setSelected([...selected, row.key])}>Add</Button>
@@ -210,7 +263,7 @@ function ResidualPanel({ residual, rows, selected, setSelected }) {
   </section>;
 }
 
-/** The last ranking on the Run card, when its inputs are still the form's. */
+/** The last ranking on the Run card, when its inputs are still the form's (the Search-match button opens it). */
 export function QuickRankingSummary({ quick }) {
   const data = quick.ranked;
   if (!data) return null;
@@ -221,7 +274,6 @@ export function QuickRankingSummary({ quick }) {
         {count ? `${data.pool?.candidates ?? count} candidates ranked · ${quick.selected.length} selected` : 'no candidate ranked'}</span></div>
       {data.combination?.length ? <div>Suggested: <Suggestion combination={data.combination} /></div> : null}
     </div>
-    <Button size="small" onClick={quick.open}>Open</Button>
   </div>;
 }
 
@@ -237,26 +289,30 @@ const Workspace = styled.section`
   .dara-qr-title h1:focus, .dara-qr-title h1:focus-visible { outline: none !important; }
   .dara-qr-context { margin: 0; color: var(--dara-text-secondary); font-size: var(--dara-font-12); overflow-wrap: anywhere; }
   .dara-qr-context > span + span::before { content: ' · '; }
-  .dara-qr-note { margin: 8px 0 12px; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
+  .dara-qr-head + * { margin-top: 12px; }
   > .ant-alert { margin-bottom: 12px; }
+  .dara-qr-mismatch { max-width: none; }
+  .dara-qr-mismatch .ant-alert-message { font-weight: 600; }
   .dara-qr-panel {
     background: var(--dara-surface); border: 1px solid var(--dara-border); border-radius: var(--dara-radius);
   }
-  .dara-qr-plot { padding: 8px 12px 4px; margin-bottom: 16px; }
+  .dara-qr-plot { padding: 8px 12px 4px; margin-bottom: 12px; }
   .dara-qr-plot-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; min-height: 22px; font-size: var(--dara-font-12); color: var(--dara-text-secondary); }
   .dara-qr-plot-head b { color: var(--dara-text); font-weight: 600; }
-  .dara-qr-plot-area { height: max(280px, 40vh); }
-  .dara-qr-preview-mark { display: inline-block; width: 0; height: 12px; margin: 0 6px -1px 0; border-left: 2px dotted var(--dara-text); }
+  /* Plot, selection status and the first table rows share the first screen at 1366 x 768. */
+  .dara-qr-plot-area { height: max(240px, 32vh); }
+  .dara-qr-preview-mark { display: inline-block; width: 0; height: 12px; margin: 0 6px -1px 0; border-left: 2px dotted var(--dara-shell-mark); }
   .dara-qr-wait { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 12px; padding: 0 24px; }
   .dara-qr-wait .ant-progress { width: min(480px, 100%); }
-  .dara-qr-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 320px); gap: 16px; align-items: start; }
+  .dara-qr-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); gap: 16px; align-items: start; }
+  .dara-qr-body > aside { position: sticky; top: 16px; }
   .dara-qr-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 8px; }
   .dara-qr-toolbar label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
   .dara-qr-pool { margin-left: auto; color: var(--dara-text-secondary); font-size: var(--dara-font-12); }
   .dara-caution-list { margin-bottom: 8px; font-size: var(--dara-font-13); }
   .dara-caution-list .anticon { color: var(--dara-review); }
   /* The list scrolls under the plot so the preview stays in view while browsing candidates. */
-  .dara-qr-table { max-height: max(320px, calc(58vh - 250px)); overflow: auto; }
+  .dara-qr-table { max-height: max(240px, calc(100vh - 440px)); overflow: auto; }
   .dara-qr-table .ant-table-thead > tr > th { position: sticky; top: 0; z-index: 2; }
   .dara-qr-table .ant-table-tbody > tr.ant-table-row { cursor: pointer; }
   /* The checkbox marks a selected row; the tint is kept for the previewed (focused) row. */
@@ -269,7 +325,7 @@ const Workspace = styled.section`
   .dara-qr-selected h2 span { font-weight: 400; color: var(--dara-text-secondary); font-size: var(--dara-font-12); }
   .dara-qr-selected ul { margin: 0; padding: 0; list-style: none; }
   .dara-qr-selected li {
-    display: grid; grid-template-columns: 12px minmax(0, 1fr) auto auto; align-items: center; gap: 0 8px;
+    display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 0 8px;
     padding: 4px 0; border-top: 1px solid var(--dara-border);
   }
   .dara-qr-selected li:first-child { border-top: 0; }
@@ -277,20 +333,25 @@ const Workspace = styled.section`
   .dara-qr-phase { min-width: 0; }
   .dara-qr-phase > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .dara-qr-phase .meta { font-size: var(--dara-font-12); color: var(--dara-text-secondary); }
+  .dara-qr-phase > div.meta { white-space: normal; }
   .dara-qr-empty { margin: 0; color: var(--dara-text-secondary); }
   .dara-qr-suggest { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dara-border-strong); }
   .dara-qr-suggest p { margin: 0 0 8px; }
   .dara-qr-limit { margin: 8px 0 0; color: var(--dara-review); }
+  .dara-qr-weak { margin: 8px 0 0; font-size: var(--dara-font-13); color: var(--dara-review); }
+  .dara-qr-weak .ant-btn { padding: 0 4px; height: auto; }
   .dara-qr-left { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--dara-border-strong); }
   .dara-qr-left-status { margin: 0 0 8px; font-weight: 600; }
   .dara-qr-left-status.is-open { color: var(--dara-review); }
   .dara-qr-left-status.is-stale { opacity: 0.6; }
   .dara-qr-left h3 { margin: 0 0 4px; font-size: var(--dara-font-12); font-weight: 400; color: var(--dara-text-secondary); }
-  .dara-qr-left li { grid-template-columns: minmax(0, 1fr) auto auto; }
+  .dara-qr-left li { grid-template-columns: minmax(0, 1fr) auto; }
   .dara-qr-plot-tools { display: inline-flex; align-items: center; gap: 12px; }
   .dara-qr-plot-tools label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .dara-qr-body.single { grid-template-columns: minmax(0, 1fr); }
   @media (max-width: 1079px) {
     .dara-qr-body { grid-template-columns: minmax(0, 1fr); }
+    .dara-qr-body > aside { position: static; }
   }
 `;
 
@@ -299,11 +360,13 @@ const Workspace = styled.section`
  * pattern with reference sticks of the selected and the focused candidate, the candidate table and
  * the selected phases. `onRefine` submits a Known-phase refinement of the selected structures.
  */
-export default function QuickRankingWorkspace({ quick, context, onRefine, onIdentify, alert }) {
+export default function QuickRankingWorkspace({ quick, context, onRefine, onIdentify, alert, mismatch: inspected, onUseRecorded }) {
   const { state, selected, setSelected, focused, setFocused, colors, residual } = quick;
   const heading = useRef(null);
   useEffect(() => { heading.current?.focus(); }, []);
   const [showResidual, setShowResidual] = useState(false);
+  const [showBackground, setShowBackground] = useState(false); // the measured pattern with its background
+  const [backgroundOpen, setBackgroundOpen] = useState(false);
   const [zoom, setZoom] = useState({ range: null, revision: 0 }); // a click on an unexplained-peak marker zooms there
 
   const data = state.status === 'done' ? state.data : null;
@@ -312,8 +375,11 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const chosen = selected.map(key => rowByKey[key]).filter(Boolean);
   const focusedRow = rowByKey[focused];
   const over = selected.length > MAX_REFINE;
-  const suggestion = data ? defaultSelection(data) : [];
-  const usingSuggestion = suggestion.length === selected.length && suggestion.every(key => selected.includes(key));
+  const suggestion = data ? suggestedKeys(data) : [];
+  const usingSuggestion = suggestion.every(key => selected.includes(key));
+  const weakLeft = data ? weakNotSelected(data, selected) : [];
+  // The ranking's own check (the server compares the file's anode with the request) wins over the setup's.
+  const mismatch = mismatchView(data?.wavelength_mismatch) || inspected;
 
   const onRowKey = (event, row) => {
     const action = rowKeyAction(event.key);
@@ -338,7 +404,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
       },
     },
     {
-      title: <Tooltip title="Share of the measured net intensity the structure can explain (lattice-penalised)">Score</Tooltip>,
+      title: <Tooltip title="Share of the measured net intensity this structure explains on its own (lattice-penalised). Not an amount: refine for wt%.">Explains</Tooltip>,
       dataIndex: 'scoreText', width: 84, className: 'dara-num', sorter: SORTERS.score, sortDirections: ['descend', 'ascend'],
     },
     {
@@ -360,12 +426,16 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   // 2 % of the strongest net intensity: the markers sit just above the axis, inside the plot area.
   const markerLevel = 0.02 * Math.max(0, ...((data?.profile?.net || []).filter(Number.isFinite)));
   const bounds = data?.profile ? [data.profile.two_theta?.[0], data.profile.two_theta?.slice(-1)[0]] : null;
+  // The background view (when the server sends the curve) shows the measured pattern with the
+  // background the ranking removed; the sticks belong to the net scale and stay in the other views.
+  const withBackground = showBackground ? backgroundTraces(data?.background) : null;
   // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
-  const traces = data ? [...overlayTraces(showResidual && left ? withResidualProfile(data, left) : data, showResidual && left ? [] : selected, colors, focused),
-    ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, markerLevel)] : [])] : [];
+  const traces = withBackground || !data ? withBackground || [] : [...overlayTraces(showResidual && left ? withResidualProfile(data, left) : data, showResidual && left ? [] : selected, colors, focused),
+    ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, markerLevel)] : [])];
   // A click on an unexplained-peak marker zooms there. The hovered point can be the pattern's (closest
   // in 2-D), so a click within 0.3° of a marker, by the 2θ under the mouse, counts as well.
   const onPlotClick = event => {
+    if (withBackground) return; // no unexplained-peak markers in the background view
     const point = event?.points?.find(item => item.data?.meta === 'unexplained');
     const near = (left?.unexplained_peaks || []).map(peak => Number(peak[0]))
       .filter(x => Number.isFinite(event?.cursorX) && Math.abs(x - event.cursorX) <= 0.3)
@@ -389,6 +459,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
     body = <div className="dara-failure" role="alert">
       <h3>The search-match failed</h3>
       <p>{state.error}</p>
+      <Button type="primary" onClick={() => quick.close()}>Back to setup</Button>{' '}
       <Button onClick={() => quick.start()}>Retry</Button>
     </div>;
   } else if (state.status === 'idle') {
@@ -398,36 +469,46 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
       <Button type="primary" onClick={() => quick.start()}>Run search-match</Button>
     </div>;
   } else {
-    const caveats = data.caveats || [];
-    body = <>
-      <section className="dara-qr-panel dara-qr-plot" aria-label="Measured pattern and reference sticks">
-        <div className="dara-qr-plot-head">
-          <span>{focusedRow
-            ? <><span className="dara-qr-preview-mark" />Preview <b><ChemicalFormula formula={focusedRow.formula} /></b>
-              {` · ${focusedRow.sourceLabel}`}{selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
-            : 'Click a candidate to preview its reflections; tick it to keep it.'}</span>
-          <span className="dara-qr-plot-tools">
-            <span>{showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
-            <Tooltip title={selected.length ? 'Show what the selected phases leave unexplained (the residual net pattern)' : 'Select phases first'}>
-              <label><Switch size="small" checked={showResidual && Boolean(left)} disabled={!left} onChange={setShowResidual} aria-label="Show the residual" />Residual</label>
-            </Tooltip>
-            {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
-          </span>
-        </div>
-        {data.profile ? <Plot data={traces} useResizeHandler xBounds={bounds} onClick={onPlotClick}
-          onDoubleClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}
-          className="dara-qr-plot-area" style={{ width: '100%' }}
-          layout={{
-            autosize: true, uirevision: `${state.key}-${zoom.revision}`, showlegend: false, hovermode: 'closest',
-            margin: { l: 56, r: 12, t: 8, b: 40 }, font: { size: 12 },
-            xaxis: { title: { text: '2θ (°)' }, ...(zoom.range ? { range: [...zoom.range], autorange: false } : {}) },
-            yaxis: { title: { text: showResidual && left ? 'Residual net intensity' : 'Net intensity' }, rangemode: 'tozero',
-              ...(zoom.range && zoom.y ? { range: [...zoom.y], autorange: false } : {}) },
-          }}
-          config={{ displaylogo: false, responsive: true }} /> : null}
-      </section>
-      <div className="dara-qr-body">
+    // The wavelength mismatch leads the workspace; its message is not repeated among the notes.
+    const caveats = rankingNotes(data).filter(text => text !== data.wavelength_mismatch?.message);
+    body = <div className={`dara-qr-body${rows.length ? '' : ' single'}`}>
         <div>
+          <section className="dara-qr-panel dara-qr-plot" aria-label="Measured pattern and reference sticks">
+            <div className="dara-qr-plot-head">
+              <span>{focusedRow
+                ? <><span className="dara-qr-preview-mark" />Preview <b><ChemicalFormula formula={focusedRow.formula} /></b>
+                  {` · ${focusedRow.sourceLabel}`}{selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
+                : 'Click a candidate to preview its reflections; tick it to keep it.'}</span>
+              <span className="dara-qr-plot-tools">
+                <span>{withBackground ? 'Measured pattern with its background' : showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
+                {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground} onChange={setShowBackground} aria-label="Show the background" />Background</label> : null}
+                {data.background?.settings ? <Popover trigger="click" placement="bottomRight" title="Determine background" open={backgroundOpen}
+                  onOpenChange={setBackgroundOpen} destroyTooltipOnHide
+                  content={<BackgroundForm initial={data.background.settings} onAccept={settings => {
+                    setBackgroundOpen(false);
+                    setShowBackground(true);
+                    quick.rankWithBackground(settings);
+                  }} />}>
+                  <Button size="small">Background…</Button>
+                </Popover> : null}
+                <Tooltip title={selected.length ? 'Show what the selected phases leave unexplained (the residual net pattern)' : 'Select phases first'}>
+                  <label><Switch size="small" checked={showResidual && Boolean(left)} disabled={!left || Boolean(withBackground)} onChange={setShowResidual} aria-label="Show the residual" />Residual</label>
+                </Tooltip>
+                {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
+              </span>
+            </div>
+            {data.profile ? <Plot data={traces} useResizeHandler xBounds={bounds} onClick={onPlotClick}
+              onDoubleClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}
+              className="dara-qr-plot-area" style={{ width: '100%' }}
+              layout={{
+                autosize: true, uirevision: `${state.key}-${zoom.revision}`, showlegend: false, hovermode: 'closest',
+                margin: { l: 56, r: 12, t: 8, b: 40 }, font: { size: 12 },
+                xaxis: { title: { text: '2θ (°)' }, ...(zoom.range ? { range: [...zoom.range], autorange: false } : {}) },
+                yaxis: { title: { text: withBackground ? 'Intensity' : showResidual && left ? 'Residual net intensity' : 'Net intensity' }, rangemode: 'tozero',
+                  ...(zoom.range && zoom.y ? { range: [...zoom.y], autorange: false } : {}) },
+              }}
+              config={{ displaylogo: false, responsive: true }} /> : null}
+          </section>
           <div className="dara-qr-toolbar">
             <label><Switch size="small" checked={quick.theoretical} onChange={quick.toggleTheoretical} />
               Include theoretical (computed) structures</label>
@@ -444,6 +525,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 tabIndex: 0, title: 'Preview in the plot; Space selects', 'aria-current': row.key === focused || undefined,
                 onFocus: () => setFocused(row.key), onKeyDown: event => onRowKey(event, row),
               })} />
+          </div> : !data.profile ? <div className="dara-empty">
+            <h3>This pattern cannot be ranked</h3>
+            <p>Check the file and the 2θ range in the setup: the search-match needs a measured pattern with peaks.</p>
           </div> : <div className="dara-empty">
             <h3>No candidate could be ranked</h3>
             <p>{caveats.length ? 'See the notes above.' : 'No reference structure matched the elements in this 2θ range.'}
@@ -456,13 +540,18 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
             <i className="dara-qr-swatch" style={{ background: colors[row.key] }} aria-hidden="true" />
             <div className="dara-qr-phase">
               <div><ChemicalFormula formula={row.formula} /> <span className="meta"><SpaceGroup row={row} /></span></div>
-              <div className="meta">{row.sourceLabel}</div>
+              <div className="meta">{`${row.sourceLabel} · explains ${row.scoreText} alone`}</div>
             </div>
-            <span className="dara-num">{row.scoreText}</span>
             <Button type="text" size="small" icon={<CloseOutlined />} aria-label={`Remove ${row.formula}`}
               onClick={() => setSelected(selected.filter(key => key !== row.key))} />
           </li>)}</ul>
             : <p className="dara-qr-empty">No phase selected. Tick candidates in the table to draw their sticks on the pattern, then refine them together.</p>}
+          {weakLeft.length ? <p className="dara-qr-weak">
+            {`${weakLeft.length} weak suggestion${weakLeft.length === 1 ? '' : 's'} not selected: `}
+            {weakLeft.map((item, index) => <React.Fragment key={item.key}>{index ? ', ' : ''}<ChemicalFormula formula={item.formula} /></React.Fragment>)}
+            {' '}<Button type="link" size="small" disabled={selected.length + weakLeft.length > MAX_REFINE}
+              onClick={() => setSelected([...selected, ...weakLeft.map(item => item.key)])}>Add</Button>
+          </p> : null}
           {chosen.length ? <ResidualPanel residual={residual} rows={rows} selected={selected} setSelected={setSelected} /> : null}
           {over ? <p className="dara-qr-limit">{`A refinement takes at most ${MAX_REFINE} phases: remove ${selected.length - MAX_REFINE}.`}</p> : null}
           {data.combination?.length ? <div className="dara-qr-suggest">
@@ -470,8 +559,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
             <Button size="small" onClick={() => setSelected(suggestion)} disabled={usingSuggestion}>Use suggestion</Button>
           </div> : null}
         </aside> : null}
-      </div>
-    </>;
+    </div>;
   }
 
   return <Workspace aria-labelledby="dara-qr-title">
@@ -492,7 +580,11 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
         </Button>
       </Tooltip>
     </header>
-    <p className="dara-qr-note">Each score is the share of the net intensity a structure explains on its own. Save identification gives a result in seconds without refinement (phase list, peak list, semi-quantitative RIR); Refine with Rietveld runs the full quantitative refinement (minutes).</p>
+    {mismatch?.recorded ? <Alert className="dara-qr-mismatch" type="warning" showIcon role="alert"
+      message={`The file was recorded with ${mismatch.recorded} radiation; this search-match uses ${mismatch.chosen}.`}
+      description="Peak positions scale with the wavelength, so the candidates below are matched at the wrong angles."
+      action={onUseRecorded && /^[A-Z][a-z]?$/.test(mismatch.recorded)
+        ? <Button type="primary" onClick={() => onUseRecorded(mismatch.recorded)}>{`Use ${mismatch.recorded} and rank again`}</Button> : null} /> : null}
     {alert}
     {body}
   </Workspace>;

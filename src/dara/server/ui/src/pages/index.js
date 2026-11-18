@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
 import { Alert, AutoComplete, Button, Form, Input, InputNumber, message, Modal, Radio, Select, Space, Switch, Table, Tag, Typography, Upload } from 'antd';
-import { MinusCircleOutlined, PlusOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
+import { FileOutlined, MinusCircleOutlined, PlusOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
 import { CalibrateProfile, DEFAULT_CONTROLS, InstrumentManager, RefinementControlsEditor } from '../components/PracticalControls';
 import { detailMessage, qualityAlertItems, qualityStatText, wavelengthMismatch } from '../components/dataQuality.mjs';
 import { MpKeyStatus, ReferenceLibraryField, useReferenceLibrary } from '../components/ReferenceLibrary';
@@ -11,7 +11,10 @@ import { COMMON_STANDARDS } from '../components/InternalStandardCard';
 import { FwhmCurveButton } from '../components/InstrumentFwhmCurve';
 import { curveText } from '../components/instrumentCurve.mjs';
 import useAdvancedTools from '../components/useAdvancedTools';
-import { advancedChanges, forgetRemembered, readRemembered, runAfterSuccess, writeRemembered } from '../components/submitHelpers.mjs';
+import {
+  advancedChanges, checkElements, forgetRemembered, limiter, previewShape, readRecentElements, readRemembered, rememberElements,
+  runAfterSuccess, unrecognisedTokens, writeRemembered,
+} from '../components/submitHelpers.mjs';
 import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../components/knownPhases.mjs';
 // explicit .js: on case-insensitive disks webpack would resolve quickRanking.mjs / structureLibrary.mjs first
 import QuickRankingWorkspace, { QuickRankingSummary, useQuickRanking } from '../components/QuickRanking.js';
@@ -75,11 +78,28 @@ const Container = styled.div`
   .dara-run-summary dd { margin: 0; overflow-wrap: anywhere; }
   .dara-run-summary .missing { color: var(--dara-text-hint); }
   .dara-run-hint { margin: 0 0 16px; color: var(--dara-text-hint); font-size: var(--dara-font-13); }
-  .dara-run-actions { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 12px; padding-bottom: 16px; }
+  .dara-run-actions { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding-bottom: 16px; }
   .dara-run-actions.single { grid-template-columns: minmax(0, 1fr); }
-  .dara-run-search:not([disabled]) { background: var(--dara-shell); border-color: var(--dara-shell); color: var(--dara-shell-text); }
-  .dara-run-search:not([disabled]):hover, .dara-run-search:not([disabled]):focus { background: #33503f; border-color: #33503f; color: var(--dara-shell-text); }
+  /* The time an action costs sits in its label: "Search-match · seconds", "Run analysis · about 16 min". */
+  .dara-run-actions .ant-btn .cost { margin-left: 6px; font-size: var(--dara-font-13); opacity: 0.85; }
   .dara-run-action-note { margin: 4px 0 0; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
+  .dara-run-summary .invalid { color: var(--dara-fail); }
+  /* antd's warning text (#faad14) is too light on white: the review tone carries it. */
+  .ant-form-item-explain-warning { color: var(--dara-review); }
+  .dara-run-submitted { margin: 0; padding: 0 0 16px; list-style: none; font-size: var(--dara-font-13); color: var(--dara-text-secondary); }
+  .dara-run-submitted li + li { margin-top: 2px; }
+  .dara-file-row {
+    display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px 4px 12px;
+    background: var(--dara-surface-sunken); border: 1px solid var(--dara-border); border-radius: var(--dara-radius);
+  }
+  .dara-file-row .name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .dara-file-row .meta { color: var(--dara-text-secondary); font-size: var(--dara-font-12); white-space: nowrap; }
+  .dara-pattern-preview { display: block; width: 100%; height: 80px; margin-top: 8px; border: 1px solid var(--dara-border); border-radius: var(--dara-radius); background: var(--dara-surface); }
+  .dara-pattern-preview path { fill: none; stroke: var(--dara-text-secondary); stroke-width: 1; vector-effect: non-scaling-stroke; }
+  .dara-pattern-preview rect { fill: var(--dara-surface-sunken); }
+  .dara-pattern-preview-axis { display: flex; justify-content: space-between; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
+  .dara-recent { display: flex; flex-wrap: wrap; align-items: center; gap: 0 4px; }
+  .dara-recent .ant-btn-link { height: auto; padding: 0 4px; }
   .dara-qr-summary {
     display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
     margin: 0 0 16px; padding: 8px 12px;
@@ -113,7 +133,10 @@ const Container = styled.div`
   }
 `;
 
-const MODE_LABELS = { elemental: 'Phase identification', known_mixture: 'Known-phase refinement', reaction: 'Reaction check' };
+const MODE_LABELS = { elemental: 'Phase search + Rietveld', known_mixture: 'Known-phase refinement', reaction: 'Reaction check' };
+// One name per field; the formula list changes its name with the mode.
+const FORMULA_LABELS = { elemental: 'Expected formulas', known_mixture: 'Phases to refine', reaction: 'Precursors' };
+const PATTERN_ACCEPT = '.xy,.xye,.xrdml,.raw,.rasx,.txt,.scn,.ras,.brml,.csv,.dat,.asc';
 
 function Card({ name, title, children }) {
   return <section className={`dara-card dara-card-${name}`} aria-label={title}>
@@ -136,7 +159,7 @@ const INSTRUMENT_NAMES = [
 ];
 
 const WAVELENGTHS = [
-  ['Cu', 1.540598], ['Co', 1.789010], ['Cr', 2.289760], ['Fe', 1.936042],
+  ['Cu', 1.540598], ['Co', 1.789010], ['Cr', 2.289760], ['Fe', 1.936042], ['Mo', 0.709300],
 ];
 
 const commaList = value => JSON.stringify(
@@ -144,6 +167,8 @@ const commaList = value => JSON.stringify(
 );
 const uploadFile = value => value?.originFileObj || value;
 const splitList = value => (value || '').split(',').map(item => item.trim()).filter(Boolean);
+const elementList = value => JSON.stringify(checkElements(value).symbols);
+const fileKey = file => (file ? `${file.uid}:${file.name}` : null);
 
 // 'm min' below one hour, 'h:mm h' from one hour on.
 const formatDuration = seconds => {
@@ -189,6 +214,20 @@ function EstimateAlert({ estimate, loading, prefilter }) {
   );
 }
 
+/** The scan of the chosen file, as HighScore, Jade and Match! show it on opening; ranges left out are shaded. */
+function PatternPreview({ points, start, end, excluded }) {
+  const shape = previewShape(points, { width: 600, height: 80, start, end, excluded });
+  if (!shape) return null;
+  return <div>
+    <svg className="dara-pattern-preview" viewBox="0 0 600 80" preserveAspectRatio="none" role="img"
+      aria-label={`Measured pattern from ${shape.lo.toFixed(1)} to ${shape.hi.toFixed(1)} degrees 2θ`}>
+      {shape.shades.map(item => <rect key={item.x} x={item.x} y={0} width={item.width} height={80} />)}
+      <path d={shape.d} />
+    </svg>
+    <div className="dara-pattern-preview-axis"><span>{`${shape.lo.toFixed(1)}°`}</span><span>2θ</span><span>{`${shape.hi.toFixed(1)}°`}</span></div>
+  </div>;
+}
+
 function Submission() {
   const [form] = Form.useForm();
   const [analysisMode, setAnalysisMode] = useState('elemental');
@@ -208,6 +247,11 @@ function Submission() {
   const autoFormulas = useRef(null); // formulas filled from the file name, cleared with the file
   const [msg, setMsg] = useState(null);
   const [spinning, setSpinning] = useState(false);
+  const submitting = useRef(false); // a second click while the first submission is on its way does nothing
+  const leaving = useRef(false); // set before the page opens a task, so the leave warning stays quiet
+  const leave = url => { leaving.current = true; window.location.href = url; };
+  const [submittedTasks, setSubmittedTasks] = useState([]); // [{id, name}] of this page, newest first
+  const [recentElements, setRecentElements] = useState([]);
   const [cloneSource, setCloneSource] = useState(null);
   const [phaseSet, setPhaseSet] = useState(null); // {id, phases: [{formula, spacegroup}] | null, error?}
   const [usingRemembered, setUsingRemembered] = useState(false);
@@ -237,9 +281,13 @@ function Submission() {
   const [seriesPreview, setSeriesPreview] = useState(null);
   const seriesFiles = Form.useWatch('series_files', form);
   const firstSeriesFile = useRef(null);
+  const [seriesInspections, setSeriesInspections] = useState({}); // file key -> inspection | {error}
+  const inspections = useRef({}); // file key -> promise of its inspection (each file once)
+  const inspectQueue = useRef(limiter(3));
   const library = useReferenceLibrary();
   const [estimate, setEstimate] = useState(null);
   const [estimating, setEstimating] = useState(false);
+  const [estimateFailed, setEstimateFailed] = useState(false);
   const referenceIds = useRef([]); // structures picked in the quick ranking, sent once by onSubmit
   const watchedMode = Form.useWatch('analysis_mode', form);
   const watchedElements = Form.useWatch('elements', form);
@@ -261,6 +309,9 @@ function Submission() {
   const watchedReuseCifs = Form.useWatch('reuse_additional_cifs', form);
   const watchedThetaMin = Form.useWatch('two_theta_min', form);
   const watchedScreening = Form.useWatch('screening_timeout_s', form);
+  const watchedExcluded = Form.useWatch('excluded_ranges', form);
+  const elementCheck = checkElements(watchedElements);
+  useEffect(() => { setRecentElements(readRecentElements(browserStorage())); }, []);
 
   // Advanced options are collapsed unless one of them differs from its default (remembered
   // settings, a cloned task, or a validation error there); the card never closes by itself.
@@ -292,9 +343,10 @@ function Submission() {
   const inspectedPoints = patternInspection?.data_points;
   useEffect(() => {
     const mode = watchedMode || 'elemental';
-    const elementList = splitList(watchedElements);
+    const { symbols: elementSymbols, error: elementError } = checkElements(watchedElements);
     const precursorList = splitList(watchedPrecursors);
-    if ((mode === 'elemental' && !elementList.length && !precursorList.length) || (mode !== 'elemental' && !precursorList.length)) {
+    setEstimateFailed(false);
+    if (elementError || (mode === 'elemental' && !elementSymbols.length && !precursorList.length) || (mode !== 'elemental' && !precursorList.length)) {
       setEstimate(null);
       setEstimating(false);
       return undefined;
@@ -307,7 +359,7 @@ function Submission() {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
         body: JSON.stringify({
           analysis_mode: mode,
-          elements: elementList,
+          elements: elementSymbols,
           precursor_formulas: precursorList,
           use_cod: watchedUseCod !== false,
           use_mp: watchedUseMp !== false,
@@ -322,7 +374,7 @@ function Submission() {
       })
         .then(response => response.ok ? response.json() : Promise.reject(new Error('Estimate unavailable')))
         .then(data => { setEstimate(data); setEstimating(false); })
-        .catch(error => { if (error.name !== 'AbortError') { setEstimate(null); setEstimating(false); } });
+        .catch(error => { if (error.name !== 'AbortError') { setEstimate(null); setEstimating(false); setEstimateFailed(true); } });
     }, 600);
     return () => { clearTimeout(timer); controller.abort(); };
   }, [watchedMode, watchedElements, watchedPrecursors, watchedUseCod, watchedUseMp, watchedEHull, watchedMaxMp,
@@ -420,13 +472,26 @@ function Submission() {
     return () => controller.abort();
   }, [seriesMode, seriesFiles]);
 
+  // Every series file is inspected once (at most three at a time) for the per-file table.
+  const seriesInspection = item => {
+    const key = fileKey(item);
+    if (!inspections.current[key]) {
+      inspections.current[key] = inspectQueue.current(() => fetchInspection(uploadFile(item)));
+      inspections.current[key]
+        .then(data => setSeriesInspections(previous => ({ ...previous, [key]: data })),
+          error => setSeriesInspections(previous => ({ ...previous, [key]: { error: String(error.message || error) } })));
+    }
+    return inspections.current[key];
+  };
+  useEffect(() => { if (seriesMode) (seriesFiles || []).forEach(seriesInspection); }, [seriesMode, seriesFiles]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const onSeriesFilesChange = info => {
-    // Only the first file is inspected; re-inspect when a different file becomes first.
+    // The first file's inspection sets the instrument, wavelength and elements; re-apply when another file becomes first.
     const first = info?.fileList?.[0];
-    const key = first ? `${first.uid}:${first.name}` : null;
+    const key = fileKey(first);
     if (key === firstSeriesFile.current) return;
     firstSeriesFile.current = key;
-    inspectFile(first ? uploadFile(first) : null);
+    inspectFile(first ? uploadFile(first) : null, first ? seriesInspection(first) : null);
   };
 
   const toggleSeriesMode = checked => {
@@ -442,8 +507,22 @@ function Submission() {
     form.setFieldValue('pattern_file', fileValue);
     return inspectFile(uploadFile(fileValue));
   };
+  const removePattern = () => {
+    form.setFieldValue('pattern_file', null);
+    inspectFile(null);
+  };
 
-  const inspectFile = async file => {
+  const fetchInspection = async file => {
+    const body = new FormData();
+    body.append('pattern_file', file);
+    const response = await fetch(`${URL}/pattern/inspect`, { method: 'POST', body });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || 'Could not inspect the pattern.');
+    return data;
+  };
+
+  /** Inspects `file` (or awaits `pending`, its inspection already on its way) and applies the suggestions. */
+  const inspectFile = async (file, pending = null) => {
     const sequence = ++inspectionSequence.current;
     if (autoElements.current !== null && form.getFieldValue('elements') === autoElements.current) {
       form.setFieldValue('elements', '');
@@ -460,12 +539,8 @@ function Submission() {
     }
 
     setInspectingPattern(true);
-    const body = new FormData();
-    body.append('pattern_file', file);
     try {
-      const response = await fetch(`${URL}/pattern/inspect`, { method: 'POST', body });
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.detail || 'Could not inspect the pattern.');
+      const data = await (pending || fetchInspection(file));
       if (sequence !== inspectionSequence.current) return;
 
       const suggestion = data.profile_suggestion;
@@ -476,10 +551,12 @@ function Submission() {
         updates.elements = inferredElements.join(', ');
         autoElements.current = updates.elements;
       }
-      // The file name's formulas fill the phase list (phases to refine, or the expected/precursor
-      // formulas) when it is empty; typed entries are never replaced.
+      // The file name's formulas fill the expected formulas or precursors when the list is empty;
+      // typed entries are never replaced. In Known-phase refinement they are only offered: a file
+      // name often names the precursors of a reaction product, not the phases in it.
       const inferredFormulas = data.filename_chemistry?.formulas || [];
-      const applyFormulas = inferredFormulas.length > 0 && !(form.getFieldValue('precursor_formulas') || '').trim();
+      const applyFormulas = inferredFormulas.length > 0 && form.getFieldValue('analysis_mode') !== 'known_mixture'
+        && !(form.getFieldValue('precursor_formulas') || '').trim();
       if (applyFormulas) {
         updates.precursor_formulas = inferredFormulas.join(', ');
         autoFormulas.current = updates.precursor_formulas;
@@ -507,10 +584,12 @@ function Submission() {
   // Quick ranking: the current pattern and chemistry, without validating the whole form.
   const quickRankingRequest = () => {
     const values = form.getFieldsValue(true);
-    if (!values.pattern_file) throw new Error('Upload a pattern first.');
+    if (!values.pattern_file && !cloneSource) throw new Error('Upload a pattern first.');
     const body = new FormData();
-    body.append('pattern_file', uploadFile(values.pattern_file));
-    body.append('elements', commaList(values.elements));
+    // A rerun without a replacement file ranks the source task's stored pattern.
+    if (values.pattern_file) body.append('pattern_file', uploadFile(values.pattern_file));
+    else body.append('source_task_id', cloneSource.source_task_id);
+    body.append('elements', elementList(values.elements));
     body.append('precursor_formulas', commaList(values.precursor_formulas));
     body.append('wavelength', synchrotron ? Number((Number(values.wavelength_sync_a) / 10).toPrecision(10)) : (values.wavelength_lab || 'Cu'));
     if (values.two_theta_min != null) body.append('two_theta_min', values.two_theta_min);
@@ -520,6 +599,7 @@ function Submission() {
     body.append('use_mp', values.use_mp !== false);
     body.append('mp_e_hull_cutoff', values.mp_e_hull_cutoff ?? 0.05);
     body.append('max_mp_structures', values.max_mp_structures ?? 100);
+    body.append('library_cif_ids', JSON.stringify(values.library_cif_ids || []));
     return body;
   };
   // "Refine selected": a Known-phase refinement of exactly the ranked structures. Resolves to
@@ -533,31 +613,47 @@ function Submission() {
     referenceIds.current = ids;
     let submitted = false;
     try {
-      submitted = await onSubmit();
+      // An explicit action on the chosen phases: no confirmation; on success the new task opens.
+      // Known-phase mode was for the ranked structures only: the next analysis keeps the user's mode.
+      submitted = await onSubmit({ openTask: true, rememberedMode: previous.analysis_mode, confirmed: true });
       // The workspace hides the form: name the first error and go back to the setup, where it is
-      // marked; the ranking stays open behind the Run card's "Open".
+      // marked; the ranking stays open behind the Run card's "Open search-match".
       const invalid = submitted ? [] : form.getFieldsError().filter(item => item.errors.length);
       if (invalid.length) {
         message.error(`Not submitted: ${invalid[0].errors[0]}`);
-        quick.close(false);
-        form.scrollToField(invalid[0].name, { block: 'center' });
+        showField(invalid[0].name);
       }
     } finally {
       referenceIds.current = [];
-      if (!submitted) {
+      if (!submitted || !leaving.current) {
         form.setFieldsValue(previous);
-        setAnalysisMode(previousMode);
-      } else {
-        // Known-phase mode was for the ranked structures only: the next analysis keeps the user's mode.
-        const saved = readRemembered(browserStorage());
-        if (saved) writeRemembered(browserStorage(), { ...saved.fields, analysis_mode: previous.analysis_mode }, saved.controls);
-        form.setFieldsValue({ analysis_mode: previous.analysis_mode });
         setAnalysisMode(previousMode);
       }
     }
+    if (submitted && !leaving.current) quick.close(); // an older server without the task id: back to the setup
     return submitted;
   };
   const quick = useQuickRanking(quickRankingRequest);
+  // Back to the setup with `name` marked, in view and focused.
+  const showField = name => {
+    quick.close(false);
+    setTimeout(() => {
+      form.scrollToField(name, { block: 'center' });
+      form.getFieldInstance(name)?.focus?.({ preventScroll: true });
+    }, 0);
+  };
+  const openSearchMatch = () => {
+    setRecentElements(rememberElements(browserStorage(), checkElements(form.getFieldValue('elements')).symbols));
+    quick.open();
+  };
+  // Leaving with a pattern or a ranking on the page asks first (refresh, closing the tab, another site).
+  const unsaved = Boolean(watchedPattern || (seriesFiles || []).length || quick.ranked || quick.state.status === 'pending');
+  useEffect(() => {
+    if (!unsaved) return undefined;
+    const warn = event => { if (!leaving.current) { event.preventDefault(); event.returnValue = ''; } };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [unsaved]);
 
   // "Save identification": the selected phases as the result, without refinement. Uses the ranking's
   // pattern and chemistry with the setup's user, sample and instrument; a field the setup has not
@@ -570,14 +666,21 @@ function Submission() {
       const first = (error?.errorFields || [])[0];
       if (first) {
         message.error(`Not saved: ${first.errors[0]}`);
-        quick.close(false);
-        form.scrollToField(first.name, { block: 'center' });
+        showField(first.name);
       }
       return false;
     }
     let body;
     try {
       body = quickRankingRequest();
+      if (body.has('source_task_id')) {
+        // shortcut: /identification takes an uploaded file only; a rerun sends the source task's measured pattern (no recorded-anode check).
+        const sourceId = body.get('source_task_id');
+        const response = await fetch(`${URL}/task/${sourceId}/pattern.xy`);
+        if (!response.ok) throw new Error(`The stored pattern of Task ${sourceId} could not be loaded (HTTP ${response.status}).`);
+        body.delete('source_task_id');
+        body.append('pattern_file', new File([await response.blob()], `${cloneSource.filename.replace(/\.[^.]*$/, '')}.xy`));
+      }
     } catch (error) {
       setMsg(String(error.message || error));
       return false;
@@ -595,7 +698,7 @@ function Submission() {
       if (response.ok && data.wf_id != null) {
         runAfterSuccess([
           () => writeRemembered(browserStorage(), form.getFieldsValue(true), refinementControls),
-          () => { window.location.href = `/task/?id=${data.wf_id}`; },
+          () => leave(`/task/?id=${data.wf_id}`),
         ]);
         return true;
       }
@@ -604,7 +707,7 @@ function Submission() {
         return new Promise(resolve => Modal.confirm({
           title: 'The selected wavelength differs from the file',
           content: `${mismatch.filename ? `${mismatch.filename}: ` : ''}${mismatch.message} Save with the selected wavelength anyway?`,
-          okText: 'Save anyway', cancelText: 'Go back and check',
+          okText: 'Save anyway', cancelText: "Don't save",
           onOk: () => send(true).then(resolve, failure => { setMsg(String(failure.message || failure)); resolve(false); }),
           onCancel: () => resolve(false),
         }));
@@ -620,7 +723,13 @@ function Submission() {
     }
   };
 
-  const onSubmit = async () => {
+  /**
+   * Validates and submits the form; resolves to whether the server accepted it. `openTask` opens the
+   * new task page; `rememberedMode` is the mode remembered for the next analysis; `confirmed` skips
+   * the confirmation of a long run or a series.
+   */
+  const onSubmit = async ({ openTask = false, rememberedMode = null, confirmed = false } = {}) => {
+    if (submitting.current) return false;
     let values;
     try {
       values = await form.validateFields();
@@ -636,7 +745,7 @@ function Submission() {
     formData.append('user', values.user);
     if (values.sample?.trim()) formData.append('sample', values.sample.trim());
     formData.append('analysis_mode', values.analysis_mode);
-    formData.append('elements', commaList(values.elements));
+    formData.append('elements', elementList(values.elements));
     formData.append('precursor_formulas', commaList(values.precursor_formulas));
     if (phaseSet && !phaseSet.stored) formData.append('phase_set_task_id', phaseSet.id);
     if (cloneSource?.phase_set?.length && !phaseSet) formData.append('reuse_phase_set', 'false');
@@ -673,10 +782,13 @@ function Submission() {
     const abortControl = new AbortController();
     setMsg(null);
     setSpinning(true);
+    submitting.current = true;
     // The returned promise resolves to whether the server accepted the task, once every dialog is closed.
     let submitted = false;
     let finish;
-    const done = new Promise(resolve => { finish = () => resolve(submitted); });
+    const done = new Promise(resolve => { finish = () => { submitting.current = false; resolve(submitted); }; });
+    const patternName = seriesMode ? values.series_name : (uploadFile(values.pattern_file)?.name || cloneSource?.filename);
+    const remembered = { ...form.getFieldsValue(true), ...(rememberedMode ? { analysis_mode: rememberedMode } : {}) };
     const send = confirmedWavelength => {
       if (confirmedWavelength) formData.set('confirm_wavelength', 'true');
       return fetch(`${URL}${seriesMode ? '/submit-series' : '/submit'}`, { method: 'POST', body: formData, signal: abortControl.signal })
@@ -687,17 +799,27 @@ function Submission() {
             submitted = true;
             const seriesUrl = `/series/?id=${encodeURIComponent(data.series_id)}`;
             runAfterSuccess([
-              () => writeRemembered(browserStorage(), form.getFieldsValue(true), refinementControls),
+              () => writeRemembered(browserStorage(), remembered, refinementControls),
+              () => rememberElements(browserStorage(), checkElements(values.elements).symbols),
               () => message.success(`The series was submitted (${(data.task_ids || []).length} tasks).`),
-              () => { window.location.href = seriesUrl; },
+              () => leave(seriesUrl),
             ]);
             return false;
           }
           if (data.message === 'submitted') {
             submitted = true;
-            const remembered = { fields: form.getFieldsValue(true), controls: refinementControls };
+            const taskId = data.wf_id;
+            if (openTask && taskId != null) {
+              runAfterSuccess([
+                () => writeRemembered(browserStorage(), remembered, refinementControls),
+                () => rememberElements(browserStorage(), checkElements(values.elements).symbols),
+                () => leave(`/task/?id=${taskId}`),
+              ]);
+              return false;
+            }
             runAfterSuccess([
-              () => writeRemembered(browserStorage(), remembered.fields, remembered.controls),
+              () => writeRemembered(browserStorage(), remembered, refinementControls),
+              () => setRecentElements(rememberElements(browserStorage(), checkElements(values.elements).symbols)),
               () => form.resetFields(),
               () => { autoElements.current = null; autoFormulas.current = null; },
               () => setCloneSource(null),
@@ -710,7 +832,8 @@ function Submission() {
                 else if (phaseSet) { form.setFieldsValue({ analysis_mode: 'known_mixture' }); setAnalysisMode('known_mixture'); }
               },
               () => (data.warnings || []).forEach(item => message.warning(item.message, 10)),
-              () => message.success('The refinement task was submitted.'),
+              () => { if (taskId != null) setSubmittedTasks(list => [{ id: taskId, name: patternName }, ...list].slice(0, 3)); },
+              () => message.success(taskId != null ? `Analysis submitted — Task ${taskId}` : 'Analysis submitted'),
             ]);
             return false;
           }
@@ -721,7 +844,7 @@ function Submission() {
               title: 'The selected wavelength differs from the file',
               content: `${mismatch.filename ? `${mismatch.filename}: ` : ''}${mismatch.message} Submit with the selected wavelength anyway?`,
               okText: 'Submit anyway',
-              cancelText: 'Go back and check',
+              cancelText: "Don't submit",
               onOk() {
                 setSpinning(true);
                 return send(true)
@@ -736,14 +859,34 @@ function Submission() {
           return false;
         });
     };
+    const go = () => send(false)
+      .then(waiting => { if (!waiting) finish(); }) // true: the wavelength dialog finishes it
+      .catch(error => { if (error.name !== 'AbortError') setMsg(String(error)); finish(); })
+      .finally(() => setSpinning(false));
+    // A routine run starts at once (the Run card already shows what will run); a series or a long
+    // estimate first says what will run and for how long.
+    const runtime = estimate?.runtime_s;
+    const long = ['long', 'very_long'].includes(estimate?.level);
+    if (confirmed || (!seriesMode && !long)) {
+      go();
+      return done;
+    }
+    const fileCount = (values.series_files || []).length;
     confirm({
-      title: seriesMode ? `Submit ${(values.series_files || []).length} patterns as one series?` : 'Do you want to submit the task?',
-      onOk() {
-        return send(false)
-          .then(waiting => { if (!waiting) finish(); }) // true: the wavelength dialog finishes it
-          .catch(error => { if (error.name !== 'AbortError') setMsg(String(error)); finish(); })
-          .finally(() => setSpinning(false));
-      },
+      title: seriesMode ? `Run a series of ${fileCount} patterns?` : `Run a long analysis${runtime ? ` (typically ${formatDuration(runtime.expected)})` : ''}?`,
+      width: 520,
+      content: <dl className="dara-confirm-summary">
+        <dt>Mode</dt><dd>{MODE_LABELS[values.analysis_mode]}</dd>
+        <dt>{seriesMode ? 'Series' : 'Pattern'}</dt><dd>{seriesMode ? `${values.series_name} · ${fileCount} files` : patternName}</dd>
+        {checkElements(values.elements).symbols.length ? <><dt>Elements</dt><dd>{checkElements(values.elements).symbols.join(', ')}</dd></> : null}
+        {splitList(values.precursor_formulas).length ? <><dt>{FORMULA_LABELS[values.analysis_mode]}</dt><dd>{splitList(values.precursor_formulas).join(', ')}</dd></> : null}
+        {estimate?.candidates?.expected_after_dedup != null ? <><dt>Candidates</dt><dd>{`about ${estimate.candidates.expected_after_dedup}`}</dd></> : null}
+        {runtime ? <><dt>Run time</dt><dd>{`${formatDuration(runtime.low)}–${formatDuration(runtime.high)}, typically ${formatDuration(runtime.expected)}${seriesMode ? ' per file' : ''}`}</dd></> : null}
+        {estimate?.suggestions?.length ? <><dt>To shorten</dt><dd>{estimate.suggestions[0]}</dd></> : null}
+      </dl>,
+      okText: seriesMode ? `Run series (${fileCount} files)` : 'Run analysis',
+      cancelText: 'Not now',
+      onOk: go,
       onCancel() { abortControl.abort(); setSpinning(false); finish(); },
     });
     return done;
@@ -753,7 +896,7 @@ function Submission() {
     ? 'Predict products from precursors, temperature, and atmosphere, then fit the XRD pattern.'
     : analysisMode === 'known_mixture'
       ? 'Every listed phase is refined together; DARA picks the best database structure for each. Unlisted impurities or products are not searched.'
-      : 'Search plausible phases in the selected element system; expected formulas are prioritized.';
+      : 'Search plausible phases in the selected element system, then refine them with Rietveld; expected formulas are prioritized.';
 
   const instrumentLabel = name => (instrumentDetails[name]
     ? `${instrumentDetails[name].label} — ${instrumentDetails[name].verified ? 'operator verified' : 'unverified'}`
@@ -764,8 +907,43 @@ function Submission() {
     ? (seriesCount ? `${seriesCount} files (series)` : missing('No files selected'))
     : watchedPattern?.name
       || (cloneSource ? `${cloneSource.filename} (from Task ${cloneSource.source_task_id})` : missing('No file selected'));
-  const elementSummary = splitList(watchedElements).join(', ');
+  const elementSummary = elementCheck.symbols.join(', ');
   const formulaSummary = splitList(watchedPrecursors).join(', ');
+  // The file was recorded with another anode than the one selected (from the inspection; a lab anode only).
+  const recordedRadiation = !seriesMode && !synchrotron ? patternInspection?.recommended_wavelength : null;
+  const wavelengthWarning = recordedRadiation && watchedWavelengthLab && recordedRadiation !== watchedWavelengthLab
+    ? { recorded: recordedRadiation, chosen: watchedWavelengthLab } : null;
+  const useRecorded = recorded => {
+    if (!WAVELENGTHS.some(item => item[0] === recorded)) return;
+    form.setFieldsValue({ wavelength_lab: recorded });
+    quick.start();
+  };
+  const fileChemistry = patternInspection?.filename_chemistry;
+  const unrecognised = fileChemistry ? unrecognisedTokens(patternInspection.filename, fileChemistry) : [];
+  const offeredFormulas = analysisMode === 'known_mixture' && !phaseSet && fileChemistry?.formulas?.length
+    && splitList(watchedPrecursors).join(', ') !== fileChemistry.formulas.join(', ') ? fileChemistry.formulas : null;
+  // Series: the files whose names point to other elements than the ones every file runs with.
+  const seriesItems = seriesMode ? (seriesFiles || []) : [];
+  const seriesOrder = Object.fromEntries((seriesPreview?.items?.length ? seriesPreviewRows(seriesPreview) : []).map(row => [row.filename, row]));
+  const seriesRows = seriesItems.map(item => {
+    const data = seriesInspections[fileKey(item)];
+    const order = seriesOrder[item.name];
+    const notes = data?.error ? [data.error] : data ? [
+      ...qualityAlertItems(data).filter(note => note.type !== 'info').map(note => note.message),
+      ...(!synchrotron && data.recommended_wavelength && watchedWavelengthLab && data.recommended_wavelength !== watchedWavelengthLab
+        ? [`Recorded with ${data.recommended_wavelength}`] : []),
+    ] : [];
+    return {
+      key: fileKey(item), filename: item.name, order: order?.order ?? null, variableText: order?.variableText ?? '—',
+      pending: !data, elements: data?.filename_chemistry?.elements || [],
+      instrument: data ? (data.profile_suggestion?.profile || data.metadata?.instrument_system || '—') : '…',
+      range: Number.isFinite(data?.two_theta_min) && Number.isFinite(data?.two_theta_max) ? `${data.two_theta_min.toFixed(1)}–${data.two_theta_max.toFixed(1)}°` : '—',
+      notes,
+    };
+  }).sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity));
+  const usedElements = elementCheck.symbols.length ? elementCheck.symbols
+    : [...new Set(splitList(watchedPrecursors).flatMap(formula => formula.match(/[A-Z][a-z]?/g) || []))];
+  const otherChemistry = seriesRows.filter(row => row.elements.some(symbol => !usedElements.includes(symbol)));
   const wavelengthSummary = synchrotron
     ? (watchedWavelengthSync ? `${watchedWavelengthSync} Å (synchrotron)` : missing('wavelength not set'))
     : (watchedWavelengthLab || 'Cu');
@@ -773,14 +951,24 @@ function Submission() {
     ? `2θ ${watchedThetaMin ?? 'start'}–${watchedThetaMax ?? 'end'}°`
     : 'measured 2θ range';
   const selected = instrumentDetails[selectedInstrument];
-  const quickReady = !!watchedPattern && (splitList(watchedElements).length > 0 || splitList(watchedPrecursors).length > 0);
+  const hasChemistry = elementCheck.symbols.length > 0 || splitList(watchedPrecursors).length > 0;
+  const unreadable = Boolean(!seriesMode && watchedPattern && patternInspection?.error);
+  const quickReady = Boolean(watchedPattern || cloneSource) && !unreadable && !elementCheck.error && hasChemistry;
+  const quickNote = !watchedPattern && !cloneSource ? 'Needs a pattern'
+    : unreadable ? 'The pattern could not be read'
+    : elementCheck.error ? `Fix the elements: ${elementCheck.error}`
+      : !hasChemistry ? 'Needs the elements or expected formulas'
+        : quick.ranked ? 'Ranked: open to pick the phases' : 'Ranks reference structures; you pick the phases';
+  const runtimeText = estimate?.runtime_s?.expected ? `about ${formatDuration(estimate.runtime_s.expected)}${seriesMode ? ' per file' : ''}` : null;
   const msgAlert = msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null;
 
   return (
     <Layout hasSider={false} title="Submit">
       {/* The workspace replaces the setup on screen; the form stays mounted with its file and values. */}
       {quick.shown ? <QuickRankingWorkspace quick={quick} onRefine={refineRanked} onIdentify={saveIdentification} alert={msgAlert}
-        context={[watchedPattern?.name, elementSummary && `Elements ${elementSummary}`, formulaSummary && `Formulas ${formulaSummary}`,
+        mismatch={wavelengthWarning} onUseRecorded={useRecorded}
+        context={[watchedPattern?.name || (cloneSource ? `${cloneSource.filename} (stored with Task ${cloneSource.source_task_id})` : null),
+          elementSummary && `Elements ${elementSummary}`, formulaSummary && `${FORMULA_LABELS[analysisMode]} ${formulaSummary}`,
           <>Radiation {wavelengthSummary}</>, rangeSummary]} /> : null}
       <Container hidden={quick.shown}>
         <h1 className="dara-sr-only">New analysis</h1>
@@ -796,6 +984,19 @@ function Submission() {
             setAnalysisMode(values.analysis_mode);
             if (Object.prototype.hasOwnProperty.call(changed, 'elements')) autoElements.current = null;
             if (Object.prototype.hasOwnProperty.call(changed, 'precursor_formulas')) autoFormulas.current = null;
+            if (Object.prototype.hasOwnProperty.call(changed, 'analysis_mode')) {
+              // File-name formulas are filled in only as expected formulas or precursors; in
+              // Known-phase refinement they are offered instead (often the precursors of a product).
+              const named = (patternInspection?.filename_chemistry?.formulas || []).join(', ');
+              const current = (values.precursor_formulas || '').trim();
+              if (changed.analysis_mode === 'known_mixture' && autoFormulas.current !== null && current === autoFormulas.current) {
+                form.setFieldValue('precursor_formulas', '');
+                autoFormulas.current = null;
+              } else if (changed.analysis_mode !== 'known_mixture' && named && !current) {
+                form.setFieldValue('precursor_formulas', named);
+                autoFormulas.current = named;
+              }
+            }
           }}
         >
           <div className="dara-submit-main">
@@ -835,24 +1036,31 @@ function Submission() {
                     rules={[{ required: true, type: 'array', min: 2, message: 'Please add at least two XRD patterns.' }]}
                     tooltip="XRDML is recommended: its acquisition metadata can select the closest instrument profile and wavelength automatically.">
                     <Dragger multiple maxCount={MAX_SERIES_FILES} beforeUpload={() => false} onChange={onSeriesFilesChange}
-                      accept=".xy,.xye,.xrdml,.raw,.rasx,.txt,.scn,.ras,.brml,.csv,.dat,.asc">
+                      showUploadList={!seriesRows.length} accept={PATTERN_ACCEPT}>
                       <p className="ant-upload-drag-icon"><UploadOutlined /></p>
                       <p className="ant-upload-text">Select all measured XRD files of the series</p>
                       <p className="ant-upload-hint">2 to {MAX_SERIES_FILES} files with the same format and acquisition settings</p>
                     </Dragger>
                   </Form.Item>
                   {seriesPreview?.error ? <Alert type="warning" showIcon message="Series order preview unavailable" description={seriesPreview.error} /> : null}
-                  {seriesPreview?.items?.length ? (
+                  {otherChemistry.length ? <Alert type="warning" showIcon
+                    message={`${otherChemistry.length} of ${seriesRows.length} file names point to other elements than ${usedElements.join(', ') || 'the ones entered'}`}
+                    description={`${otherChemistry.map(row => `${row.filename} (${row.elements.filter(symbol => !usedElements.includes(symbol)).join(', ')})`).join('; ')}. All files run with the listed elements; add the missing elements, or submit the files of the other chemical system as their own series.`} /> : null}
+                  {seriesRows.length ? (
                     <div style={{ marginBottom: 16 }}>
-                      <div className="dara-subhead">Series order preview</div>
-                      <Table size="small" pagination={false} rowKey="filename" dataSource={seriesPreviewRows(seriesPreview)}
+                      <div className="dara-subhead">Files</div>
+                      <Table size="small" pagination={false} rowKey="key" dataSource={seriesRows} scroll={{ x: 'max-content' }}
                         columns={[
-                          { title: 'Order', dataIndex: 'order', width: 80 },
-                          { title: 'File', dataIndex: 'filename' },
-                          { title: seriesPreview.unit ? `Variable (${seriesPreview.unit})` : 'Variable', dataIndex: 'variableText' },
+                          ...(seriesPreview?.items?.length ? [{ title: 'Order', dataIndex: 'order', width: 64, className: 'dara-num' }] : []),
+                          { title: 'File', dataIndex: 'filename', render: (name, row) => <span style={{ whiteSpace: 'nowrap' }}>{name}{row.pending ? <span className="dara-dim"> · reading…</span> : null}</span> },
+                          ...(seriesPreview?.items?.length ? [{ title: seriesPreview.unit ? `Variable (${seriesPreview.unit})` : 'Variable', dataIndex: 'variableText' }] : []),
+                          { title: 'Elements in name', dataIndex: 'elements', render: list => (list.length ? list.join(', ') : '—') },
+                          { title: 'Instrument', dataIndex: 'instrument' },
+                          { title: '2θ', dataIndex: 'range', className: 'dara-num' },
+                          { title: 'Notes', dataIndex: 'notes', width: 220, render: notes => (notes.length ? <Typography.Text type="warning" title={notes.join('\n')}>{notes[0]}{notes.length > 1 ? ` (+${notes.length - 1})` : ''}</Typography.Text> : '—') },
                         ]} />
                       <Typography.Text type="secondary">
-                        Files are analysed independently with identical settings; the variable is parsed from the file names for plotting only.
+                        Files are analysed independently with identical settings and the listed elements; the variable is parsed from the file names for plotting only.
                       </Typography.Text>
                     </div>
                   ) : null}
@@ -860,14 +1068,29 @@ function Submission() {
               ) : (
                 <Form.Item label={cloneSource ? 'Replacement pattern (optional)' : 'XRD pattern'} name="pattern_file" rules={[{ required: !cloneSource, message: 'Please upload an XRD pattern.' }]}
                   tooltip="XRDML is recommended: its acquisition metadata can select the closest instrument profile and wavelength automatically.">
-                  <Dragger maxCount={1} beforeUpload={() => false} onChange={inspectPattern}
-                    accept=".xy,.xye,.xrdml,.raw,.rasx,.txt,.scn,.ras,.brml,.csv,.dat,.asc">
-                    <p className="ant-upload-drag-icon"><UploadOutlined /></p>
-                    <p className="ant-upload-text">Start by selecting the measured XRD file</p>
-                    <p className="ant-upload-hint">xrdml (metadata-aware) / xy(e) / txt / csv / dat / asc / ras / rasx / brml / raw</p>
-                  </Dragger>
+                  {watchedPattern ? (
+                    // After a file is chosen the drop zone gives way to the file and its scan.
+                    <div className="dara-file-row">
+                      <FileOutlined aria-hidden="true" />
+                      <span className="name" title={watchedPattern.name}>{watchedPattern.name}</span>
+                      {Number.isFinite(uploadFile(watchedPattern)?.size) ? <span className="meta">{`${Math.max(1, Math.round(uploadFile(watchedPattern).size / 1024)).toLocaleString()} KB`}</span> : null}
+                      <Upload showUploadList={false} beforeUpload={() => false} onChange={inspectPattern} accept={PATTERN_ACCEPT}>
+                        <Button size="small">Change…</Button>
+                      </Upload>
+                      <Button size="small" onClick={removePattern}>Remove</Button>
+                    </div>
+                  ) : (
+                    <Dragger maxCount={1} beforeUpload={() => false} onChange={inspectPattern} accept={PATTERN_ACCEPT}>
+                      <p className="ant-upload-drag-icon"><UploadOutlined /></p>
+                      <p className="ant-upload-text">{cloneSource ? 'Select a replacement file (optional)' : 'Start by selecting the measured XRD file'}</p>
+                      <p className="ant-upload-hint">xrdml (metadata-aware) / xy(e) / txt / csv / dat / asc / ras / rasx / brml / raw</p>
+                    </Dragger>
+                  )}
                 </Form.Item>
               )}
+              {!seriesMode && watchedPattern && patternInspection?.preview ? <div style={{ margin: '-8px 0 16px' }}>
+                <PatternPreview points={patternInspection.preview} start={watchedThetaMin} end={watchedThetaMax} excluded={watchedExcluded} />
+              </div> : null}
               {inspectingPattern ? (
                 <Alert type="info" showIcon message="Reading pattern and acquisition metadata..." />
               ) : patternInspection?.error ? (
@@ -901,13 +1124,15 @@ function Submission() {
                   ))}
                 </div>
               ) : null}
-              {patternInspection?.filename_chemistry ? (
+              {fileChemistry && !seriesMode ? (
                 <Alert type="info" showIcon
-                  message={patternInspection.filename_chemistry.elements.length
-                    ? `Elements recognised from the file name: ${patternInspection.filename_chemistry.elements.join(', ')}`
-                    : 'No unambiguous chemical formula in the file name. Enter the elements manually.'}
-                  description={patternInspection.filename_chemistry.elements.length
-                    ? `Formulas: ${patternInspection.filename_chemistry.formulas.join(', ')}. ${patternInspection.elementsAutoApplied ? 'Added to Included elements.' : 'Existing element entries were kept.'} ${patternInspection.formulasAutoApplied ? 'Added to the phase list.' : 'The phase list was kept.'} A suggestion from the file name only; compare it with the actual sample. Temperatures, times and single-letter symbols are never filled in.`
+                  message={fileChemistry.elements.length
+                    ? `Elements recognised from the file name: ${fileChemistry.elements.join(', ')}${unrecognised.length ? ` · not recognised: ${unrecognised.join(', ')}` : ''}`
+                    : `No unambiguous chemical formula in the file name${unrecognised.length ? ` (not recognised: ${unrecognised.join(', ')})` : ''}. Enter the elements.`}
+                  description={fileChemistry.elements.length
+                    ? `Formulas: ${fileChemistry.formulas.join(', ')}. ${patternInspection.elementsAutoApplied ? 'Added to Elements.' : 'Existing element entries were kept.'} ${
+                      patternInspection.formulasAutoApplied ? `Added to ${FORMULA_LABELS[analysisMode] || 'the formulas'}.` : 'The formula list was kept.'} ${
+                      unrecognised.length ? `${unrecognised.join(', ')} ${unrecognised.length === 1 ? 'was' : 'were'} not read as chemistry: add any element they stand for. ` : ''}A suggestion from the file name only; compare it with the actual sample. Temperatures, times and single-letter symbols are never filled in.`
                     : 'Example: BiFeO3_800C_60min.xrdml → Bi, Fe, O. Check single-letter symbols such as C or S and ambiguous names before entering them.'}
                 />
               ) : null}
@@ -920,10 +1145,25 @@ function Submission() {
               </Form.Item>
               <Alert type={analysisMode === 'known_mixture' ? 'warning' : 'info'} showIcon message={modeMessage} />
               <div className="dara-field-row wide-cells">
-                <Form.Item label="Included elements" name="elements"
-                  rules={[{ required: analysisMode === 'elemental', message: 'Please input element symbols.' }]}
-                  tooltip="Example: In, La, Ti, O. In other modes they can be derived from formulas.">
-                  <Input placeholder="In, La, Ti, O" />
+                <Form.Item label="Elements" name="elements" dependencies={['precursor_formulas']}
+                  rules={[
+                    { validator: (_, value) => (checkElements(value).error ? Promise.reject(new Error(checkElements(value).error)) : Promise.resolve()) },
+                    // Search-match and Phase search + Rietveld take the same input: elements, or formulas to derive them from.
+                    ({ getFieldValue }) => ({ validator: (_, value) => (getFieldValue('analysis_mode') === 'elemental' && !checkElements(value).symbols.length
+                      && !splitList(getFieldValue('precursor_formulas')).length ? Promise.reject(new Error('Enter the elements, or the expected formulas.')) : Promise.resolve()) }),
+                  ]}
+                  tooltip="Symbols separated by commas or spaces, e.g. In, La, Ti, O; case is corrected where the symbol is unambiguous. Left empty, they are derived from the formulas."
+                  extra={recentElements.length ? <span className="dara-recent">Recent:{recentElements.slice(0, 5).map(set => (
+                    <Button key={set.join()} type="link" size="small" onClick={() => {
+                      form.setFieldsValue({ elements: set.join(', ') });
+                      autoElements.current = null;
+                      form.validateFields(['elements']).catch(() => {});
+                    }}>{set.join(', ')}</Button>))}</span> : null}>
+                  <Input placeholder="In, La, Ti, O" onBlur={() => {
+                    const value = form.getFieldValue('elements') || '';
+                    const { text } = checkElements(value);
+                    if (value.trim() && text !== value) form.setFieldValue('elements', text);
+                  }} />
                 </Form.Item>
                 {phaseSet ? (
                   <Form.Item label="Phases to refine">
@@ -937,9 +1177,14 @@ function Submission() {
                     <a onClick={clearPhaseSet}>Enter formulas instead</a>
                   </Form.Item>
                 ) : (
-                  <Form.Item label={analysisMode === 'known_mixture' ? 'Phases to refine' : 'Precursor / expected formulas'}
+                  <Form.Item label={FORMULA_LABELS[analysisMode] || 'Expected formulas'}
                     name="precursor_formulas" rules={[{ required: analysisMode !== 'elemental', message: 'Please input chemical formulas.' }]}
-                    tooltip="In Phase identification this is optional, but listed phases are guaranteed candidates. Optional amounts enable the mass-balance check: a molar coefficient before the formula (Fe2O3, 2 TiO2) or a weighed mass after a colon (In2O3:0.3022g, TiO2:0.2004g).">
+                    tooltip="In Phase search + Rietveld this is optional, but listed phases are guaranteed candidates. Optional amounts enable the mass-balance check: a molar coefficient before the formula (Fe2O3, 2 TiO2) or a weighed mass after a colon (In2O3:0.3022g, TiO2:0.2004g)."
+                    extra={offeredFormulas ? <span className="dara-recent">From the file name:
+                      <Button type="link" size="small" onClick={() => {
+                        form.setFieldsValue({ precursor_formulas: offeredFormulas.join(', ') });
+                        form.validateFields(['precursor_formulas', 'elements']).catch(() => {});
+                      }}>{`Use ${offeredFormulas.join(', ')}`}</Button></span> : null}>
                     <Input placeholder="In2O3, La(OH)3, TiO2" />
                   </Form.Item>
                 )}
@@ -968,7 +1213,7 @@ function Submission() {
               <div id="dara-standard-body" hidden={!standardOpen}>
                 <div className="dara-field-row wide-cells">
                   <Form.Item label="Standard formula" name="standard_formula"
-                    tooltip="A crystalline phase you mixed into the sample, for example Si. Its elements are added to the included elements."
+                    tooltip="A crystalline phase you mixed into the sample, for example Si. Its elements are added to Elements."
                     rules={[({ getFieldValue }) => ({ validator: (_, value) => (getFieldValue('standard_wt') != null && !(value || '').trim()
                       ? Promise.reject(new Error('Enter the formula of the standard.')) : Promise.resolve()) })]}>
                     <AutoComplete placeholder="Si" allowClear options={COMMON_STANDARDS.map(value => ({ value }))} />
@@ -1023,8 +1268,10 @@ function Submission() {
                 description={<>{selected.geometry} · {selected.radiation}<br />{selected.notes}</>} /> : null}
               <div className="dara-field-row">
                 {!synchrotron ? (
-                  <Form.Item label="Wavelength" name="wavelength_lab" rules={[{ required: true }]}>
-                    <Select options={WAVELENGTHS.map(item => ({ value: item[0], label: `${item[0]} (${item[1].toFixed(4)} Å)` }))} />
+                  <Form.Item label="Radiation" name="wavelength_lab" rules={[{ required: true }]}
+                    validateStatus={wavelengthWarning ? 'warning' : undefined}
+                    help={wavelengthWarning ? `The file was recorded with ${wavelengthWarning.recorded}; you selected ${wavelengthWarning.chosen}.` : undefined}>
+                    <Select options={WAVELENGTHS.map(item => ({ value: item[0], label: `${item[0]} Kα1 (${item[1].toFixed(4)} Å)` }))} />
                   </Form.Item>
                 ) : (
                   <Form.Item label="Wavelength (Å)" name="wavelength_sync_a" rules={[{ required: true, pattern: /^\d+(\.\d+)?$/, message: 'Wavelength in Å, e.g. 0.7293' }]}>
@@ -1081,31 +1328,43 @@ function Submission() {
               <dl className="dara-run-summary">
                 <dt>Pattern</dt><dd>{patternSummary}</dd>
                 <dt>Mode</dt><dd>{MODE_LABELS[analysisMode] || analysisMode}</dd>
-                <dt>Elements</dt><dd>{elementSummary || missing(analysisMode === 'elemental' ? 'Not entered' : 'From formulas')}</dd>
-                {formulaSummary ? <><dt>{analysisMode === 'known_mixture' ? 'Phases' : 'Formulas'}</dt><dd>{formulaSummary}</dd></> : null}
+                <dt>Elements</dt><dd>{elementCheck.error ? <span className="invalid">{elementCheck.error}</span>
+                  : elementSummary || missing(formulaSummary || analysisMode !== 'elemental' ? 'From the formulas' : 'Not entered')}</dd>
+                {formulaSummary ? <><dt>{FORMULA_LABELS[analysisMode] || 'Formulas'}</dt><dd>{formulaSummary}</dd></> : null}
                 <dt>Instrument</dt><dd>{selectedInstrument ? instrumentLabel(selectedInstrument) : missing('Not selected')}</dd>
                 <dt>Radiation</dt><dd>{wavelengthSummary} · {rangeSummary}</dd>
               </dl>
               {estimate || estimating
                 ? <EstimateAlert estimate={estimate} loading={estimating} prefilter={watchedPrefilter !== false} />
-                : <p className="dara-run-hint">{analysisMode === 'elemental' ? 'Enter elements or formulas' : 'Enter formulas'} to see the candidate and run-time estimate.</p>}
+                : <p className="dara-run-hint">{elementCheck.error ? `Fix the elements to see the estimate: ${elementCheck.error}.`
+                  : estimateFailed ? 'The candidate and run-time estimate is unavailable.'
+                    : `${analysisMode === 'elemental' ? 'Enter elements or formulas' : 'Enter formulas'} to see the candidate and run-time estimate.`}</p>}
               {seriesMode ? null : <QuickRankingSummary quick={quick} />}
               {quick.shown ? null : msgAlert}
-              {/* Two ways to run: a quick search-match shortlist, or the full analysis (the primary action). */}
+              {/* Two ways to run, HighScore's order: search-match first (seconds, the primary action),
+                  then the full automatic analysis. Each label carries its time cost. */}
               <div className={`dara-run-actions${seriesMode ? ' single' : ''}`}>
                 {seriesMode ? null : <div>
-                  <Button className="dara-run-search" size="large" block onClick={quick.open} disabled={!quickReady}>Search-match</Button>
-                  <p className="dara-run-action-note">{quickReady ? 'Rank reference structures against the pattern in seconds' : 'Needs a pattern and its elements or formulas'}</p>
+                  <Button type="primary" size="large" block onClick={openSearchMatch} disabled={!quickReady}>
+                    {quick.ranked ? 'Open search-match' : <>Search-match<span className="cost">· seconds</span></>}
+                  </Button>
+                  <p className="dara-run-action-note">{quickNote}</p>
                 </div>}
                 <div>
-                  <Button type="primary" size="large" block onClick={onSubmit} loading={spinning}
+                  <Button type={seriesMode ? 'primary' : 'default'} size="large" block onClick={() => onSubmit()} loading={spinning}
                     // Nothing to analyse yet: no pattern (a rerun reuses the original one) and no series files.
                     disabled={spinning || loadingClone || (phaseSet && !phaseSet.phases) || (seriesMode ? !seriesCount : !watchedPattern && !cloneSource)}>
-                    {seriesMode ? `Submit series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Submit'}
+                    {seriesMode ? `Run series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Run analysis'}
+                    {runtimeText ? <span className="cost">{`· ${runtimeText}`}</span> : null}
                   </Button>
-                  <p className="dara-run-action-note">Full phase search with Rietveld refinement</p>
+                  <p className="dara-run-action-note">{MODE_LABELS[analysisMode]}, automatic</p>
                 </div>
               </div>
+              {submittedTasks.length ? <ul className="dara-run-submitted" aria-label="Submitted from this page">
+                {submittedTasks.map(task => <li key={task.id}>
+                  Submitted: <a href={`/task/?id=${task.id}`}>{`Task ${task.id}`}</a>{task.name ? ` · ${task.name}` : ''}
+                </li>)}
+              </ul> : null}
             </Card>
 
             <section className="dara-card dara-card-advanced" aria-label="Advanced options">
