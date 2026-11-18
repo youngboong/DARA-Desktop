@@ -16,7 +16,9 @@ Per candidate (all numpy, no BGMN):
 5. ``score = E * (1 - 5 |s - 1|)``.
 6. ``matched``/``expected``: strong peaks whose observed window maximum reaches half the model.
 7. Greedy combination: subtract the best model, re-score, at most 3 more steps, stop below a
-   gain of 0.03; a pick with gain below 0.08 is "weak".
+   gain of 0.03 or, as an analyst stops searching again, when no significant unexplained peak
+   is left (:func:`residual_maxima`, the rule of :func:`residual_step`); a pick with gain below
+   0.08 is "weak".
 8. Grouping: same (formula, space group) is one row; same formula with another space group is a
    "polymorph"; a composition within 3.5 at% of a higher row is a "variant of X".
 
@@ -728,7 +730,7 @@ def rank(
     rows = score_all(set())
     ranking = [_row_payload(i + 1, row, lam1, profile.lo, profile.hi) for i, row in enumerate(rows[:max_rows])]
 
-    combination, picked, explained_total = [], set(), 0.0
+    combination, picked, explained_total, lines = [], set(), 0.0, []
     # a residual step may regroup to another member; report the ranking row's representative
     representative = {row["key"]: row["candidate"] for row in rows}
     stage_rows = rows
@@ -752,7 +754,10 @@ def rank(
             "flags": list(top["flags"]) + (["weak"] if gain < WEAK_GAIN else []),
         })
         picked.add(top["key"])
+        lines.append(_line_positions(ctx, top["candidate"], top["best"]))
         _subtract(ctx, top["best"]["model"])
+        if not residual_maxima(ctx, np.concatenate(lines)):
+            break  # as an analyst stops searching again: no significant unexplained peak is left
     picked_sources = {c["source"] for c in combination}
     for row in ranking:
         if row["source"] in picked_sources:

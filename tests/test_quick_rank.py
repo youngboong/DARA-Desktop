@@ -452,3 +452,20 @@ def test_suggested_structure_with_unphysical_density_is_left_out(monkeypatch):
     assert [row["source"] for row in result["ranking"]] == ["cod:2"]
     assert [step["source"] for step in result["combination"]] == ["cod:2"]
     assert any("unphysical density (cod:1)" in text for text in result["caveats"])
+
+
+def test_combination_stops_when_no_significant_peak_is_left_unexplained():
+    # a dense decoy that only fits the background noise would still pass the gain stop (>= STOP_GAIN)
+    tt = np.arange(12.5, 79, 1.37)
+    decoy = _cand("cod:5", "Ee", list(L1 / (2 * np.sin(np.radians(tt / 2)))), [1.0] * len(tt))
+    cands = [_cand("cod:1", "Aa", A_D, A_I), _cand("cod:2", "Bb", B_D, B_I), _cand("cod:3", "Cc", C_D, C_I), decoy]
+    x, y = _pattern([(A_D, A_I, 2000, 1.0), (B_D, B_I, 1200, 1.0)])
+    out = qr.rank(x, y, cands)
+    assert [c["formula"] for c in out["combination"]] == ["Aa", "Bb"]
+    left = qr.residual_step(x, y, cands, ["cod:1", "cod:2"])  # the same rule, shared
+    assert left["unexplained_peaks"] == [] and left["next"][0]["formula"] == "Ee"
+    assert left["next"][0]["explained"] >= qr.STOP_GAIN  # the gain alone would have picked it
+    assert "picked" not in next(r for r in out["ranking"] if r["formula"] == "Ee")["flags"]
+    # a real minor phase leaves its peaks unexplained, so the search goes on to it
+    x, y = _pattern([(A_D, A_I, 20000, 1.0), (B_D, B_I, 12000, 1.0), (C_D, C_I, 3000, 1.0)])
+    assert [c["formula"] for c in qr.rank(x, y, cands)["combination"]] == ["Aa", "Bb", "Cc"]
