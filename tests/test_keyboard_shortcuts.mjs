@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { MOUSE_HELP, SHORTCUT_HELP, actionForKey, isTypingTarget } from '../src/dara/server/ui/src/components/keyboardShortcuts.mjs';
+import { MOUSE_HELP, SHORTCUT_HELP, actionForKey, isTypingTarget, sampleStep } from '../src/dara/server/ui/src/components/keyboardShortcuts.mjs';
 
 const ctx = (extra = {}) => ({
   options: ['best', 0, 1, 'version:3'], current: 'best', phaseGroups: ['A', 'B', 'C'],
@@ -7,7 +7,14 @@ const ctx = (extra = {}) => ({
 });
 const key = (k, extra = {}) => ({ key: k, target: { tagName: 'DIV' }, ...extra });
 
-assert.equal(SHORTCUT_HELP.length, 6);
+assert.equal(SHORTCUT_HELP.length, 7);
+// samples of the Results list: [ / ] or Alt+arrows; plain arrows stay with the fits, typing is never taken
+assert.equal(sampleStep({ key: ']' }), 'next');
+assert.equal(sampleStep({ key: '[' }), 'prev');
+assert.equal(sampleStep({ key: 'ArrowLeft', altKey: true }), 'prev');
+assert.equal(sampleStep({ key: 'ArrowRight' }), null);
+assert.equal(sampleStep({ key: ']', ctrlKey: true }), null);
+assert.equal(sampleStep({ key: ']', target: { tagName: 'INPUT' } }), null);
 assert.ok(SHORTCUT_HELP.every(row => row.keys && row.action));
 // The mouse rows describe the current plot navigation (box zoom, pan, fixed-step wheel).
 assert.ok(MOUSE_HELP.every(row => row.keys && row.action));

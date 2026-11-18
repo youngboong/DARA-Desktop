@@ -275,7 +275,9 @@ export function buildRefinementView(plot, {
   // The residual intensity never zooms: a box there is a 2θ band.
   if (layout.yaxis2) layout.yaxis2 = { ...layout.yaxis2, fixedrange: true };
   const narrow = Number.isFinite(plotWidth) && plotWidth > 0;
-  if (narrow && plotWidth < LEGEND_BELOW_WIDTH) {
+  // A legend the server already draws in rows above the plot stays there at any width: moving it
+  // under the 2θ axis when the Add phase drawer narrows the plot put it out of sight.
+  if (narrow && plotWidth < LEGEND_BELOW_WIDTH && layout.legend?.orientation !== 'h') {
     // Narrow plot (1366 px screen with the Add phase drawer open): a legend column would take a
     // third of the 2θ axis, so the legend goes in rows under the plot.
     // The bottom margin grows by the legend rows, and the legend sits at the bottom of the figure

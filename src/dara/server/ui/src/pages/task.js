@@ -2,7 +2,7 @@ import React from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
 import { Alert, Badge, Button, Checkbox, Col, Descriptions, Divider, Dropdown, Grid, Input, List, message, Modal, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
-import { ArrowDownOutlined, ArrowUpOutlined, DeleteOutlined, DownOutlined, DownloadOutlined, EditOutlined, EllipsisOutlined, InfoCircleOutlined, LineChartOutlined, SearchOutlined } from '@ant-design/icons';
+import { ArrowDownOutlined, ArrowUpOutlined, CopyOutlined, DeleteOutlined, DownOutlined, DownloadOutlined, EditOutlined, EllipsisOutlined, InfoCircleOutlined, LeftOutlined, LineChartOutlined, RightOutlined, SearchOutlined } from '@ant-design/icons';
 import Loadable from 'react-loadable'
 import parse from 'html-react-parser';
 import { gofTone, peakCountTone, toneColor } from '../components/statusTone.mjs';
@@ -14,11 +14,12 @@ import { crystalliteSizeCell, microstrainCell } from '../components/crystalliteS
 import { amountTag } from '../components/statusTags.mjs';
 import { knownPhaseNotes, mpFallbackNotes, phaseSetUrl } from '../components/knownPhases.mjs';
 import StatusTag from '../components/StatusTag';
-import { PhaseSelectionButton, ReviewPanel, TaskFailurePanel, downloadReport, useTaskReview } from '../components/ResultWorkflows';
+import { PhaseSelectionButton, RefinementControlsDialog, ReviewPanel, TaskFailurePanel, downloadReport, useTaskReview } from '../components/ResultWorkflows';
 import { TaskProgress } from '../components/PracticalControls';
 import ChemicalFormula from '../components/ChemicalFormula';
 import FitCautions from '../components/FitCautionsPanel';
-import { cautionSortValue, cautionTagColor, cautionTooltip, countCautions } from '../components/fitCautions.mjs';
+import { cautionDisplay, cautionRemedies, cautionSortValue, cautionTagColor, cautionTooltip, countCautions } from '../components/fitCautions.mjs';
+import { listContext, positionText, resultsHref, taskHref } from '../components/sampleNav.mjs';
 import { SMOOTH_WINDOWS, levelRank, missingCell, patternFiles, patternHref, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
 import { isIdentification, peakStatusText, phasesFoundText, refinedTasks, rirText, scherrerByPhase, sizeText } from '../components/identification.mjs';
 import { latticePercent, sourceInfo } from '../components/quickRanking.mjs';
@@ -39,19 +40,19 @@ import InternalStandardCard from '../components/InternalStandardCard';
 import BackgroundEditor, { BackgroundCurvePanel } from '../components/BackgroundEditor';
 import { addAnchor, anchorError, anchorLabel, curveWarnings, fitSeries, pchip, removeAnchor, seedAnchors } from '../components/backgroundAnchors.mjs';
 import useKeyboardShortcuts, { FIT_MODAL_CLASS, HELP_MODAL_CLASS } from '../components/useKeyboardShortcuts';
-import { MOUSE_HELP, SHORTCUT_HELP } from '../components/keyboardShortcuts.mjs';
+import { MOUSE_HELP, SHORTCUT_HELP, sampleStep } from '../components/keyboardShortcuts.mjs';
 import {
   collectHints, hintsPending, observedPeak, peakFromPlotClick, peakShapes, phaseGroupNames, previewTrace, significantPeaks, updatePeakSelection,
 } from '../components/peakSelection.mjs';
 import { noFitHints, searchOptionsText } from '../components/resultsList.mjs';
-import { colorPhaseTraces, compositionSegments, fillIndex, tidyFormula, trayLine } from '../components/composition.mjs';
+import { colorPhaseTraces, compositionSegments, fillIndex, fillKeys, tidyFormula, trayLine } from '../components/composition.mjs';
 import {
   BASELINE_LABEL, QUICK_CHECK_HINT, REFINE_ALL_FIRST, addedLabel, alternativeLink, alternativeOfVerdict, availableComparisonBase, baselineRequest, comparisonBase,
   deltaBaseText, deltaStrip, deltaText, leBailPhases, displayedCandidateOf, fitFromSearch, phaseSymbolLookup, searchWithFit,
   formulaOfPhase, isQuickCheck, knownDisplayFormula, needsBaseline, parseSelection, plotQuery, refineAllRequest, relabelPhaseTraces,
-  rememberDisplayFormulas, removeRequest,
+  rememberDisplayFormulas, removeManyRequest,
   referenceVariants, replacementOf, runText, selectOptionGroups, selectionLabel, spacegroupOfPhase, versionGone, versionPhaseOptions, versionReadyText,
-  weightSpread, NEAR_RWP_RATIO, phaseRecordLine } from '../components/versions.mjs';
+  weightSpread, NEAR_RWP_RATIO, phaseRecordLine, displayFormula, distinctPhaseLabel, formatSelection, formatSpaceGroup, phaseTableTsv } from '../components/versions.mjs';
 
 const { Text } = Typography;
 const HINT_POLL_MS = 3000;
@@ -181,11 +182,6 @@ const ResultTitleContainer = styled.div`
   align-items: center;
 `
 
-const Title = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-`
 
 
 const Plotly = Loadable({
@@ -265,8 +261,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   task_id, plot_id, excludedRanges = [], peaks = [], onPeakClick, previewSticks = null, onGroups, title = null, phaseColor = null, phaseLegend = null,
   // Background curve editing: {anchors, selected, onChange, onAdd, onRemove, onSelect, blocked(x)} or null.
   anchorEdit = null,
-  // Leaves the Phases / Peaks / Structure tabs in view under the workspace plot on a 900 px screen.
-  height = 'clamp(440px, 58vh, 1000px)', compact = false,
+  // Leaves the Phases / Peaks / Structure tab bar in view under the workspace plot, down to a 768 px screen.
+  height = 'clamp(320px, min(58vh, calc(100vh - 380px)), 1000px)', compact = false,
   // Display treatment of the observed trace ({kalpha2, smooth}) and its setter; null hides the control.
   display = null, onDisplayChange = null,
   // Told whether label editing is on, when the caller shows the hint (and pauses its own peak-click hint).
@@ -338,12 +334,23 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     setError('');
     setSelection({});
     setYRange(null);
-    setXRange(null);
+    // The 2θ zoom stays when another fit of the same pattern is shown (as in HighScore / Profex),
+    // unless the new fit does not cover it (another analysis range).
     if (onGroups) onGroups([]);
     if (task_id === undefined || plot_id === undefined) return;
     let active = true;
     loadPlot(task_id, plot_id)
-      .then(response => { if (active) { setPlot(response); if (onGroups) onGroups(phaseGroupNames(response)); } })
+      .then(response => {
+        if (!active) return;
+        // x can also arrive packed (Plotly's typed-array JSON): then the view clamps the kept range.
+        const xs = (response?.data || []).find(trace => !trace.meta && trace.name === 'Observed')?.x;
+        const observed = Array.isArray(xs) ? xs.filter(Number.isFinite) : [];
+        const covered = range => !observed.length
+          || (Math.min(...range) >= observed.reduce((a, b) => Math.min(a, b)) && Math.max(...range) <= observed.reduce((a, b) => Math.max(a, b)));
+        setXRange(range => (Array.isArray(range) && covered(range) ? range : null));
+        setPlot(response);
+        if (onGroups) onGroups(phaseGroupNames(response));
+      })
       .catch(error => { if (active) setError(error.message); });
     return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -510,7 +517,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   };
   return <>
     {/* The page preview draws the fit only; the workspace has the controls. */}
-    {compact ? null : <div className="dara-toolbar">
+    {compact ? null : <div className="dara-toolbar dara-plot-toolbar">
       {/* Axes | what is drawn | display treatment of the observed trace | view */}
       <div className="dara-toolbar-group" aria-label="Axes">
         <label className="dara-toolbar-item">
@@ -616,10 +623,9 @@ function parsePhaseReference(reference = '') {
   };
 }
 
+/** Short Hermann–Mauguin symbol (C12/c1 -> C2/c, P12_1/c1 -> P2₁/c), the one format of the page. */
 function SpaceGroupSymbol({ symbol }) {
-  // Monoclinic full symbols read better in short form: C12/c1 -> C2/c, P12_1/c1 -> P2_1/c.
-  const parts = String(symbol || '').replace(/^([A-Z])1(.+)1$/, '$1$2').split(/(_\d)/g).filter(Boolean);
-  return <>{parts.map((part, index) => part.startsWith('_') ? <sub key={index}>{part.slice(1)}</sub> : <React.Fragment key={index}>{part}</React.Fragment>)}</>;
+  return <>{formatSpaceGroup(symbol)}</>;
 }
 
 /** "COD 9007583" for `cod_9007583`; other database ids are shown as stored. */
@@ -659,9 +665,10 @@ function PhaseIdentity({ reference, formulaHtml, metadata, compact = false, show
 
   return (
     <span className="phase-identity" style={{ display: 'inline-flex', flexDirection: 'column', lineHeight: 1.35 }}>
-      <span className="phase-identity-primary" style={{ fontWeight: 600 }}>{primary}
-        {/* Compact rows still name the space group: candidates often differ only by polymorph. */}
-        {compact && phase.spaceGroup ? <span className="phase-identity-sg" style={{ fontWeight: 400, color: 'var(--dara-text-secondary)' }}>{' · '}{metadata?.spacegroup_symbol ? <SpaceGroupSymbol symbol={metadata.database_spacegroup_symbol || metadata.spacegroup_symbol} /> : `SG ${phase.spaceGroup}`}</span> : null}</span>
+      <span className="phase-identity-primary" style={{ fontWeight: 600 }}><span className="phase-identity-formula">{primary}</span>
+        {/* Compact rows still name the space group: candidates often differ only by polymorph. In a
+            narrow tray compartment it wraps out of sight as a whole instead of being cut. */}
+        {compact && phase.spaceGroup ? <span className="phase-identity-sg" style={{ fontWeight: 400, color: 'var(--dara-text-secondary)' }}>{' · '}{formatSpaceGroup(metadata?.database_spacegroup_symbol || metadata?.spacegroup_symbol, phase.spaceGroup)}{showDatabaseId && parsedPhase.databaseId ? ` · ${databaseLabel(parsedPhase.databaseId)}` : ''}</span> : null}</span>
       {!compact && secondary ? <span className="phase-identity-secondary" style={{ fontSize: '0.86em', color: 'var(--dara-text-secondary)' }}>{secondary}</span> : null}
     </span>
   );
@@ -749,7 +756,15 @@ function parameterText(name, parameter) {
   return value ? `${name} = ${value}` : null;
 }
 
-function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confidence = null, rowActions = null, spread = null, weightsRelative = false }) {
+/** "SPHAR4 · 0.93" of a phase refined with a preferred-orientation correction; null without one. */
+function orientationText(row) {
+  const po = row.preferred_orientation;
+  if (!po?.corrected) return null;
+  const mean = Number(po.mean_gewicht);
+  return `${po.model}${Number.isFinite(mean) ? ` · ${mean.toFixed(2)}` : ''}`;
+}
+
+function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confidence = null, rowActions = null, spread = null, weightsRelative = false, format = undefined }) {
   const dataSource = phases.map(phase => ({ phase, ...(details?.[phase] || {}) }));
   // Rows with the same formula and space group show their database id to tell them apart.
   const identityKey = phase => `${formulaOfPhase(phase)}_${spacegroupOfPhase(phase)}`;
@@ -758,22 +773,27 @@ function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confid
     title: <Tooltip title="Evidence-based assessment of whether each phase is supported by the data. Hover a tag for the reasons."><span>Verdict</span></Tooltip>,
     key: 'verdict', width: 120,
     sorter: (a, b) => levelRank(confidence.phases[a.phase]?.level) - levelRank(confidence.phases[b.phase]?.level),
-    render: (_, row) => <VerdictTag verdict={confidence.phases[row.phase]} /> }] : [];
+    render: (_, row) => <VerdictTag verdict={confidence.phases[row.phase]} format={format} /> }] : [];
+  // A quiet column, only when a phase of this fit was refined with a texture correction.
+  const orientationColumn = dataSource.some(row => orientationText(row)) ? [{
+    title: <Tooltip title="Preferred-orientation correction refined by BGMN: spherical harmonics of the stated order (SPHAR); the number is BGMN's mean correction factor MeanValue(GEWICHT). A strong correction can drive the weight fraction: compare with a fit without it (Refine › Refinement controls…).">
+      <span>Pref. orientation</span></Tooltip>,
+    key: 'orientation', render: (_, row) => orientationText(row) || <Text type="secondary">None</Text> }] : [];
   return <Table size="small" pagination={false} rowKey="phase" scroll={{ x: 'max-content' }} tableLayout="auto" dataSource={dataSource}
     columns={[
       { title: 'Phase', dataIndex: 'phase', width: 220,
         render: phase => <PhaseIdentity reference={phase} metadata={metadata?.[phase]} showDatabaseId={repeated.has(identityKey(phase))} /> },
       ...verdictColumn,
       { title: weightsRelative
-        ? <Tooltip title="Normalized over the Rietveld phases only: a Le Bail phase has no weight fraction, so these amounts are relative to each other. ± is the BGMN estimated standard deviation."><span>Quantity<div className="dara-th-note">relative to the Rietveld phases</div></span></Tooltip>
-        : <Tooltip title="Normalized over modeled crystalline phases; amorphous and unidentified material are excluded. ± is the BGMN estimated standard deviation, propagated after normalization."><span>Quantity</span></Tooltip>,
+        ? <Tooltip title="Normalized over the Rietveld phases only: a Le Bail phase has no weight fraction, so these amounts are relative to each other. ± is the BGMN estimated standard deviation."><span>wt% ± e.s.d.<div className="dara-th-note">relative to the Rietveld phases</div></span></Tooltip>
+        : <Tooltip title="Normalized over modeled crystalline phases; amorphous and unidentified material are excluded. ± is the BGMN estimated standard deviation, propagated after normalization."><span>wt% ± e.s.d.</span></Tooltip>,
         className: 'dara-num',
         render: (_, row) => {
           if (row.le_bail) return <StatusTag text="Le Bail" tooltip="Fitted by Le Bail: reflection intensities refined freely, so the phase has no weight fraction." />;
           if (row.weight_percent == null) return '—';
           const tag = amountTag(row, confidence?.phases?.[row.phase]?.weight_flag);
           const range = spread?.[formulaOfPhase(row.phase)];
-          return <span>{Number(row.weight_percent).toFixed(2)} wt%{row.weight_esd_percent == null ? '' : ` ± ${Number(row.weight_esd_percent).toFixed(2)}`}
+          return <span>{Number(row.weight_percent).toFixed(2)}{row.weight_esd_percent == null ? '' : ` ± ${Number(row.weight_esd_percent).toFixed(2)}`}
             {/* On its own line, so the right-aligned amounts keep one decimal column. */}
             {tag ? <div><StatusTag text={tag.text} tone={tag.tone} tooltip={tag.tooltip} /></div> : null}
             {/* Model dependence of the amount: the ± above is for this one fit only. */}
@@ -811,6 +831,7 @@ function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confid
             </span>)}
           </Space> : '—';
         } },
+      ...orientationColumn,
       { title: 'Density', className: 'dara-num', render: (_, row) => row.xray_density == null ? '—' : `${Number(row.xray_density).toFixed(3)} g/cm³` },
       { title: <Tooltip title="R factor of this phase's own reflections (BGMN Rphase); compares phases within one fit."><span>Rphase</span></Tooltip>, className: 'dara-num', render: (_, row) => row.rphase == null ? '—' : `${Number(row.rphase).toFixed(2)}%` },
       { title: 'Crystallite size', className: 'dara-num', render: (_, row) => {
@@ -879,13 +900,15 @@ function ShortcutHelp({ open, onClose }) {
   </Modal>;
 }
 
+// The Submit page's names of the modes and of their formula field.
 const ANALYSIS_MODE = {
   known_mixture: 'Known-phase refinement',
-  identification: 'Identification (no refinement)',
-  elemental: 'Phase identification',
+  identification: 'Search-match (no refinement)',
+  elemental: 'Phase search + Rietveld',
   reaction: 'Reaction check',
   selected_phases: 'User-selected phase refinement',
 };
+const FORMULA_LABEL = { elemental: 'Expected formulas', known_mixture: 'Phases to refine', reaction: 'Precursors' };
 
 const DESCRIPTION_COLUMNS = { xs: 1, sm: 1, md: 1, lg: 2, xl: 2, xxl: 3 };
 const BREAKPOINTS = ['xxl', 'xl', 'lg', 'md', 'sm', 'xs'];
@@ -905,17 +928,91 @@ function InstrumentText({ details }) {
   </Tooltip>;
 }
 
-function TaskDetail({ data, task_id, onDelete }) {
+/** Sample list the page was opened from (Results passes `list` and `back`; see sampleNav.mjs). */
+function useSampleList(taskId) {
+  const search = typeof window === 'undefined' ? '' : window.location.search;
+  const context = React.useMemo(() => listContext(search, taskId), [search, taskId]);
+  // [ / ] or Alt+←/→ open the previous / next sample; a dialog or the fit workspace keeps its own keys.
+  React.useEffect(() => {
+    if (!context.ids.length) return undefined;
+    const onKey = event => {
+      const step = sampleStep(event);
+      const target = step === 'prev' ? context.prev : step === 'next' ? context.next : null;
+      if (target === null || document.querySelector('.ant-modal-wrap:not([style*="display: none"])')) return;
+      event.preventDefault();
+      window.location.href = taskHref(target, context);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [context]);
+  return context;
+}
+
+/** Title row of every task state: Results (the list it came from) › Task n · sample, the sample steps, the actions. */
+function TaskTitle({ taskId, name, context, children = null }) {
+  const position = positionText(context);
+  return <TitleContriner className="dara-task-title">
+    <h2 style={{ margin: 0, fontSize: 'var(--dara-font-20)', overflowWrap: 'anywhere' }}><a href={resultsHref(context)} style={{ fontWeight: 400 }}>Results</a>{' › '}{`Task ${taskId}${name ? ` · ${name}` : ''}`}</h2>
+    <Space wrap align="center" style={{ justifyContent: 'flex-end' }}>
+      {position ? <nav aria-label="Samples of the Results list" className="dara-sample-nav">
+        <Tooltip title="Previous sample ([ or Alt+←)"><Button size="small" type="text" icon={<LeftOutlined />} disabled={context.prev === null}
+          href={context.prev === null ? undefined : taskHref(context.prev, context)}>Previous</Button></Tooltip>
+        <span className="dara-num">{position}</span>
+        <Tooltip title="Next sample (] or Alt+→)"><Button size="small" type="text" disabled={context.next === null}
+          href={context.next === null ? undefined : taskHref(context.next, context)}>Next <RightOutlined /></Button></Tooltip>
+      </nav> : null}
+      {children}
+    </Space>
+  </TitleContriner>;
+}
+
+/** Short code of a selection: v1, v3, C2 (C1 · other reference for a merged record). */
+function selectionCode(sel, versions, allResults) {
+  return parseSelection(sel ?? 'best') === 'best' ? 'v1' : selectionLabel(sel, { versions, all_results: allResults }).split(' — ')[0];
+}
+
+/** "2026-11-11" of an ISO time, or null. */
+const dayOf = value => (/^\d{4}-\d{2}-\d{2}/.exec(String(value || '')) || [null])[0];
+
+/** Clipboard write with the old execCommand fallback (plain http pages have no clipboard API). */
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (_) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const done = document.execCommand('copy');
+    area.remove();
+    return done;
+  }
+}
+
+function TaskDetail({ data, task_id, onDelete, sampleList }) {
   // The open fit is mirrored in the address (`?id=9&fit=version:12`): a reload or a new tab
   // opens the same fit.
   const [plot_id, setPlotIdRaw] = React.useState(() => fitFromSearch(typeof window === 'undefined' ? '' : window.location.search));
   const setPlotId = React.useCallback(value => setPlotIdRaw(normalizePlotId(value)), []);
+  // Opening the workspace is a step in the browser history: Back closes it instead of leaving the task.
   React.useEffect(() => {
     const next = searchWithFit(window.location.search, plot_id);
-    if (next !== window.location.search) {
-      window.history.replaceState(window.history.state, '', `${window.location.pathname}${next}${window.location.hash}`);
-    }
+    if (next === window.location.search) return;
+    const url = `${window.location.pathname}${next}${window.location.hash}`;
+    const wasOpen = fitFromSearch(window.location.search) !== undefined;
+    if (!wasOpen && plot_id !== undefined) window.history.pushState({ ...(window.history.state || {}), daraFit: true }, '', url);
+    else if (wasOpen && plot_id === undefined && window.history.state?.daraFit) window.history.back();
+    else window.history.replaceState(window.history.state, '', url);
   }, [plot_id]);
+  React.useEffect(() => {
+    const onPop = () => setPlotIdRaw(fitFromSearch(window.location.search));
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, []);
   const [previewSel, setPreviewSel] = React.useState(undefined); // fit drawn on the page (undefined: the adopted one)
   const [display, setDisplay] = React.useState({ kalpha2: false, smooth: 0 }); // display treatment of the fit plot's observed trace
   const [phaseSignal, setPhaseSignal] = React.useState(0); // opens Select phases… from the Refine menu
@@ -931,6 +1028,26 @@ function TaskDetail({ data, task_id, onDelete }) {
       if (isQuickCheck(store.versions, choice)) {
         message.warning(`${QUICK_CHECK_HINT} ${REFINE_ALL_FIRST}.`);
         return false;
+      }
+      // Replacing an adoption (possibly a colleague's) is said in words, naming both fits.
+      const saved = savedReview.saved || {};
+      const old = saved.selection ?? null;
+      if (old !== null && formatSelection(choice) !== formatSelection(old)) {
+        const code = sel => selectionCode(sel, store.versions, data.all_results);
+        // Older reviews have no adoption time: the last save stands in for it, said as such.
+        const when = [dayOf(saved.adopted_at) ? `adopted ${dayOf(saved.adopted_at)}` : dayOf(saved.updated_at) && `saved ${dayOf(saved.updated_at)}`,
+          saved.adopted_by && `by ${saved.adopted_by}`].filter(Boolean).join(' ');
+        const notesNameOld = (savedReview.notes || '').includes(code(old));
+        const confirmed = await new Promise(resolve => Modal.confirm({
+          title: choice === null ? `Remove the adoption of ${code(old)}?` : `Replace the adopted fit ${code(old)}${when ? ` (${when})` : ''} with ${code(choice)}?`,
+          content: <>
+            <p>The report and the downloads follow the adopted fit. {code(old)} stays in the list and can be adopted again.</p>
+            {notesNameOld ? <p>{`The notes mention ${code(old)}: update them after adopting.`}</p> : null}
+          </>,
+          okText: choice === null ? 'Remove adoption' : `Adopt ${code(choice)}`, cancelText: `Keep ${code(old)}`,
+          onOk: () => resolve(true), onCancel: () => resolve(false),
+        }));
+        if (!confirmed) return false;
       }
       return savedReview.save(choice);
     },
@@ -954,6 +1071,7 @@ function TaskDetail({ data, task_id, onDelete }) {
   const plotRef = React.useRef(null);
   const plotIdRef = React.useRef(plot_id);
   plotIdRef.current = plot_id;
+  const shownSelRef = React.useRef(null); // the fit the page shows (set below, once it is known)
   const peaksRef = React.useRef(peaks);
   peaksRef.current = peaks;
   const refreshVersions = store.refresh;
@@ -972,11 +1090,19 @@ function TaskDetail({ data, task_id, onDelete }) {
       // A duplicate request: nothing new was refined, the existing version is opened instead.
       message.info(text);
       setPlotId(sel);
-    } else if (plotIdRef.current !== undefined) {
-      message.success(text);
-      setPlotId(sel);
     } else {
-      message.success(<span>{`${text} `}<a onClick={() => setPlotId(sel)}>View</a></span>);
+      // The view follows the new version only while it still shows the fit the job started from;
+      // a user who moved on to another fit meanwhile keeps it and gets a link instead.
+      const open = plotIdRef.current;
+      const shown = open !== undefined ? open : shownSelRef.current;
+      const onBase = meta.base === undefined || formatSelection(shown ?? 'best') === formatSelection(meta.base ?? 'best');
+      const view = () => (plotIdRef.current !== undefined ? setPlotId(sel) : setPreviewSel(sel));
+      if (onBase) {
+        message.success(text);
+        view();
+      } else {
+        message.success({ content: <span>{`${text} `}<a onClick={view}>{`View v${n}`}</a></span>, duration: 8 });
+      }
     }
   }, [refreshVersions, setPlotId]);
   const quick = useQuickRefine(task_id, { onVersion: handleVersion });
@@ -1164,7 +1290,7 @@ function TaskDetail({ data, task_id, onDelete }) {
       if (key === 'view') setPlotId(link.sel);
       if (key === 'lebail') setLeBailOpen({ initial: row.phase });
       if (key === 'refit') Modal.confirm({ title: 'Refine the other phases without this one?', content: 'Creates a new version; this fit is kept.',
-        okText: 'Refine as new version', cancelText: 'Cancel', onOk: () => runQuick(removeRequest(row.phase)) });
+        okText: 'Refine as new version', cancelText: 'Cancel', onOk: () => runQuick(removeManyRequest([row.phase], displayedPhases, symbolOf)) });
     };
     return <Dropdown trigger={['click']} menu={{ items, onClick }}>
       <Button size="small" icon={<EllipsisOutlined />} aria-label="Phase actions" />
@@ -1217,6 +1343,7 @@ function TaskDetail({ data, task_id, onDelete }) {
   });
   const selectOptions = selectOptionGroups(data.all_results, store.versions);
   const [backgroundOpen, setBackgroundOpen] = React.useState(false);
+  const [controlsOpen, setControlsOpen] = React.useState(false); // Refine > Refinement controls…
   // Background curve editor on the plot: {anchors, selected, series, lo, hi, excluded} or null.
   const [curveEdit, setCurveEdit] = React.useState(null);
   React.useEffect(() => setCurveEdit(null), [plot_id]);
@@ -1276,26 +1403,38 @@ function TaskDetail({ data, task_id, onDelete }) {
   const v1Index = data.all_results.findIndex(other => other.rwp === data.final_result?.rwp);
   const candidateRows = data.all_results.map((item, index) => ({ ...item, candidate_number: index + 1,
     source_index: item.source_index ?? index, sel: index === v1Index ? null : (item.source_index ?? index) }));
-  // A phase (formula and space group) keeps one compartment colour in every tray.
-  const trayKey = phase => { const parsed = parsePhaseReference(phase); return `${tidyFormula(parsed.formula)}:${parsed.spaceGroup}`; };
-  const trayFills = fillIndex(candidateRows.flatMap(row => (row.highlighted_phases || []).map(trayKey)));
+  // A phase (formula and space group) keeps one compartment colour in every tray; two database
+  // records of one compound in a fit get different fills.
+  const identityKey = phase => { const parsed = parsePhaseReference(phase); return `${tidyFormula(parsed.formula)}:${parsed.spaceGroup}`; };
+  const keyOfPhase = fillKeys([
+    ...candidateRows.map(row => ({ phases: row.highlighted_phases || [], weights: row.weight_percent || {} })),
+    ...store.versions.map(item => ({ phases: item.phases || [], weights: item.weight_percent || {} })),
+  ], identityKey);
+  const trayKey = phase => keyOfPhase.get(phase) ?? identityKey(phase);
+  const trayFills = fillIndex([...candidateRows.flatMap(row => (row.highlighted_phases || []).map(trayKey)),
+    ...store.versions.flatMap(item => (item.phases || []).map(trayKey))]);
   // The plot draws each phase in its tray colour (darker line of the same hue).
   const phaseColor = phase => trayLine(trayFills.get(trayKey(phase)));
-  const mineralOf = phase => COMMON_PHASES[trayKey(phase)]?.name || null;
-  // Legend entries read like the trays: "Fe2O3 · R-3c (35.89 wt%)" instead of "Hematite · Fe2O3 (…)".
-  const phaseLegend = traces => (traces || []).map(trace => {
-    const mineral = trace?.legendgroup ? mineralOf(trace.legendgroup) : null;
-    if (!mineral || typeof trace.name !== 'string' || !trace.name.startsWith(`${mineral} · `)) return trace;
-    const [, formula, weight = ''] = /^(.*?)( \([^()]*wt%\))?$/.exec(trace.name.slice(mineral.length + 3));
-    // The database space group, as on the trays (a subgroup refinement setting stays in the tables).
-    const symbol = referenceMetadata[trace.legendgroup]?.database_spacegroup_symbol || symbolOf(trace.legendgroup);
-    const group = symbol ? String(symbol).replace(/^([A-Z])1(.+)1$/, '$1$2').replace(/_(\d)/g, '<sub>$1</sub>')
-      : `SG ${parsePhaseReference(trace.legendgroup).spaceGroup}`;
-    return { ...trace, name: `${formula} · ${group}${weight}` };
-  });
+  const mineralOf = phase => COMMON_PHASES[identityKey(phase)]?.name || null;
+  const databaseSymbolOf = phase => referenceMetadata[phase]?.database_spacegroup_symbol || symbolOf(phase);
+  // Legend entries and Bragg rows read like the trays: "Fe2O3 · R-3c (35.89 wt%)", with the database
+  // record where a formula and space group repeat ("ZrO2 · P2₁/c · COD 1010912 (1.24 wt%)").
+  const phaseLegend = traces => {
+    const phases = [...new Set((traces || []).filter(trace => trace?.meta === 'phase-profile' && trace.legendgroup).map(trace => trace.legendgroup))];
+    return (traces || []).map(trace => {
+      if (!['phase-profile', 'reflection'].includes(trace?.meta) || !trace.legendgroup || typeof trace.name !== 'string') return trace;
+      const [, weight = ''] = /( \([^()]*wt%\))?$/.exec(trace.name);
+      const label = distinctPhaseLabel(trace.legendgroup, phases.length ? phases : [trace.legendgroup], databaseSymbolOf)
+        .replace(/^[^·]+/, formula => formula.replace(/(\d+(?:\.\d+)?)/g, '<sub>$1</sub>'));
+      return { ...trace, name: `${label}${weight}` };
+    });
+  };
+  // Labels of the displayed fit's phases (Peaks tab, cautions, clean-up), as in the legend.
+  const labelIn = phases => name => distinctPhaseLabel(name, phases, databaseSymbolOf);
   const isAdoptedRow = row => adoptedSel !== null && (row.sel === adoptedSel || (row.sel === null && adoptedSel === 'best'));
   const defaultSel = adoptedSummary ? adoptedSel : null;
   const shownSel = previewSel !== undefined ? previewSel : defaultSel;
+  shownSelRef.current = shownSel;
   // Everything under the trays (verdict, phases, cautions, details) describes the fit picked
   // above, the adopted one by default; adopting stays a separate, explicit step.
   const summary = findSummary(shownSel ?? 'best') || adoptedSummary || data.final_result;
@@ -1322,15 +1461,46 @@ function TaskDetail({ data, task_id, onDelete }) {
   const hasBanner = Boolean(summary?.confidence?.overall?.level);
   const addPhaseTip = quickCheck ? REFINE_ALL_FIRST
     : suggestionCount ? `${suggestionCount} possible or strong match${suggestionCount === 1 ? '' : 'es'} for the significant unexplained peaks` : null;
+  // The fit the page describes, by its short code ("v3", "C2"), as named in the banner and the headings.
+  const shownCode = selectionCode(shownSel, store.versions, data.all_results);
+  const shownPhases = summary.highlighted_phases || summary.phases || [];
+  // How server prose about one fit is worded on the page: one space-group format, records of repeated phases.
+  const fitContext = fit => ({
+    phases: fit?.highlighted_phases || fit?.phases || [], symbolOf: databaseSymbolOf, details: fit?.phase_details || {},
+    confidence: fit?.confidence?.phases || {},
+    symbols: Object.values(fit?.phase_metadata || {}).flatMap(item => [item?.spacegroup_symbol, item?.database_spacegroup_symbol]).filter(Boolean),
+  });
+  const formatFor = fit => { const context = fitContext(fit); return text => cautionDisplay(text, context); };
+  const summaryFormat = formatFor(summary);
+  const workspaceFormat = formatFor(displayedResult);
+  const workspaceAdopted = adoptedSel !== null && formatSelection(currentSel) === formatSelection(adoptedSel);
+  // Cautions that name a removable phase: one click per phase, or one "Clean up model" run (semi-automatic).
+  const remediesOf = fit => cautionRemedies(fit?.cautions, { weights: fit?.weight_percent || {}, confidence: fit?.confidence?.phases || {},
+    phases: fit?.highlighted_phases || fit?.phases || [] });
+  const removeBlocked = quick.busy ? 'A refinement is running' : null;
+  const removeFrom = (sel, phases) => (quickShown && !isQuickCheck(store.versions, sel)
+    ? names => runQuick({ ...removeManyRequest(names, phases, databaseSymbolOf), base: sel ?? 'best' }, { base: sel ?? 'best' }) : null);
+  const minRwp = Math.min(...data.all_results.map(item => Number(item.rwp)).filter(Number.isFinite));
+  // The wt% spread is over the near-best candidates: shown only under a fit that is one of them.
+  const spreadShown = !summary.weights_relative && typeof shownSel !== 'string' && Number(shownRwp) <= minRwp * NEAR_RWP_RATIO;
+  const savedMeta = savedReview.saved || {};
+  const adoptedText = adoptedSel === null ? null : [selectionCode(adoptedSel, store.versions, data.all_results),
+    dayOf(savedMeta.adopted_at) || (dayOf(savedMeta.updated_at) && `saved ${dayOf(savedMeta.updated_at)}`), savedMeta.adopted_by && `by ${savedMeta.adopted_by}`]
+    .filter(Boolean).join(' · ');
+  const copyPhaseTable = fit => async () => {
+    const done = await copyText(phaseTableTsv(fit?.highlighted_phases || fit?.phases || [], { details: fit?.phase_details, symbolOf: databaseSymbolOf }));
+    if (done) message.success('Phase table copied (tab-separated: phase, space group, wt%, ± e.s.d.).');
+    else message.error('The phase table could not be copied.');
+  };
+  const amountText = row => (row?.le_bail ? 'Le Bail' : row?.weight_percent == null ? '—'
+    : `${Number(row.weight_percent).toFixed(2)}${row.weight_esd_percent == null ? '' : ` ± ${Number(row.weight_esd_percent).toFixed(2)}`} wt%`);
 
   if (!summaryPending) summaryShown.current = true;
   else return <SpinContainer><Spin size='large' tip='Loading results…' /></SpinContainer>;
 
   return (
     <>
-      <TitleContriner>
-        <h2 style={{ margin: 0, fontSize: 'var(--dara-font-20)', overflowWrap: 'anywhere' }}><a href="/results" style={{ fontWeight: 400 }}>Results</a>{' › '}{`Task ${task_id} · ${data.sample || data.task_label}`}</h2>
-        <Space wrap align="center" style={{ justifyContent: 'flex-end' }}>
+      <TaskTitle taskId={task_id} name={data.sample || data.task_label} context={sampleList}>
         <Tooltip title="Downloads use the adopted fit (or the best fit)" placement="left">
           <span><DownloadMenu taskId={task_id} reportBlocked={reportBlocked} extraItems={[
             { key: 'csv', label: <a href={`${URL}/task/${task_id}/table.csv`}>Table (CSV)</a> },
@@ -1339,21 +1509,34 @@ function TaskDetail({ data, task_id, onDelete }) {
         </Tooltip>
         <Button href={`/?clone_task=${task_id}`}>Rerun</Button>
         <TaskMoreMenu onDelete={onDelete} taskId={task_id} />
-        </Space>
-      </TitleContriner>
+      </TaskTitle>
       <Divider style={{ margin: '12px 0' }} />
       {data.identified_from ? <Text type="secondary" style={{ display: 'block', margin: '-4px 0 8px' }}>
         {'Refined from the identification '}<a href={`/task/?id=${data.identified_from}`}>{`Task ${data.identified_from}`}</a></Text> : null}
       {/* Confidence banner and review side by side on wide screens, stacked below 1200 px. */}
-      <Row gutter={[16, 12]} className="dara-summary-row" style={{ marginBottom: 12 }}>
+      <Row gutter={[16, 12]} className="dara-summary-row" style={{ marginBottom: 8 }}>
         {hasBanner ? <Col xs={24}>
-          <ConfidenceBanner confidence={summary?.confidence} style={{ marginBottom: 0 }}
+          <ConfidenceBanner confidence={summary?.confidence} style={{ marginBottom: 0 }} format={summaryFormat}
+            subject={`${shownCode}${shownIsAdopted ? ' (adopted)' : ''}`}
             action={significantPeaks(summary?.peak_diagnostics).length
               ? <Button size="small" icon={<SearchOutlined />} onClick={() => { openDrawerWithFit.current = true; setPlotId(shownSel); }}>
                 Find phases for the unexplained peaks
               </Button> : null} />
         </Col> : null}
       </Row>
+      {/* The answer in one line: the phases of the judged fit with wt% ± e.s.d., and which fit is adopted. */}
+      <section className="dara-result-line" aria-label={`Phases and amounts of ${shownCode}`}>
+        <span className="dara-result-fit"><span className="dara-code">{shownCode}</span></span>
+        {shownPhases.map(name => <span key={name} className="dara-result-phase">
+          <i aria-hidden="true" style={{ background: trayFills.get(trayKey(name)) }} />
+          <span><ChemicalFormula formula={labelIn(shownPhases)(name)} /></span>
+          <span className="dara-num">{amountText(summary.phase_details?.[name])}</span>
+        </span>)}
+        <span className="dara-result-meta">
+          {adoptedText ? <>Adopted: {adoptedText}</> : 'Not adopted yet'}
+          <a href="#phase-table">Phase table</a>
+        </span>
+      </section>
       {/* The candidate phase sets are the main result: listed first; a row click shows its fit in the plot below. */}
       <ResultTitleContainer>
         <Space wrap align="baseline">
@@ -1373,7 +1556,7 @@ function TaskDetail({ data, task_id, onDelete }) {
         // A row click shows that candidate's fit in the plot above (buttons keep their own action).
         onRow={row => ({ onClick: event => { if (!event.target.closest('button, a')) setPreviewSel(row.sel); },
           onKeyDown: event => { if ((event.key === 'Enter' || event.key === ' ') && event.target === event.currentTarget) { event.preventDefault(); setPreviewSel(row.sel); } },
-          tabIndex: 0, 'aria-selected': row.sel === shownSel, style: { cursor: 'pointer' }, title: 'Show this fit in the plot' })}
+          tabIndex: 0, 'aria-current': row.sel === shownSel ? 'true' : undefined, style: { cursor: 'pointer' }, title: 'Show this fit in the plot' })}
         rowClassName={row => (row.sel === shownSel ? 'dara-row-shown' : '')}
         columns={[
           { title: 'Tray', dataIndex: 'candidate_number', className: 'dara-tray-code', render: (n, row) => <Space size={4} direction="vertical">
@@ -1391,13 +1574,17 @@ function TaskDetail({ data, task_id, onDelete }) {
                 ...(others.length ? [`${others.length} other matching record${others.length === 1 ? '' : 's'}:`, ...others.slice(0, 8).map(other => phaseRecordLine(other, symbolOf(other)))] : [])];
             };
             const wtText = seg => (seg.wt === null ? 'wt% n/a' : Number(seg.wt).toFixed(1));
+            // Two records of one compound in this tray: each named by its record.
+            const repeatedInRow = phase => segments.filter(other => identityKey(other.phase) === identityKey(phase)).length > 1;
             return <div className="dara-tray">
               <div className="dara-tray-bar">
-                {segments.map((seg, slot) => <Tooltip key={seg.phase} placement="topLeft" mouseEnterDelay={0.2}
+                {/* A compartment too narrow for its label is a keyboard stop too: focus shows the same tooltip. */}
+                {segments.map((seg, slot) => <Tooltip key={seg.phase} placement="topLeft" mouseEnterDelay={0.2} trigger={['hover', 'focus']}
                   title={<div>{[`${wtText(seg)}${seg.wt === null ? '' : ' wt%'}`, ...tipOf(seg.phase, slot)].map(line => <div key={line}>{line}</div>)}</div>}>
-                  <div className="dara-tray-cell" style={{ width: `${seg.share}%`, background: trayFills.get(trayKey(seg.phase)) }}>
+                  <div className="dara-tray-cell" style={{ width: `${seg.share}%`, background: trayFills.get(trayKey(seg.phase)) }}
+                    {...(seg.share < 16 ? { tabIndex: 0, role: 'img', 'aria-label': `${phaseRecordLine(seg.phase, symbolOf(seg.phase))}, ${wtText(seg)}${seg.wt === null ? '' : ' wt%'}` } : {})}>
                     {seg.share >= 16 ? <>
-                      <span className="dara-tray-name"><PhaseIdentity reference={seg.phase} metadata={row.phase_metadata?.[seg.phase]} compact /></span>
+                      <span className="dara-tray-name"><PhaseIdentity reference={seg.phase} metadata={row.phase_metadata?.[seg.phase]} compact showDatabaseId={repeatedInRow(seg.phase)} /></span>
                       <span className="dara-num">{wtText(seg)}</span>
                     </> : null}
                   </div>
@@ -1405,7 +1592,7 @@ function TaskDetail({ data, task_id, onDelete }) {
               </div>
               {narrow.length ? <div className="dara-tray-rest">{narrow.map(seg => <span key={seg.phase}>
                 <i style={{ background: trayFills.get(trayKey(seg.phase)) }} />
-                <PhaseIdentity reference={seg.phase} metadata={row.phase_metadata?.[seg.phase]} compact />
+                <PhaseIdentity reference={seg.phase} metadata={row.phase_metadata?.[seg.phase]} compact showDatabaseId={repeatedInRow(seg.phase)} />
                 <span className="dara-num">{wtText(seg)}</span>
               </span>)}</div> : null}
             </div>;
@@ -1462,17 +1649,25 @@ function TaskDetail({ data, task_id, onDelete }) {
       <VersionsPanel taskId={task_id} store={store} review={review}
         onView={setPlotId} onPreview={setPreviewSel} shownSel={shownSel} onCompare={(a, b) => setCompare({ a, b })} symbolOf={symbolOf} onRefineAll={quickShown ? refineAll : null} refineBusy={quick.busy}
         extra={quickShown ? <QuickRefineProgress job={quick.job} onCancel={quick.cancel} onDismiss={quick.dismiss} /> : null} />
-      <h3 style={{ marginTop: 16 }}>{summaryHeading}</h3>
-      <PhaseRefinementTable phases={summary.highlighted_phases || summary.phases} metadata={summary.phase_metadata} details={summary.phase_details} confidence={summary.confidence} spread={summary.weights_relative ? null : weightSpread(data.all_results)} weightsRelative={Boolean(summary.weights_relative)} />
+      <div className="dara-section-head" id="phase-table">
+        <h3>{summaryHeading}</h3>
+        <Tooltip title="Tab-separated: phase, space group, wt%, ± e.s.d. — pastes into a spreadsheet">
+          <Button size="small" icon={<CopyOutlined />} onClick={copyPhaseTable(summary)}>Copy phase table</Button>
+        </Tooltip>
+      </div>
+      <PhaseRefinementTable phases={shownPhases} metadata={summary.phase_metadata} details={summary.phase_details} confidence={summary.confidence}
+        spread={spreadShown ? weightSpread(data.all_results) : null} weightsRelative={Boolean(summary.weights_relative)} format={summaryFormat} />
       {/* The known-phase outcomes describe the automatic fit, not an adopted re-refinement. */}
       <KnownPhaseNotes data={data} style={adoptedVersionNumber ? { display: 'none' } : undefined} />
       <InternalStandardCard taskId={task_id} renderPhase={renderReference}
         block={adoptedVersionNumber ? versionDetails[adoptedVersionNumber]?.internal_standard : (bestStandard !== undefined ? bestStandard : data.internal_standard)}
         onSaved={next => { setBestStandard(next); setVersionDetails({}); }} />
-      <FitCautions cautions={summary.cautions} besideBanner={hasBanner} bannerReasons={reasonsText(summary?.confidence?.overall)} showHidden />
+      <FitCautions cautions={summary.cautions} besideBanner={hasBanner} bannerReasons={reasonsText(summary?.confidence?.overall)} showHidden
+        fit={fitContext(summary)} remedies={remediesOf(summary)} onRemove={removeFrom(shownSel, shownPhases)} removeBlocked={removeBlocked}
+        labelOf={labelIn(shownPhases)} />
       <Descriptions bordered column={columns} size='small'>
         <Descriptions.Item label="Pattern file">{data.task_label}</Descriptions.Item>
-        <Descriptions.Item label="Analysis mode">{ANALYSIS_MODE[data.analysis_mode] || data.analysis_mode || (data.use_rxn_predictor ? "Reaction check" : "Phase identification")}</Descriptions.Item>
+        <Descriptions.Item label="Analysis mode">{ANALYSIS_MODE[data.analysis_mode] || data.analysis_mode || (data.use_rxn_predictor ? "Reaction check" : "Phase search + Rietveld")}</Descriptions.Item>
         <Descriptions.Item label="Run">
           {runText(data.start_time, data.runtime)}
           {searchSummary.stopped_early ? <Tag color="gold" style={{ marginLeft: 8 }}>{`Stopped at time limit (${STOP_STAGE_LABEL[searchSummary.stopped_at_stage] || 'search'})`}</Tag> : null}
@@ -1486,18 +1681,22 @@ function TaskDetail({ data, task_id, onDelete }) {
         <Descriptions.Item label="Peak diagnostics">
           <PeakDiagnosticTags diagnostics={summary.peak_diagnostics} />
         </Descriptions.Item>
+        {/* A passed mass balance is one quiet line (the report states it); a failed one is in the summary above. */}
+        {summary.mass_balance?.status === 'evaluated' && summary.mass_balance.expected_ratio ? <Descriptions.Item label="Mass balance">
+          {`${summary.mass_balance.level === 'ok' ? 'Agrees' : 'Differs'}: expected ${summary.mass_balance.expected_ratio}, refined ${summary.mass_balance.observed_ratio}`}
+        </Descriptions.Item> : null}
       </Descriptions>
       <details style={{ marginTop: 8 }}>
         <summary>Analysis settings</summary>
         <Descriptions bordered column={columns} size='small' style={{ marginTop: 8 }}>
           <Descriptions.Item label="Temperature">{data.temperature || "None"}</Descriptions.Item>
           <Descriptions.Item label="Reaction network">{data.use_rxn_predictor ? "Yes" : "No"}</Descriptions.Item>
-          <Descriptions.Item label="Included elements">{(data.elements || []).join(', ') || "None"}</Descriptions.Item>
+          <Descriptions.Item label="Elements">{(data.elements || []).join(', ') || "None"}</Descriptions.Item>
           <Descriptions.Item label="Reference databases">{(data.candidate_sources || []).map(source => source.toUpperCase()).join(' + ') || "Uploaded CIFs"}</Descriptions.Item>
           <Descriptions.Item label="Candidate CIFs">{data.candidate_summary?.after ?? "Unknown"} retained ({data.candidate_summary?.removed_duplicates ?? 0} duplicates removed)
             <ScreeningTags candidateSummary={data.candidate_summary} />
           </Descriptions.Item>
-          <Descriptions.Item label="Precursors">{(data.precursors || []).join(', ') || "None"}</Descriptions.Item>
+          <Descriptions.Item label={FORMULA_LABEL[data.analysis_mode] || 'Expected formulas'}>{(data.precursors || []).join(', ') || "None"}</Descriptions.Item>
           <Descriptions.Item label="Search options">{searchOptionsText(data.additional_search_options)}</Descriptions.Item>
           {excludedRanges.length ? <Descriptions.Item label="Excluded 2θ">
             <Tooltip title="Shaded in the fit plot; omitted from fitting">
@@ -1523,6 +1722,13 @@ function TaskDetail({ data, task_id, onDelete }) {
         <Space wrap style={{ marginBottom: 12 }}>
           <Select aria-label="Displayed fit" style={{ minWidth: 360, maxWidth: '40vw' }} value={currentSel}
             onChange={value => setPlotId(value === 'best' ? null : value)} options={selectOptions} />
+          {/* Adopting is decided here, with the fit in view (HighScore: accept the refined model). */}
+          {displayedResult ? (workspaceAdopted
+            ? <Tooltip title={adoptedText ? `Adopted: ${adoptedText}` : null}><span className="dara-adopted-mark">Adopted</span></Tooltip>
+            : <Tooltip title={quickCheck ? `${REFINE_ALL_FIRST}: a quick check cannot be adopted` : review.error ? 'The review could not be loaded' : 'The report and downloads use the adopted fit (saves the notes too)'}>
+              <span><Button disabled={quickCheck || review.loading || !!review.error || review.saving} loading={review.saving}
+                onClick={() => review.save(currentSel)}>Adopt this fit</Button></span>
+            </Tooltip>) : null}
           {quickShown && displayedResult ? <>
             <Tooltip title={addPhaseTip}>
               <Badge count={quickCheck ? 0 : suggestionCount} size="small" offset={[-4, 2]} color="var(--dara-info)" title={`${suggestionCount} suggested phases`}>
@@ -1534,11 +1740,15 @@ function TaskDetail({ data, task_id, onDelete }) {
             <Dropdown trigger={['click']} disabled={quick.busy || quickCheck}
               menu={{ items: [
                 { key: 'phases', label: 'Select phases…', title: 'Choose the phases to refine as a new version' },
+                { key: 'controls', label: 'Refinement controls…', title: 'Preferred orientation, lattice window and peak broadening of the phases' },
                 { key: 'background', label: 'Background…', title: 'Background polynomial and excluded 2θ intervals' },
-                { key: 'structure', label: 'Structure…', title: 'Free atomic positions, B or occupancies of one phase (indicative)' },
-                ...(advanced ? [{ key: 'lebail', label: 'Le Bail fit of a phase…', title: 'Fit one phase with free reflection intensities: cell and profile refined, no weight fraction' }] : []),
+                // Specialist and indicative: with "Advanced analysis tools" (Help menu) only.
+                ...(advanced ? [{ type: 'divider' },
+                  { key: 'structure', label: 'Structure…', title: 'Free atomic positions, B or occupancies of one phase (indicative)' },
+                  { key: 'lebail', label: 'Le Bail fit of a phase…', title: 'Fit one phase with free reflection intensities: cell and profile refined, no weight fraction' }] : []),
               ], onClick: ({ key }) => {
                 if (key === 'phases') setPhaseSignal(n => n + 1);
+                if (key === 'controls') setControlsOpen(true);
                 if (key === 'background') setBackgroundOpen(true);
                 if (key === 'structure') { setDrawerOpen(false); setStructureOpen(true); }
                 if (key === 'lebail') setLeBailOpen({ initial: null });
@@ -1554,6 +1764,8 @@ function TaskDetail({ data, task_id, onDelete }) {
               manual={Boolean(manualBackground)} onEditCurve={startCurveEdit}
               getView={() => plotRef.current?.getViewRange?.() || null}
               onSubmit={(background, label) => runQuick({ phases: [], background, origin: 'background', label })} />
+            <RefinementControlsDialog open={controlsOpen} busy={quick.busy} onCancel={() => setControlsOpen(false)}
+              onSubmit={request => { setControlsOpen(false); runQuick(request); }} />
           </> : null}
           {displayedResult ? <DownloadMenu taskId={task_id} selection={currentSel} label="Download this fit" treatment={display}
             blocked={quickCheck ? REFINE_ALL_FIRST : null} reportBlocked={reportBlocked} /> : null}
@@ -1570,11 +1782,11 @@ function TaskDetail({ data, task_id, onDelete }) {
           {/* A version shows its metrics once, as changes against its base, in one row. */}
           {versionNumber && deltaRows.length ? <DeltaStrip rows={deltaRows} lead={deltaBaseText(effectiveBase, data.all_results)} extra={<>
             <FitQualitySummary quality={displayedResult.fit_quality} dwOnly />
-            <OverallTag confidence={displayedResult.confidence} />
+            <OverallTag confidence={displayedResult.confidence} format={workspaceFormat} />
             <DisplacementTag confidence={displayedResult.confidence} />
           </>} /> : <Space size="small" wrap style={{ marginBottom: 12 }}>
             <FitQualitySummary quality={displayedResult.fit_quality} />
-            <OverallTag confidence={displayedResult.confidence} />
+            <OverallTag confidence={displayedResult.confidence} format={workspaceFormat} />
             <DisplacementTag confidence={displayedResult.confidence} />
           </Space>}
         </> : null}
@@ -1588,28 +1800,42 @@ function TaskDetail({ data, task_id, onDelete }) {
             <Button size="small" onClick={clearPeaks}>Clear</Button>
           </> : <Text type="secondary">{plotAnnotating ? ANNOTATING_HINT : 'Click a peak to search references for it (Shift+click adds more) · press ? for shortcuts'}</Text>}
         </div> : null}
-        {curveEdit ? <BackgroundCurvePanel anchors={curveEdit.anchors} selected={curveEdit.selected}
-          onChange={editAnchors.onChange} onSelect={editAnchors.onSelect} onRemove={editAnchors.onRemove}
-          warnings={curveWarningList} error={curveError} busy={quick.busy}
-          canReset={Boolean(manualBackground) || baseDegree !== null} onSubmit={submitCurve} onReset={resetCurve}
-          onCancel={() => setCurveEdit(null)} /> : null}
-        <RefinementPlot ref={plotRef} task_id={task_id} plot_id={versionPending ? undefined : plot_id} title={data.task_label}
-          excludedRanges={[...excludedRanges, ...(versionData?.background?.excluded_ranges || [])]}
-          peaks={peaks} previewSticks={preview?.sticks || null} onGroups={setPhaseGroups} phaseColor={phaseColor} phaseLegend={phaseLegend}
-          onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} display={display} onDisplayChange={setDisplay}
-          onAnnotatingChange={peakClicksOn ? setPlotAnnotating : null} />
+        {/* While the background curve is edited its anchor table sits beside the plot, so a drag never moves the plot. */}
+        <div className={curveEdit ? 'dara-plot-with-side' : undefined}>
+          <div className="dara-plot-main">
+            <RefinementPlot ref={plotRef} task_id={task_id} plot_id={versionPending ? undefined : plot_id} title={data.task_label}
+              excludedRanges={[...excludedRanges, ...(versionData?.background?.excluded_ranges || [])]}
+              peaks={peaks} previewSticks={preview?.sticks || null} onGroups={setPhaseGroups} phaseColor={phaseColor} phaseLegend={phaseLegend}
+              onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} display={display} onDisplayChange={setDisplay}
+              onAnnotatingChange={peakClicksOn ? setPlotAnnotating : null} />
+          </div>
+          {curveEdit ? <BackgroundCurvePanel side anchors={curveEdit.anchors} selected={curveEdit.selected}
+            onChange={editAnchors.onChange} onSelect={editAnchors.onSelect} onRemove={editAnchors.onRemove}
+            warnings={curveWarningList} error={curveError} busy={quick.busy}
+            canReset={Boolean(manualBackground) || baseDegree !== null} onSubmit={submitCurve} onReset={resetCurve}
+            onCancel={() => setCurveEdit(null)} /> : null}
+        </div>
         {displayedResult ? <>
           <Tabs activeKey={fitTab === 'structure' && !structurePhases(displayedResult.phase_details).length ? 'phases' : fitTab} onChange={setFitTab} destroyInactiveTabPane
             items={[
               { key: 'phases', label: 'Phases', children: <>
+                <div className="dara-section-head">
+                  <span />
+                  <Tooltip title="Tab-separated: phase, space group, wt%, ± e.s.d. — pastes into a spreadsheet">
+                    <Button size="small" icon={<CopyOutlined />} onClick={copyPhaseTable(displayedResult)}>Copy phase table</Button>
+                  </Tooltip>
+                </div>
                 <PhaseRefinementTable phases={displayedPhases}
                   metadata={displayedResult.phase_metadata} details={displayedResult.phase_details} confidence={displayedResult.confidence}
-                  rowActions={quickShown && !quickCheck ? rowActions : null} weightsRelative={Boolean(displayedResult.weights_relative)} />
+                  rowActions={quickShown && !quickCheck ? rowActions : null} weightsRelative={Boolean(displayedResult.weights_relative)} format={workspaceFormat} />
                 {currentSel === 'best' ? <KnownPhaseNotes data={data} /> : null}
-                <FitCautions cautions={displayedResult.cautions} style={{ margin: '12px 0' }} />
+                <FitCautions cautions={displayedResult.cautions} style={{ margin: '12px 0' }}
+                  fit={fitContext(displayedResult)} remedies={remediesOf(displayedResult)} onRemove={removeFrom(currentSel, displayedPhases)}
+                  removeBlocked={removeBlocked} labelOf={labelIn(displayedPhases)} />
                 {advanced ? <RirSemiQuant taskId={task_id} sel={currentSel} /> : null}
               </> },
-              { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel={currentSel} active={fitTab === 'peaks' && !versionPending} /> },
+              { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel={currentSel} active={fitTab === 'peaks' && !versionPending}
+                phaseLabel={name => (displayedPhases.includes(name) ? labelIn(displayedPhases)(name) : null)} /> },
               ...(structurePhases(displayedResult.phase_details).length ? [{ key: 'structure', label: 'Structure',
                 children: <StructureResults details={displayedResult.phase_details} renderPhase={renderReference} /> }] : []),
             ]} />
@@ -1709,12 +1935,12 @@ function SearchSettingsSummary({ data, taskId }) {
   const items = [
     ['Mode', ANALYSIS_MODE[s.analysis_mode] || s.analysis_mode],
     ['Elements', (data.elements || s.elements || []).join(', ')],
-    ['Precursors', (data.precursors || s.precursor_formulas || []).join(', ')],
+    [FORMULA_LABEL[s.analysis_mode] || 'Expected formulas', (data.precursors || s.precursor_formulas || []).join(', ')],
     ['Databases', databases],
     ['Candidate CIFs', data.candidate_summary?.after != null ? `${data.candidate_summary.after} screened` : null],
     ['Candidate pre-filter', settings ? (s.candidate_prefilter ? 'On' : 'Off') : null],
     ['2θ range', settings ? range : null],
-    ['Instrument / radiation', settings ? `${s.instrument_profile || '—'} · ${s.wavelength || '—'}` : null],
+    ['Instrument / Radiation', settings ? `${s.instrument_profile || '—'} · ${s.wavelength || '—'}` : null],
     ['Run', data.start_time ? runText(data.start_time, data.runtime_s) : null],
   ].filter(([, value]) => value);
   const hints = settings ? noFitHints(s, data) : [];
@@ -1727,7 +1953,7 @@ function SearchSettingsSummary({ data, taskId }) {
   </div>;
 }
 
-function TaskUnavailable({ taskId, reason, data = null }) {
+function TaskUnavailable({ taskId, reason, data = null, context = null }) {
   const missing = /not found/i.test(reason || '');
   if (data?.no_result) return <>
     <div className="dara-empty">
@@ -1736,7 +1962,7 @@ function TaskUnavailable({ taskId, reason, data = null }) {
       <KnownPhaseNotes data={data} style={{ textAlign: 'center' }} />
       <Space>
         <Button type="primary" href={`/?clone_task=${taskId}`}>Rerun with edited settings…</Button>
-        <Button href="/results">Back to Results</Button>
+        <Button href={resultsHref(context)}>Back to Results</Button>
       </Space>
       <SearchSettingsSummary data={data} taskId={taskId} />
     </div>
@@ -1747,7 +1973,7 @@ function TaskUnavailable({ taskId, reason, data = null }) {
     <p>{missing ? 'It may have been deleted. Open Results to see the tasks that are stored.'
       : `${reason && !/^No search result/i.test(reason) ? `${reason} ` : 'The analysis ended without a final result, so there is nothing to display. '}Rerun it with the same settings (or wider elements and candidates), or go back to the list.`}</p>
     <Space>
-      <Button type={missing ? 'primary' : 'default'} href="/results">Back to Results</Button>
+      <Button type={missing ? 'primary' : 'default'} href={resultsHref(context)}>Back to Results</Button>
       {missing ? null : <Button type="primary" href={`/?clone_task=${taskId}`}>Rerun</Button>}
     </Space>
   </div>;
@@ -1761,7 +1987,8 @@ function IdentificationPhaseTable({ phases, sizes, rirComplete }) {
       { title: 'Phase', key: 'phase', render: (_, row) => {
         const { label, url } = sourceInfo(row.source);
         return <>
-          <div><Text strong><ChemicalFormula formula={row.spacegroup_symbol ? `${row.formula} · ${row.spacegroup_symbol}` : row.formula} /></Text></div>
+          {/* The symbol may come without underscores ("P63mc"): written as given, never as a formula. */}
+          <div><Text strong><ChemicalFormula formula={row.formula} />{row.spacegroup_symbol ? ` · ${formatSpaceGroup(row.spacegroup_symbol)}` : ''}</Text></div>
           <Text type="secondary" style={{ fontSize: 'var(--dara-font-12)' }}>
             {url ? <a href={url} target="_blank" rel="noreferrer">{label}</a> : label}{row.spacegroup ? ` · No. ${row.spacegroup}` : ''}</Text>
         </>;
@@ -1795,7 +2022,7 @@ function IdentificationPhaseTable({ phases, sizes, rirComplete }) {
  * reference sticks, then Phases / Peaks. Quantities are the RIR amounts and Scherrer sizes; anything
  * that needs a fit (versions, editors, compare, exports) is absent.
  */
-function IdentificationDetail({ data, task_id, onDelete }) {
+function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const [advanced] = useAdvancedTools();
   const [display, setDisplay] = React.useState({ kalpha2: false, smooth: 0 });
   const [tab, setTab] = React.useState('phases');
@@ -1841,23 +2068,23 @@ function IdentificationDetail({ data, task_id, onDelete }) {
     if (key === 'report-html') downloadReport(task_id, undefined, 'html');
   };
   return <>
-    <TitleContriner>
-      <h2 style={{ margin: 0, fontSize: 'var(--dara-font-20)', overflowWrap: 'anywhere' }}><a href="/results" style={{ fontWeight: 400 }}>Results</a>{' › '}{`Task ${task_id} · ${data.sample || data.task_label}`}</h2>
-      <Space wrap align="center" style={{ justifyContent: 'flex-end' }}>
-        <Dropdown trigger={['click']} menu={{ items: downloads, onClick: onDownload }}>
-          <Button icon={<DownloadOutlined />}>Download <DownOutlined /></Button>
-        </Dropdown>
-        <Tooltip title="Refine these phases with Rietveld as a new task: refined amounts, lattice parameters and fit quality (about a minute)">
-          <Button type="primary" loading={refining} onClick={refine}>Refine with Rietveld</Button>
-        </Tooltip>
-        <Button href={`/?clone_task=${task_id}`}>Rerun</Button>
-        <TaskMoreMenu onDelete={onDelete} taskId={task_id} />
-      </Space>
-    </TitleContriner>
+    <TaskTitle taskId={task_id} name={data.sample || data.task_label} context={sampleList}>
+      <Dropdown trigger={['click']} menu={{ items: downloads, onClick: onDownload }}>
+        <Button icon={<DownloadOutlined />}>Download <DownOutlined /></Button>
+      </Dropdown>
+      {/* Back to the Search-match workspace with this pattern: add or drop phases, then save again. */}
+      <Tooltip title="Open this pattern on the Submit page to change the accepted phases with Search-match; saving makes a new task">
+        <Button href={`/?clone_task=${task_id}`}>Edit phases (Search-match)</Button>
+      </Tooltip>
+      <Tooltip title="Refine these phases with Rietveld as a new task: refined amounts, lattice parameters and fit quality (about a minute)">
+        <Button type="primary" loading={refining} onClick={refine}>Refine with Rietveld</Button>
+      </Tooltip>
+      <TaskMoreMenu onDelete={onDelete} taskId={task_id} />
+    </TaskTitle>
     <Divider style={{ margin: '12px 0' }} />
     <div className="dara-ident-summary">
       <Tooltip title="Phases accepted from the search-match; nothing was refined">
-        <Tag className="dara-ident-mode">Identification · no refinement</Tag>
+        <Tag className="dara-ident-mode">Search-match · no refinement</Tag>
       </Tooltip>
       <span>{phasesFoundText(phases)}</span>
       {status ? <span className={open.length ? 'dara-ident-open' : undefined}>{status}</span> : null}
@@ -1875,7 +2102,8 @@ function IdentificationDetail({ data, task_id, onDelete }) {
           Amounts by the RIR method and Scherrer sizes from single peaks are estimates without refinement. Refine with Rietveld for refined amounts and lattice parameters.</Text>
         {advanced ? <RirSemiQuant taskId={task_id} sel="best" identification /> : null}
       </> },
-      { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel="best" active={tab === 'peaks'} /> },
+      { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel="best" active={tab === 'peaks'} identification
+        phaseLabel={name => { const row = phases.find(item => item.name === name); return row ? `${row.formula} · ${formatSpaceGroup(row.spacegroup_symbol, row.spacegroup)}` : null; }} /> },
     ]} />
   </>;
 }
@@ -1883,6 +2111,7 @@ function IdentificationDetail({ data, task_id, onDelete }) {
 function TaskPage({ location }) {
   const queryParameters = new URLSearchParams(location.search)  
   const task_id = queryParameters.get('id')
+  const sampleList = useSampleList(task_id);
   const [error, setError] = React.useState("");
 
   const [data, setData] = React.useState(undefined);
@@ -1901,7 +2130,7 @@ function TaskPage({ location }) {
           const body = await response.json();
           throw new Error(body.detail || 'Could not delete the result.');
         }
-        window.location.href = '/results';
+        window.location.href = resultsHref(sampleList);
       },
     });
   };
@@ -1947,32 +2176,33 @@ function TaskPage({ location }) {
 
   // A completed run that stored no fit (design J) comes back as 200 with no_result.
   const noResult = Boolean(data?.no_result);
+  // "Task 122 · sample" in the browser tab and the title row, in every state.
+  const name = data?.sample || data?.task_label || '';
   return (
-    <Layout hasSider={false} title="Result">
+    <Layout hasSider={false} title={task_id ? `Task ${task_id}${name ? ` · ${name}` : ''}` : 'Result'}>
       <Container>
         {/* A finished task carries its own header with the actions (TaskDetail). */}
-        {data && data.status === 'COMPLETED' && !noResult ? null : <Title>
-          <h2 style={{ margin: 0, fontSize: 'var(--dara-font-20)', overflowWrap: 'anywhere' }}><a href="/results" style={{ fontWeight: 400 }}>Results</a>{' › '}{task_id ? `Task ${task_id}${data?.task_label ? ` · ${data.task_label}` : ''}` : ''}</h2>
-          <Space>
-            {data && !noResult && !['FIZZLED', 'READY', 'RUNNING', 'CANCELLING'].includes(data.status) ? <Button href={`/?clone_task=${task_id}`}>Rerun</Button> : null}
-            {data && !['READY','RUNNING','CANCELLING'].includes(data.status) ? <TaskMoreMenu onDelete={deleteTask} /> : null}
-          </Space>
-        </Title>}
-        {data && data.status !== 'COMPLETED' ? <TaskProgress taskId={task_id} onStatusChange={handleStatusChange} /> : null}
+        {data && data.status === 'COMPLETED' && !noResult ? null : task_id ? <TaskTitle taskId={task_id} name={name} context={sampleList}>
+          {data && !noResult && !['FIZZLED', 'READY', 'RUNNING', 'CANCELLING'].includes(data.status) ? <Button href={`/?clone_task=${task_id}`}>Rerun</Button> : null}
+          {data && !['READY','RUNNING','CANCELLING'].includes(data.status) ? <TaskMoreMenu onDelete={deleteTask} /> : null}
+        </TaskTitle> : null}
+        {data && data.status !== 'COMPLETED' ? <TaskProgress taskId={task_id} onStatusChange={handleStatusChange} queuePosition={data.queue_position ?? null} /> : null}
         {
-          data === null || noResult ? <TaskUnavailable taskId={task_id} reason={noResult ? data.message : error} data={noResult ? data : null} /> : <></>
+          data === null || noResult ? <TaskUnavailable taskId={task_id} reason={noResult ? data.message : error} data={noResult ? data : null} context={sampleList} /> : <></>
         }
         {
           data === undefined ? <SpinContainer><Spin size='large' tip={task_id ? `Loading task ${task_id}…` : 'Loading…'}></Spin></SpinContainer> : <></> 
         }
         {
           data && data.status === "COMPLETED" && !noResult ? (isIdentification(data)
-            ? <IdentificationDetail data={data} task_id={task_id} onDelete={deleteTask} />
-            : <TaskDetail data={data} task_id={task_id} onDelete={deleteTask} />) : <></> 
+            ? <IdentificationDetail data={data} task_id={task_id} onDelete={deleteTask} sampleList={sampleList} />
+            : <TaskDetail data={data} task_id={task_id} onDelete={deleteTask} sampleList={sampleList} />) : <></> 
         }
         {
           data && data.status !== "COMPLETED" ? <TaskDetailedUnfinished data={data} taskId={task_id} /> : <></>
         }
+        {/* A cancelled run still shows what was measured, as a run without a result does. */}
+        {data?.status === 'CANCELLED' ? <section aria-label="Measured pattern" style={{ marginTop: 16 }}><MeasuredPattern taskId={task_id} /></section> : null}
       </Container>
     </Layout>
   )

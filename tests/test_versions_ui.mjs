@@ -377,7 +377,7 @@ console.log('missing bases ok');
     .map(row => [row.key, row.a, row.b]), [['name:BiFeO3', 60, 55], ['name:Other', null, 45]]);
   // two phases of one compound in a fit are paired by weight and numbered
   const two = weightRows({ weight_percent: { [A1]: 20, [A2]: 70, [B]: 10 } }, { weight_percent: { [A1]: 80, [B]: 20 } });
-  assert.deepEqual(two.map(row => [row.formula, row.a, row.b]), [['Bi2O3 #1', 70, 80], ['Bi2O3 #2', 20, null], ['Nb16.8O42', 10, 20]]);
+  assert.deepEqual(two.map(row => [row.formula, row.a, row.b]), [['Bi2O3 · COD 1010004 / COD 9012546', 70, 80], ['Bi2O3 · COD 9012546', 20, null], ['Nb16.8O42', 10, 20]]);
   assert.equal(new Set(two.map(row => row.key)).size, 3);
   console.log('fit comparison weight rows ok');
 }
@@ -529,7 +529,7 @@ import { phaseSymbolLookup } from '../src/dara/server/ui/src/components/versions
 
 {
   const runs = [{ version: 3, label: "All phases refined" }, { version: 5, label: "All phases refined" }, { version: 6, label: "Other" }];
-  assert.equal(versionLabel(runs[0], runs), "All phases refined · run 1");
+  assert.equal(versionLabel(runs[0], runs), "All phases refined");
   assert.equal(versionLabel(runs[1], runs), "All phases refined · run 2");
   assert.equal(versionLabel(runs[2], runs), "Other");
   console.log("duplicate version labels get a run number ok");
@@ -575,4 +575,31 @@ import { weightSpread } from '../src/dara/server/ui/src/components/versions.mjs'
   assert.equal(rows.length, 1);
   assert.equal(rows[0].formula, 'Y2O3');
   assert.deepEqual([rows[0].a, rows[0].b], [32.9, 26.3]);
+}
+
+// --- one space-group format, phase identity on screen -------------------------------------------
+import { databaseIdOf, distinctPhaseLabel, formatSpaceGroup, formatSymbolsInText, removeManyRequest } from '../src/dara/server/ui/src/components/versions.mjs';
+{
+  assert.equal(formatSpaceGroup('P12_1/c1', 14), 'P2₁/c');
+  assert.equal(formatSpaceGroup('C12/c1'), 'C2/c');
+  assert.equal(formatSpaceGroup('C1m1'), 'Cm');
+  assert.equal(formatSpaceGroup('P4_2/mnm'), 'P4₂/mnm');
+  assert.equal(formatSpaceGroup('P2_12_12_1'), 'P2₁2₁2₁');
+  assert.equal(formatSpaceGroup('P-3c1'), 'P-3c1', 'a trigonal symbol is not shortened');
+  assert.equal(formatSpaceGroup('P-1'), 'P-1');
+  assert.equal(formatSpaceGroup(null, null), '?');
+  assert.equal(formatSymbolsInText('ZrO2 · P121/c1: Same compound as ZrO2 · P121/c1 (P121/c1).', ['P12_1/c1']),
+    'ZrO2 · P2₁/c: Same compound as ZrO2 · P2₁/c (P2₁/c).');
+  assert.equal(formatSymbolsInText('LiO8 · C1m1 and xC1m1', ['C1m1']), 'LiO8 · Cm and xC1m1', 'only whole symbols');
+  const zro2 = ['ZrO2_14_(cod_1010912)-0', 'ZrO2_14_(cod_2300296)-0', 'Li2CO3_15_(cod_2310703)-0', 'ZrO2_57_(cod_9005834)-None', 'LiO8_8_(mp_mp-1235059)-0'];
+  const symbol = name => ({ 14: 'P12_1/c1', 15: 'C12/c1', 57: 'Pbcm', 8: 'C1m1' })[spacegroupOfPhase(name)];
+  assert.equal(databaseIdOf(zro2[4]), 'MP mp-1235059');
+  assert.equal(distinctPhaseLabel(zro2[0], zro2, symbol), 'ZrO2 · P2₁/c · COD 1010912');
+  assert.equal(distinctPhaseLabel(zro2[3], zro2, symbol), 'ZrO2 · Pbcm');
+  assert.equal(distinctPhaseLabel(zro2[2], zro2, symbol), 'Li2CO3 · C2/c');
+  assert.deepEqual(phaseLabels(zro2, symbol), ['ZrO2 (P2₁/c · COD 1010912)', 'ZrO2 (P2₁/c · COD 2300296)', 'Li2CO3', 'ZrO2 (Pbcm)', 'LiO8']);
+  assert.equal(removeRequest(zro2[0], zro2, symbol).label, 'Remove ZrO2 (P2₁/c · COD 1010912)');
+  assert.deepEqual(removeManyRequest([zro2[4], zro2[3], zro2[0]], zro2, symbol),
+    { phases: [], remove: [zro2[4], zro2[3], zro2[0]], origin: 'remove', label: 'Remove LiO8, ZrO2 (Pbcm), ZrO2 (P2₁/c · COD 1010912)' });
+  console.log('space-group format and phase identity ok');
 }

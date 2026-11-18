@@ -52,4 +52,33 @@ const atLimit = latticeParameterRows({
 assert.deepEqual(atLimit.map(latticeStateNote), [null, 'at limit', null, null]);
 assert.equal(latticeStateNote(undefined), null);
 
+// R groups: rhombohedral axes come from the data (task 41 v3, hematite R-3c, COD 1011267)
+const rhombohedral = latticeParameterRows({
+  a: { value: 5.431, esd: null, unit: 'Å', state: 'fixed_reference' },
+  b: { value: 5.431, esd: null, unit: 'Å', state: 'fixed_reference' },
+  c: { value: 5.431, esd: null, unit: 'Å', state: 'fixed_reference' },
+  alpha: { value: 55.23, esd: null, unit: 'deg', state: 'fixed_reference' },
+  beta: { value: 55.23, esd: null, unit: 'deg', state: 'fixed_reference' },
+  gamma: { value: 55.22999999999999, esd: null, unit: 'deg', state: 'fixed_reference' },
+}, 167);
+assert.deepEqual(rhombohedral.map(row => row.label), ['a = b = c', 'α = β = γ']);
+assert.deepEqual(rhombohedral.map(row => formatParameterWithEsd(row.parameter)), ['5.431 Å', '55.23°']);
+assert.deepEqual(rhombohedral.map(latticeStateNote), ['fixed (DB)', 'fixed (DB)']);
+// the same group on hexagonal axes keeps a = b, c, γ = 120°
+const hexagonalAxes = latticeParameterRows({
+  a: { value: 5.0356, esd: 0.0001, unit: 'Å' }, c: { value: 13.7489, esd: 0.0004, unit: 'Å' },
+  alpha: { value: 90, esd: null, unit: 'deg' }, gamma: { value: 120, esd: null, unit: 'deg' },
+}, 167);
+assert.deepEqual(hexagonalAxes.map(row => row.label), ['a = b', 'c', 'α = β', 'γ']);
+assert.equal(formatParameterWithEsd(hexagonalAxes[3].parameter), '120°');
+// a non-R trigonal group never switches to rhombohedral axes
+assert.deepEqual(latticeParameterRows({ a: { value: 3.1, esd: 0.001, unit: 'Å' }, c: { value: 4.7, esd: 0.001, unit: 'Å' } }, 164)
+  .map(row => row.label), ['a = b', 'c', 'α = β', 'γ']);
+
+// values without an e.s.d. keep their own digits; with an e.s.d. the value ± e.s.d. rule
+assert.equal(formatParameterWithEsd({ value: 7.6498, esd: null, unit: 'Å', state: 'at_limit' }), '7.6498 Å');
+assert.equal(formatParameterWithEsd({ value: 5.431, esd: null, unit: 'Å' }), '5.431 Å');
+assert.equal(formatParameterWithEsd({ value: 107.77, esd: null, unit: 'deg' }), '107.77°');
+assert.equal(formatParameterWithEsd({ value: 9.788829999999999, esd: 0.00045000000000000004, unit: 'Å' }), '9.78883 ± 0.00045 Å');
+
 console.log('Lattice symmetry constraints and e.s.d. formatting passed.');

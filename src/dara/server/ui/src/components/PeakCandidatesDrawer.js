@@ -2,7 +2,7 @@ import React from 'react';
 import { Alert, Button, Drawer, List, Space, Spin, Tag, Tooltip, Typography } from 'antd';
 import { NOT_AVAILABLE, postJson } from './QuickRefineProgress';
 import ReferenceSearch from './ReferenceSearch';
-import { existingPhase, formatSelection, formulaOfPhase, knownDisplayFormula, refSourceForHint } from './versions.mjs';
+import { existingPhase, formatSelection, formatSpaceGroup, formulaOfPhase, knownDisplayFormula, refSourceForHint } from './versions.mjs';
 import {
   CANDIDATES_SHOWN, autoMatchStrength, collectHints, compareCandidates, hintText, isSlowCandidate, matchStrength, significantPeaks,
 } from './peakSelection.mjs';
@@ -114,7 +114,6 @@ function CandidateList({ search, peaks, limit, previewRef, onPreview, onAdd, bus
       const disabledReason = candidate.cif_available === false ? 'The CIF file for this reference is not available locally.'
         : busy ? 'Another re-refinement is running.' : null;
       const strength = strengthOf(candidate);
-      const useful = strength && strength.label !== 'Weak match';
       const existing = existingOf(candidate.ref);
       return <List.Item key={`${candidate.source}|${candidate.ref}`} actions={[
         <Button key="preview" size="small" disabled={!candidate.sticks?.length}
@@ -123,13 +122,14 @@ function CandidateList({ search, peaks, limit, previewRef, onPreview, onAdd, bus
         </Button>,
         existing ? <ExistingMark key="add" existing={existing} onOpenVersion={onOpenVersion} />
           : <Tooltip key="add" title={disabledReason || 'Add and refine as a new version'}>
-            <span><Button size="small" type={useful ? 'primary' : 'default'} disabled={Boolean(disabledReason)} onClick={() => onAdd(candidate)}>Add</Button></span>
+            <span><Button size="small" disabled={Boolean(disabledReason)} onClick={() => onAdd(candidate)}>Add</Button></span>
           </Tooltip>,
       ]}>
         <List.Item.Meta
           title={<Space wrap size="small">
             <Tooltip title={candidate.ref}><strong>{candidateFormula(candidate)}</strong></Tooltip>
-            {candidate.spacegroup_symbol ? <Text type="secondary">{candidate.spacegroup_symbol}{candidate.spacegroup_number ? ` (No. ${candidate.spacegroup_number})` : ''}</Text> : null}
+            {candidate.spacegroup_symbol || candidate.spacegroup_number ? <Tooltip title={candidate.spacegroup_number ? `Space group No. ${candidate.spacegroup_number}` : null}>
+              <Text type="secondary">{formatSpaceGroup(candidate.spacegroup_symbol, candidate.spacegroup_number)}</Text></Tooltip> : null}
             <Tag>{SOURCE_LABEL[sourceKind(candidate.source)] || candidate.source}</Tag>
             {strength ? <Tooltip title="Strong: explains two or more selected peaks with no contradicting reflection. Possible: explains the peaks with few contradictions; add it and compare the fits. One peak alone is at most possible: many references have a line there. Weak: only some peaks overlap, often by chance.">
               <Tag color={strength.color}>{strength.label}</Tag>

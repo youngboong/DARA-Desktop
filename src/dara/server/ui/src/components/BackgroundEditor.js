@@ -94,13 +94,14 @@ export default function BackgroundEditor({ busy, disabled, getView, onSubmit, ba
 }
 
 /**
- * Panel of the background curve editor (shown above the plot while the curve is edited on it).
+ * Panel of the background curve editor, beside the plot while the curve is edited on it (`side`),
+ * so dragging an anchor never moves the plot; above it otherwise.
  * `anchors` are `[[2θ, y], ...]`; `onChange(anchors)` replaces them; `selected` is the anchor
  * index Delete removes. `warnings` never block; `error` (anchors the server would reject) does.
  */
 export function BackgroundCurvePanel({
   anchors, selected = null, onChange, onSelect, onRemove, warnings = [], error = null, busy = false,
-  canReset = false, onSubmit, onReset, onCancel,
+  canReset = false, onSubmit, onReset, onCancel, side = false,
 }) {
   const setY = (index, value) => {
     if (!Number.isFinite(value)) return;
@@ -115,9 +116,9 @@ export function BackgroundCurvePanel({
       aria-label={`Remove anchor ${index + 1}`} disabled={anchors.length <= MIN_ANCHORS} onClick={event => { event.stopPropagation(); onRemove(index); }} /> },
   ];
   const rows = anchors.map(([x, y], index) => ({ key: index, index, x, y }));
-  return <div role="region" aria-label="Background curve editor" style={{ marginBottom: 8, padding: '8px 12px',
-    border: '1px solid var(--dara-border, #d9d9d9)', borderRadius: 6, background: 'var(--dara-surface-sunken, #fafafa)' }}>
-    <Space align="start" wrap size="large" style={{ width: '100%' }}>
+  return <div role="region" aria-label="Background curve editor" className={side ? 'dara-curve-side' : undefined} style={{ marginBottom: side ? 0 : 8, padding: '8px 12px',
+    border: '1px solid var(--dara-border)', borderRadius: 'var(--dara-radius)', background: 'var(--dara-surface-sunken)' }}>
+    <Space align="start" wrap size={side ? 'middle' : 'large'} direction={side ? 'vertical' : 'horizontal'} style={{ width: '100%' }}>
       <div style={{ maxWidth: 420 }}>
         <Text strong>Edit background curve</Text> <Text type="secondary">({anchors.length} points, PCHIP)</Text>
         <div><Text type="secondary">Drag a point up or down · click the curve to add a point · Alt+click a point or press Delete to remove the selected one</Text></div>
@@ -131,7 +132,7 @@ export function BackgroundCurvePanel({
           <Button onClick={onCancel}>Cancel</Button>
         </Space>
       </div>
-      <Table size="small" columns={columns} dataSource={rows} pagination={false} scroll={{ y: 150 }} style={{ width: 280 }}
+      <Table size="small" columns={columns} dataSource={rows} pagination={false} scroll={{ y: side ? 260 : 150 }} style={{ width: 280 }}
         rowClassName={row => (row.index === selected ? 'ant-table-row-selected' : '')}
         onRow={row => ({ onClick: () => onSelect(row.index) })} />
     </Space>

@@ -285,7 +285,8 @@ function identityRows(a, b) {
         key: size > 1 ? `${key}#${i + 1}` : key,
         base: displayFormula(names[0]),
         group: key,
-        formula: `${displayFormula(names[0])}${size > 1 ? ` #${i + 1}` : ''}`,
+        // One compound twice in a fit (two database records): named by its record, not "#1 / #2".
+        formula: `${displayFormula(names[0])}${size > 1 ? ` · ${names.map(name => databaseIdOf(name) || name).join(' / ')}` : ''}`,
         names,
         a: group.a[i]?.value ?? null,
         b: group.b[i]?.value ?? null,
@@ -296,10 +297,41 @@ function identityRows(a, b) {
   });
 }
 
-/** `R-3c`, `P2₁/c` (from BGMN's `P2_1/c`) or `SG 14` when only the number is known. */
-export function formatSpacegroup(symbol, number) {
-  if (symbol) return String(symbol).replace(/_(\d)/g, (_, digit) => SUBSCRIPT_DIGITS[Number(digit)]);
+/**
+ * Short Hermann–Mauguin symbol with subscripted screw axes, the one space-group format of the UI:
+ * `P2₁/c` from BGMN's full `P12_1/c1`, `C2/c` from `C12/c1`, `Cm` from `C1m1`, `P4₂/mnm`,
+ * `R-3c`; `SG 14` when only the number is known, `?` when neither is.
+ */
+export function formatSpaceGroup(symbol, number) {
+  if (symbol) {
+    const short = String(symbol).trim()
+      // Monoclinic full symbols name the two non-unique axes with 1: drop them (b, c or a unique).
+      .replace(/^([A-Z])1(\S+)1$/, '$1$2').replace(/^([A-Z])11(\S+)$/, '$1$2').replace(/^([A-Z])(\S+)11$/, '$1$2');
+    return short.replace(/_(\d)/g, (_, digit) => SUBSCRIPT_DIGITS[Number(digit)]);
+  }
   return finite(number) ? `SG ${Number(number)}` : '?';
+}
+
+/** Older name of `formatSpaceGroup`. */
+export const formatSpacegroup = formatSpaceGroup;
+
+const escapeRegExp = text => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+
+/**
+ * Server prose with the given space-group symbols (as stored: `P12_1/c1`, or with the underscores
+ * dropped: `P121/c1`) rewritten by `formatSpaceGroup`. Only listed symbols are touched.
+ */
+export function formatSymbolsInText(text, symbols = []) {
+  const forms = new Map();
+  (symbols || []).filter(Boolean).forEach(symbol => {
+    const raw = String(symbol);
+    forms.set(raw, formatSpaceGroup(raw));
+    forms.set(raw.replace(/_/g, ''), formatSpaceGroup(raw));
+  });
+  const keys = [...forms.keys()].filter(key => key !== forms.get(key)).sort((a, b) => b.length - a.length);
+  if (!keys.length) return String(text ?? '');
+  const pattern = new RegExp(`(^|[^\\w/-])(${keys.map(escapeRegExp).join('|')})(?![\\w/])`, 'g');
+  return String(text ?? '').replace(pattern, (_, lead, symbol) => `${lead}${forms.get(symbol)}`);
 }
 
 const clip = text => (text.length > MAX_LABEL ? `${text.slice(0, MAX_LABEL - 1)}…` : text);
@@ -309,9 +341,34 @@ const clip = text => (text.length > MAX_LABEL ? `${text.slice(0, MAX_LABEL - 1)}
  * (`Bi2O3 (SG 14), Nb16.8O42, Bi2O3 (SG 15)`). `symbolOf(name)` may supply the symbol.
  */
 export function phaseLabels(phases = [], symbolOf = () => null) {
-  const formulas = (phases || []).map(formulaOfPhase);
-  return (phases || []).map((name, i) => (formulas.filter(f => f === formulas[i]).length > 1
-    ? `${displayFormula(name)} (${formatSpacegroup(symbolOf(name), spacegroupOfPhase(name))})` : displayFormula(name)));
+  const list = phases || [];
+  const formulas = list.map(formulaOfPhase);
+  const groups = list.map(identityOf);
+  return list.map((name, i) => {
+    if (formulas.filter(f => f === formulas[i]).length < 2) return displayFormula(name);
+    // Same formula and space group twice (two database records): the record tells them apart.
+    const id = groups.filter(g => g === groups[i]).length > 1 ? databaseIdOf(name) : null;
+    return `${displayFormula(name)} (${[formatSpaceGroup(symbolOf(name), spacegroupOfPhase(name)), id].filter(Boolean).join(' · ')})`;
+  });
+}
+
+const identityOf = name => `${formulaOfPhase(name)}_${spacegroupOfPhase(name)}`;
+
+/** Database record of a phase name for labels: `COD 1010912`, `ICSD 51182`, `MP mp-1235059`; `null` if none. */
+export function databaseIdOf(name) {
+  const match = String(name || '').match(/^.+?_\d+_\(([^)]+)\)/);
+  if (!match) return null;
+  return match[1].replace(/^(cod|icsd)_(\d+)$/i, (_, db, n) => `${db.toUpperCase()} ${n}`).replace(/^mp_(mp-\d+)$/i, 'MP $1');
+}
+
+/**
+ * Label of phase `name` within the phase list of one fit: `ZrO2 · P2₁/c`, with the database record
+ * where that formula and space group occur more than once (`ZrO2 · P2₁/c · COD 1010912`).
+ */
+export function distinctPhaseLabel(name, phases = [], symbolOf = () => null) {
+  const repeated = (phases || []).filter(other => identityOf(other) === identityOf(name)).length > 1;
+  const sg = spacegroupOfPhase(name) === null && !symbolOf(name) ? null : formatSpaceGroup(symbolOf(name), spacegroupOfPhase(name));
+  return [displayFormula(name), sg, repeated ? databaseIdOf(name) : null].filter(Boolean).join(' · ');
 }
 
 /**
@@ -344,14 +401,16 @@ function spacegroupLabel(item, versions, symbolOf) {
 /**
  * Label of version row `item`; when another version has the same label (older versions named
  * only the formula they added), the added references' space groups are appended. Versions that
- * still share a label after that are told apart by a run number (` · run 2`, oldest first).
+ * still share a label after that are told apart by a run number (` · run 2` from the second one on).
  */
 export function versionLabel(item, versions = [], symbolOf = () => null) {
   const label = spacegroupLabel(item, versions, symbolOf);
   if (!label) return label;
   const same = (versions || []).filter(other => other.version !== item.version
     && spacegroupLabel(other, versions, symbolOf) === label).concat(item).sort((a, b) => a.version - b.version);
-  return same.length > 1 ? `${label} · run ${same.findIndex(other => other.version === item.version) + 1}` : label;
+  // The oldest keeps the plain label; later ones read "· run 2", "· run 3".
+  const run = same.findIndex(other => other.version === item.version) + 1;
+  return run > 1 ? `${label} · run ${run}` : label;
 }
 
 /**
@@ -369,8 +428,7 @@ export function sameFitAs(item, versions = []) {
 export function phaseRecordLine(name, symbol = null) {
   const match = String(name || '').match(/^(.+?)_(\d+)_\(([^)]+)\)/);
   if (!match) return String(name || '');
-  const id = match[3].replace(/^(cod|icsd)_(\d+)$/i, (_, db, n) => `${db.toUpperCase()} ${n}`);
-  return [displayFormula(name), formatSpacegroup(symbol, Number(match[2])), id].join(' · ');
+  return [displayFormula(name), formatSpacegroup(symbol, Number(match[2])), databaseIdOf(name)].join(' · ');
 }
 
 /**
@@ -458,11 +516,19 @@ export function versionPhaseOptions(displayedPhases = [], versions = []) {
 }
 
 /** Quick-refine body that drops one phase. */
-export function removeRequest(phaseName) {
-  return {
-    phases: [], remove: [phaseName], origin: 'remove',
-    label: `Remove ${displayFormula(phaseName)}`,
-  };
+export function removeRequest(phaseName, current = [], symbolOf = () => null) {
+  return removeManyRequest([phaseName], current, symbolOf);
+}
+
+/**
+ * Quick-refine body that drops several phases of the displayed fit (`current`) in one new version:
+ * the label names each one as `phaseLabels` does (space group and record where a formula repeats).
+ */
+export function removeManyRequest(names = [], current = [], symbolOf = () => null) {
+  const list = (current || []).length ? current : names;
+  const labels = phaseLabels(list, symbolOf);
+  const named = names.map(name => (list.includes(name) ? labels[list.indexOf(name)] : displayFormula(name)));
+  return { phases: [], remove: [...names], origin: 'remove', label: clip(`Remove ${named.join(', ')}`) };
 }
 
 /**
@@ -841,4 +907,35 @@ export function weightSpread(allResults = [], ratio = NEAR_RWP_RATIO) {
     });
   });
   return Object.fromEntries(Object.entries(spread).filter(([, entry]) => entry.n >= 2));
+}
+
+/**
+ * Tab-separated phase table of one fit for the clipboard (spreadsheets, lab notebooks): phase,
+ * space group, wt%, ± e.s.d. (two decimals, as on screen). A Le Bail phase has no amount.
+ */
+export function phaseTableTsv(phases = [], { details = {}, symbolOf = () => null } = {}) {
+  const rows = (phases || []).map(name => {
+    const row = details?.[name] || {};
+    const label = distinctPhaseLabel(name, phases, symbolOf).split(' · ');
+    const record = (phases || []).filter(other => identityOf(other) === identityOf(name)).length > 1 ? databaseIdOf(name) : null;
+    const amount = row.le_bail ? 'Le Bail' : finite(row.weight_percent) ? Number(row.weight_percent).toFixed(2) : '';
+    return [[label[0], record].filter(Boolean).join(' '), formatSpaceGroup(symbolOf(name), spacegroupOfPhase(name)),
+      amount, finite(row.weight_esd_percent) && !row.le_bail ? Number(row.weight_esd_percent).toFixed(2) : ''];
+  });
+  return [['Phase', 'Space group', 'wt%', '± e.s.d.'], ...rows].map(cells => cells.join('\t')).join('\n');
+}
+
+/**
+ * Label of a version that only changes the refinement controls, naming the change:
+ * `Controls: preferred orientation SPHAR4, lattice ±2 %`. `null` when nothing changes.
+ */
+export function controlsLabel(controls = {}) {
+  const parts = [];
+  if (controls.orientation === 'isotropic') parts.push('no preferred orientation');
+  else if (/^SPHAR\d+$/.test(controls.orientation || '')) parts.push(`preferred orientation ${controls.orientation}`);
+  if (controls.lattice === 'fixed') parts.push('lattice fixed to the reference');
+  else if (controls.lattice === 'refine') parts.push(`lattice ±${controls.lattice_percent} %`);
+  if (controls.peak_width === 'refine') parts.push('sample broadening refined');
+  else if (controls.peak_width === 'instrument_only') parts.push('instrument broadening only');
+  return parts.length ? clip(`Controls: ${parts.join(', ')}`) : null;
 }

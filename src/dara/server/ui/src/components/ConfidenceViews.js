@@ -1,6 +1,6 @@
 import React from 'react';
 import { Alert, Button, Checkbox, Dropdown, Space, Tag, Tooltip } from 'antd';
-import { DownloadOutlined, DownOutlined } from '@ant-design/icons';
+import { DownloadOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import { FormulaText } from './ChemicalFormula';
 import {
   EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, overallAlertType, patternHref,
@@ -14,20 +14,28 @@ import { downloadReport } from './ResultWorkflows';
 
 const lines = values => <div style={{ whiteSpace: 'pre-line' }}>{values.map((value, index) => <div key={index}><FormulaText text={value} /></div>)}</div>;
 
+// `format(text)` -> {text, parameters} words server prose for the page (fitCautions.cautionDisplay).
+const plainFormat = text => ({ text, parameters: null });
+const formatted = (format, values) => values.map(value => format(value).text);
+
 /**
  * Overall banner at the top of a completed result; nothing for tasks without confidence data.
+ * `subject` names the fit it judges ("v3 (adopted)"); raw BGMN parameter lists go to a tooltip.
  */
-export function ConfidenceBanner({ confidence, action = null, style = null }) {
+export function ConfidenceBanner({ confidence, action = null, style = null, subject = null, format = plainFormat }) {
   const overall = confidence?.overall;
   if (!overall?.level) return null;
-  const reasons = reasonsText(overall);
+  const reasons = reasonsText(overall).map(format);
   return <Alert
     style={{ marginBottom: 16, ...style }}
     showIcon
     type={overallAlertType(overall.level)}
-    message={overall.label || overall.level}
+    message={<>{overall.label || overall.level}{subject ? <span className="dara-banner-subject">{` — ${subject}`}</span> : null}</>}
     description={<>
-      {reasons.length ? <ul style={{ margin: 0, paddingLeft: 20 }}>{reasons.map((reason, index) => <li key={index}><FormulaText text={reason} /></li>)}</ul> : null}
+      {reasons.length ? <ul style={{ margin: 0, paddingLeft: 20 }}>{reasons.map((reason, index) => <li key={index}><FormulaText text={reason.text} />
+        {reason.parameters ? <Tooltip title={`BGMN parameters without a value: ${reason.parameters}`}>
+          <InfoCircleOutlined aria-label="Undefined BGMN parameters" tabIndex={0} style={{ marginLeft: 6, color: 'var(--dara-text-hint)' }} />
+        </Tooltip> : null}</li>)}</ul> : null}
       <Space wrap size="middle" style={{ marginTop: 4 }}>
         {action}
         <a href="/tutorial#result-confidence">How is this assessed?</a>
@@ -43,18 +51,18 @@ export function StateTag({ state }) {
 }
 
 /** Per-phase verdict tag with the evidence behind it in the tooltip. */
-export function VerdictTag({ verdict }) {
+export function VerdictTag({ verdict, format = plainFormat }) {
   if (!verdict?.level) return <span>—</span>;
-  const content = [...reasonsText(verdict), ...evidenceLines(verdict.evidence).map(line => `• ${line}`)];
+  const content = [...formatted(format, reasonsText(verdict)), ...evidenceLines(verdict.evidence).map(line => `• ${line}`)];
   const tag = <Tag color={verdictColor(verdict.level)}>{verdict.label || verdict.level}</Tag>;
   return content.length ? <Tooltip title={lines(content)}>{tag}</Tooltip> : tag;
 }
 
 /** Overall candidate tag for the candidates table. */
-export function OverallTag({ confidence, short = false }) {
+export function OverallTag({ confidence, short = false, format = plainFormat }) {
   const overall = confidence?.overall;
   if (!overall?.level) return <span>—</span>;
-  const reasons = reasonsText(overall);
+  const reasons = formatted(format, reasonsText(overall));
   const full = overall.label || overall.level;
   const tag = <Tag color={overallColor(overall.level)}>{short ? overallShortLabel(overall.level) || full : full}</Tag>;
   const tip = short ? [full, ...reasons] : reasons;

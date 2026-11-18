@@ -50,7 +50,15 @@ function correctionNote(applied) {
 const fixed = digits => value => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-/, '\u2212'));
 
 // Formula with the space group, so polymorphs of one formula (R-3c and R-3m Fe2O3) stay apart.
-const phaseText = row => { const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg && !String(label).includes('·') ? `${label} (SG ${sg})` : label; };
+// The page's name for each phase of the fit (`name -> label | null`): formula, space group and, where
+// those repeat, the database record. Without it the server's label and the space-group number.
+const PhaseLabels = React.createContext(null);
+const phaseText = (row, labelOf = null) => {
+  const own = labelOf?.(row.phase);
+  if (own) return own;
+  const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase);
+  return sg && !String(label).includes('·') ? `${label} (SG ${sg})` : label;
+};
 
 // The instrument FWHM is remembered per instrument profile; the page works without storage.
 const fwhmKey = profile => `dara-instrument-fwhm:${profile}`;
@@ -67,8 +75,9 @@ function storeFwhm(profile, value) {
  * (Scherrer per peak, Williamson–Hall per phase) and the unit cell from the peak positions.
  * Loads when the tab is shown.
  */
-export default function PeakListTab({ taskId, sel, active }) {
-  const [view, setView] = React.useState('calculated');
+export default function PeakListTab({ taskId, sel, active, phaseLabel = null, identification = false }) {
+  // A search-match result has no fitted profile: its own peaks come first.
+  const [view, setView] = React.useState(identification ? 'observed' : 'calculated');
   const [advanced] = useAdvancedTools();
   // A remembered advanced view shows "Observed peaks" while the tools are off (and fetches nothing).
   const shown = shownPeakView(view, advanced);
@@ -114,7 +123,7 @@ export default function PeakListTab({ taskId, sel, active }) {
   const plainQuery = `sel=${encodeURIComponent(sel)}`;
   // Profiles without a file of their own (synchrotron) cannot carry a curve.
   const measurable = Boolean(profile) && profile !== 'synchrotron';
-  return <>
+  return <PhaseLabels.Provider value={phaseLabel}>
     <div className="dara-toolbar">
       <div className="dara-toolbar-group">
         <Radio.Group size="small" optionType="button" value={shown} onChange={event => setView(event.target.value)}
@@ -148,11 +157,13 @@ export default function PeakListTab({ taskId, sel, active }) {
     {shown === 'observed' ? <ObservedPeaks taskId={taskId} query={plainQuery} onResponse={onResponse} active={active} />
       : shown === 'size' ? <SizeStrain taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
         : shown === 'cell' ? <CellRefinementView taskId={taskId} sel={sel} model={shiftModel} active={active} onPhases={onCellPhases} />
-          : <CalculatedReflections taskId={taskId} sel={sel} active={active} />}
+          : <CalculatedReflections taskId={taskId} sel={sel} active={active} widths={!identification} />}
     {measurable && advanced ? <FwhmCurveDialog profile={profile} open={curveOpen} onClose={() => setCurveOpen(false)} onChange={curveChanged} /> : null}
+    {/* An identification shows the RIR amounts and Scherrer sizes in its Phases tab already. */}
     {advanced ? null : <Text className="dara-footnote" style={{ marginTop: 12 }}>
-      Crystallite size, unit cell, RIR and Le Bail: turn on Advanced analysis tools in the Help menu.</Text>}
-  </>;
+      {identification ? 'Size / strain per peak and the unit cell from the peak positions: turn on Advanced analysis tools in the Help menu.'
+        : 'Crystallite size, unit cell, RIR and Le Bail: turn on Advanced analysis tools in the Help menu.'}</Text>}
+  </PhaseLabels.Provider>;
 }
 
 /** GET `path` while `active` (again when `reload` changes); hands each response to `onResponse`. */
@@ -177,6 +188,7 @@ const withEsd = (value, esd, digits) => (value == null ? '—'
 
 /** Peaks of the measured pattern (GET /task/{id}/observed-peaks): position, intensity, fitted FWHM and the assignment to the reflections of the fit. */
 function ObservedPeaks({ taskId, query, onResponse, active }) {
+  const labelOf = React.useContext(PhaseLabels);
   const [filter, setFilter] = React.useState('all');
   const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onResponse, 0);
 
@@ -196,7 +208,7 @@ function ObservedPeaks({ taskId, query, onResponse, active }) {
       className: 'dara-num', sorter: byNumber('fwhm_deg'),
       render: fwhmCell },
     { title: 'Phase', key: 'phase', sorter: (a, b) => Number(Boolean(a.phase)) - Number(Boolean(b.phase)) || String(a.phase_label).localeCompare(String(b.phase_label)),
-      render: (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>) },
+      render: (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row, labelOf)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>) },
     { title: <Tooltip title="Indices of the nearest reflection, in the database setting"><span>hkl</span></Tooltip>, dataIndex: 'hkl',
       render: value => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{value ?? <Text type="secondary">—</Text>}</span> },
     { title: <Tooltip title="Observed − calculated 2θ of the assigned reflection"><span>Δ2θ (°)</span></Tooltip>, dataIndex: 'delta_two_theta_deg', className: 'dara-num',
@@ -218,7 +230,7 @@ function ObservedPeaks({ taskId, query, onResponse, active }) {
 }
 
 const byNumber = key => (a, b) => (a[key] ?? -Infinity) - (b[key] ?? -Infinity);
-const phaseCell = (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>);
+const phaseCell = labelOf => (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row, labelOf)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>);
 // The fitted Kα1 FWHM ± e.s.d., or why the peak has none (merged, overlapped, too weak).
 function fwhmCell(value, row) {
   return value == null ? <Tooltip title={FIT_NOTE_HELP[row.fit_note] || null}><Text type="secondary">{row.fit_note || '—'}</Text></Tooltip>
@@ -227,6 +239,7 @@ function fwhmCell(value, row) {
 
 /** "Size / strain" view: the Scherrer size of each observed peak, then the Williamson–Hall fit per phase. */
 function SizeStrain({ taskId, query, onResponse, active, reload }) {
+  const labelOf = React.useContext(PhaseLabels);
   const [body, error] = useSizeRequest(`/task/${taskId}/observed-peaks?${query}`, active, onResponse, reload);
   if (error) return <Alert type="error" showIcon message="The observed peaks could not be loaded." description={error} />;
   if (!body) return <div style={{ minHeight: 480, paddingTop: 48, textAlign: 'center' }}><Spin tip="Fitting the peaks of the measured pattern" /></div>;
@@ -236,7 +249,7 @@ function SizeStrain({ taskId, query, onResponse, active, reload }) {
     ? <Tooltip title="Scherrer estimate from this peak alone: K·λ / (β·cos θ), β the FWHM with the instrument FWHM at this angle removed"><span>Size (nm)</span></Tooltip>
     : <Tooltip title="No instrument broadening removed: a lower bound. Choose a standard curve or a constant instrument FWHM to correct it."><span>Size (nm), uncorrected</span></Tooltip>;
   const columns = [
-    { title: 'Phase', key: 'phase', render: phaseCell,
+    { title: 'Phase', key: 'phase', render: phaseCell(labelOf),
       sorter: (a, b) => Number(Boolean(a.phase)) - Number(Boolean(b.phase)) || String(a.phase_label).localeCompare(String(b.phase_label)) },
     { title: <Tooltip title="Indices of the nearest reflection, in the database setting"><span>hkl</span></Tooltip>, dataIndex: 'hkl',
       render: value => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{value ?? <Text type="secondary">—</Text>}</span> },
@@ -271,6 +284,7 @@ const gated = (row, detail, text) => (row.reliable === false && row.intercept !=
 
 /** Williamson–Hall fit per phase (GET /task/{id}/williamson-hall) beside the Rietveld size and strain. */
 function WilliamsonHall({ taskId, query, onResponse, active, reload }) {
+  const labelOf = React.useContext(PhaseLabels);
   const [body, error] = useSizeRequest(`/task/${taskId}/williamson-hall?${query}`, active, onResponse, reload);
 
   if (error) return <Alert type="error" showIcon message="The size / strain estimates could not be loaded." description={error} />;
@@ -280,7 +294,7 @@ function WilliamsonHall({ taskId, query, onResponse, active, reload }) {
   if (!phases.length) return <Alert type="info" showIcon message="No observed peak is assigned to a phase of this fit." />;
   const columns = [
     { title: 'Phase', key: 'phase', render: (_, row) => <>
-      <ChemicalFormula formula={phaseText(row)} />
+      <ChemicalFormula formula={phaseText(row, labelOf)} />
       {row.note ? <div className="dara-cell-note">{row.note}</div> : null}
     </> },
     { title: <Tooltip title="D = K·λ / intercept of the line"><span>W–H size (nm)</span></Tooltip>, key: 'size', className: 'dara-num',
@@ -309,6 +323,7 @@ function WilliamsonHall({ taskId, query, onResponse, active, reload }) {
 
 /** β·cos θ against 4·sin θ for one phase, with FWHM error bars and the fitted line. */
 function WilliamsonHallPlot({ entry }) {
+  const labelOf = React.useContext(PhaseLabels);
   const xs = entry.points.map(point => point.x);
   const top = Math.max(...xs) * 1.05;
   const data = [{ x: xs, y: entry.points.map(point => point.y), text: entry.points.map(point => point.hkl ?? ''), type: 'scatter', mode: 'markers',
@@ -324,13 +339,14 @@ function WilliamsonHallPlot({ entry }) {
     xaxis: { title: { text: '4·sin θ' }, rangemode: 'tozero', zeroline: false },
     yaxis: { title: { text: 'β·cos θ (rad)', standoff: 8 }, automargin: true, rangemode: 'tozero', zeroline: false } };
   return <figure style={{ margin: 0 }}>
-    <figcaption className="dara-wh-title"><ChemicalFormula formula={phaseText(entry)} /></figcaption>
+    <figcaption className="dara-wh-title"><ChemicalFormula formula={phaseText(entry, labelOf)} /></figcaption>
     <Plot data={data} layout={layout} config={{ displaylogo: false, responsive: true }} useResizeHandler style={{ width: '100%', height: 250 }} />
   </figure>;
 }
 
 /** Reflections of the displayed fit (hkl, 2θ, d, intensity, FWHM) from GET /task/{id}/peaks, filterable by phase, with the CSV from /peaks.csv. */
-function CalculatedReflections({ taskId, sel, active }) {
+function CalculatedReflections({ taskId, sel, active, widths = true }) {
+  const labelOf = React.useContext(PhaseLabels);
   const [body, setBody] = React.useState(null);
   const [error, setError] = React.useState('');
   const [phase, setPhase] = React.useState(undefined);
@@ -353,10 +369,10 @@ function CalculatedReflections({ taskId, sel, active }) {
   if (!body) return <div style={{ minHeight: 480, paddingTop: 48, textAlign: 'center' }}><Spin /></div>;
 
   const rows = (body.rows || []).map((row, index) => ({ ...row, key: index }));
-  const phases = [...new Map(rows.map(row => [row.phase, phaseText(row)])).entries()];
+  const phases = [...new Map(rows.map(row => [row.phase, phaseText(row, labelOf)])).entries()];
   const shown = phase ? rows.filter(row => row.phase === phase) : rows;
   const columns = [
-    { title: 'Phase', key: 'phase', render: (_, row) => <ChemicalFormula formula={phaseText(row)} /> },
+    { title: 'Phase', key: 'phase', render: (_, row) => <ChemicalFormula formula={phaseText(row, labelOf)} /> },
     { title: <Tooltip title="Indices in the database setting (as on cards). For a phase refined in a subgroup setting, the refined-setting indices follow in brackets."><span>hkl</span></Tooltip>, key: 'hkl',
       render: (_, row) => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{row.hkl_database_setting ? <>{row.hkl_database_setting} <Text type="secondary">{`[${row.h} ${row.k} ${row.l}]`}</Text></> : `${row.h} ${row.k} ${row.l}`}</span> },
     { title: '2θ (°)', dataIndex: 'two_theta_deg', className: 'dara-num', sorter: (a, b) => a.two_theta_deg - b.two_theta_deg, render: fixed(3) },
@@ -368,7 +384,7 @@ function CalculatedReflections({ taskId, sel, active }) {
       render: (value, row) => (value == null
         ? <Tooltip title={row.fwhm_note || null}><Text type="secondary">{row.fwhm_note === 'overlapped' ? 'overlapped' : '—'}</Text></Tooltip>
         : fixed(3)(value)) },
-  ];
+  ].filter(column => widths || column.dataIndex !== 'fwhm_deg'); // reference sticks have no width
   return <>
     <div className="dara-toolbar">
       <Select size="small" allowClear aria-label="Filter by phase" placeholder="All phases" style={{ minWidth: 240 }} value={phase} onChange={setPhase}

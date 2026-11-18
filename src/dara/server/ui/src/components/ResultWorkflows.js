@@ -5,7 +5,7 @@ import { runAfterSuccess } from './submitHelpers.mjs';
 import { API, NOT_AVAILABLE, postJson, requestJson } from './QuickRefineProgress';
 import { DEFAULT_CONTROLS, RefinementControlsEditor } from './PracticalControls';
 import { selectionQuery, withHkl } from './confidence.mjs';
-import { selectOptionGroups, selectionLabel, selectedPhasesRequest } from './versions.mjs';
+import { controlsLabel, selectOptionGroups, selectionLabel, selectedPhasesRequest } from './versions.mjs';
 
 async function responseJson(response) {
   const body = await response.json();
@@ -191,10 +191,31 @@ export async function retryTask(taskId, applyRemedy) {
 
 const changeText = value => (value !== null && typeof value === 'object' ? JSON.stringify(value) : String(value));
 
+/**
+ * "Refinement controls…" of the Refine menu: lattice window, preferred orientation and peak
+ * broadening for the phases of the displayed fit, refined as a new version (HighScore's
+ * refinement-control settings; the fit itself is kept).
+ */
+export function RefinementControlsDialog({ open, onCancel, onSubmit, busy = false }) {
+  const [controls, setControls] = React.useState(DEFAULT_CONTROLS);
+  React.useEffect(() => { if (open) setControls(DEFAULT_CONTROLS); }, [open]);
+  const label = controlsLabel(controls);
+  return <Modal title="Refinement controls" open={open} width={720} onCancel={onCancel}
+    okText="Refine as new version" okButtonProps={{ disabled: busy || !label }}
+    onOk={() => onSubmit({ phases: [], remove: [], origin: 'manual', label, controls })}>
+    <Typography.Paragraph type="secondary">Applies to every phase of the displayed fit; “Keep saved/default” leaves a setting as it is.</Typography.Paragraph>
+    <RefinementControlsEditor value={controls} onChange={setControls} />
+  </Modal>;
+}
+
 /** Retry buttons of a failed task: suggested fix (after a confirmation of the changes) and a copy of the conditions. */
 export function RetryActions({ taskId, errorSummary }) {
   const [busy, setBusy] = React.useState(false);
+  const [retrying, setRetrying] = React.useState(false);
   const remedy = errorSummary?.remedy;
+  // A failure that a retry with the same settings usually clears (Ray memory or start-up): one click.
+  const temporary = errorSummary?.temporary === true;
+  const retrySame = async () => { setRetrying(true); await retryTask(taskId, false); setRetrying(false); };
   const retryWithFix = async () => {
     setBusy(true);
     try {
@@ -221,7 +242,8 @@ export function RetryActions({ taskId, errorSummary }) {
     }
   };
   return <Space wrap>
-    <Button type="primary" href={`/?clone_task=${taskId}`}>Rerun</Button>
+    {temporary ? <Button type="primary" loading={retrying} onClick={retrySame}>Retry with the same settings</Button> : null}
+    <Button type={temporary ? 'default' : 'primary'} href={`/?clone_task=${taskId}`}>{temporary ? 'Rerun with edited settings…' : 'Rerun'}</Button>
     {remedy?.label ? <Button loading={busy} onClick={retryWithFix}>{`Retry with suggested fix (${remedy.label})`}</Button> : null}
   </Space>;
 }
@@ -230,11 +252,15 @@ export function RetryActions({ taskId, errorSummary }) {
 export function TaskFailurePanel({ taskId, errorSummary, errorTb }) {
   // The backend's last traceback line ("ValueError: message") is the plain cause; the class name alone says little.
   const cause = String(errorSummary?.detail || '').split('\n')[0].trim();
+  // The exception text and local paths are for whoever debugs it: only under "Technical details".
   return <section className="dara-failure" role="alert" aria-label="Analysis failed">
     <h3>{errorSummary?.title || 'The analysis failed'}</h3>
-    <p>{errorSummary?.hint || 'No cause was recorded. Open Details for the error text, then rerun with the same settings.'}</p>
-    {cause ? <p style={{ overflowWrap: 'anywhere' }}>{cause}</p> : null}
-    {errorTb ? <details><summary>Details (full traceback)</summary><pre>{errorTb}</pre></details> : null}
+    <p>{errorSummary?.temporary ? 'This looks temporary: no input or setting is at fault. ' : ''}
+      {errorSummary?.hint || 'No cause was recorded. Open Technical details for the error text, then rerun with the same settings.'}</p>
     <RetryActions taskId={taskId} errorSummary={errorSummary} />
+    {cause || errorTb ? <details style={{ marginTop: 12 }}><summary>Technical details</summary>
+      {cause ? <p style={{ overflowWrap: 'anywhere' }}>{cause}</p> : null}
+      {errorTb ? <pre>{errorTb}</pre> : null}
+    </details> : null}
   </section>;
 }

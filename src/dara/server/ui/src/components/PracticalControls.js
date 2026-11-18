@@ -41,7 +41,7 @@ const stageText = data => {
 };
 const etaText = seconds => (seconds < 60 ? ', < 1 min left in this stage' : `, about ${Math.round(seconds / 60)} min left in this stage`);
 
-export function TaskProgress({ taskId, onStatusChange }) {
+export function TaskProgress({ taskId, onStatusChange, queuePosition = null }) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState('');
   const [busy, setBusy] = React.useState(false);
@@ -60,9 +60,12 @@ export function TaskProgress({ taskId, onStatusChange }) {
     };
     poll(); return () => { active = false; controller.abort(); clearTimeout(timer); };
   }, [taskId, onStatusChange]);
-  const cancel = () => Modal.confirm({ title: 'Stop this analysis?',
-    content: 'The active calculation will be terminated. Fully refined candidate checkpoints remain downloadable; the interrupted candidate is not a valid result.',
-    okText: 'Stop analysis', okButtonProps: { danger: true }, async onOk() {
+  // A queued task has not started: it is taken off the queue, nothing is computed or lost.
+  const queued = data?.status === 'READY';
+  const cancel = () => Modal.confirm({ title: queued ? 'Remove this analysis from the queue?' : 'Stop this analysis?',
+    content: queued ? 'It has not started yet. The task stays in the list as cancelled and can be rerun.'
+      : 'The active calculation will be terminated. Fully refined candidate checkpoints remain downloadable; the interrupted candidate is not a valid result.',
+    okText: queued ? 'Remove from queue' : 'Stop analysis', okButtonProps: { danger: true }, async onOk() {
       setBusy(true);
       try {
         const response = await fetch(`${API}/task/${taskId}/cancel`, { method: 'POST' });
@@ -74,11 +77,16 @@ export function TaskProgress({ taskId, onStatusChange }) {
     }});
   if (error) return <Alert type="warning" message={error} />;
   if (!data || data.status === 'COMPLETED') return null;
-  // A failed task without stage, attempts or checkpoints would be a card that only repeats "Failed": the failure panel says it.
-  if (data.status === 'FIZZLED' && !stageText(data) && !(data.total > 0) && !(data.completed_candidates > 0)) return null;
+  // A failed task: the failure panel says what happened; its last stage is stale. Only saved checkpoints are offered.
+  // A cancelled task with nothing done: the status row below says it; a card would only repeat it.
+  if (data.status === 'CANCELLED' && !(data.total > 0) && !(data.completed_candidates > 0)) return null;
+  if (data.status === 'FIZZLED') {
+    return data.completed_candidates > 0 ? <p><Button href={`${API}/task/${taskId}/checkpoints`}>Download completed candidates ({data.completed_candidates})</Button></p> : null;
+  }
   return <section aria-label="Analysis progress" className="dara-panel" style={{ padding: 16, border: '1px solid var(--dara-border)', borderRadius: 'var(--dara-radius)', marginBottom: 16 }}>
     <Space wrap><Tag>{stateLabel(data.status)}</Tag>{stageText(data) ? <strong>{stageText(data)}</strong> : null}
-      {['READY','RUNNING','CANCELLING'].includes(data.status) ? <Button danger loading={busy} disabled={data.status === 'CANCELLING'} onClick={cancel}>{data.status === 'CANCELLING' ? 'Stopping…' : 'Stop analysis'}</Button> : null}
+      {queued && Number.isFinite(Number(queuePosition)) && queuePosition > 0 ? <span>{`Position ${queuePosition} in the queue`}</span> : null}
+      {['READY','RUNNING','CANCELLING'].includes(data.status) ? <Button danger loading={busy} disabled={data.status === 'CANCELLING'} onClick={cancel}>{data.status === 'CANCELLING' ? 'Stopping…' : queued ? 'Remove from queue' : 'Stop analysis'}</Button> : null}
       {data.completed_candidates > 0 ? <Button href={`${API}/task/${taskId}/checkpoints`}>Download completed candidates ({data.completed_candidates})</Button> : null}
     </Space>
     {Number.isFinite(data.elapsed_s) ? <p style={{ marginTop: 8, marginBottom: 0 }}>Elapsed {clock(data.elapsed_s)}{Number.isFinite(data.budget_s) ? ` / limit ${clock(data.budget_s)}` : ''}</p> : null}

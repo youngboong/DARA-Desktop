@@ -4,6 +4,7 @@ import { formatSelection } from './versions.mjs';
 
 export const SHORTCUT_HELP = [
   { keys: '← / →', action: 'Previous / next fit' },
+  { keys: '[ / ]  or  Alt+← / →', action: 'Previous / next sample of the Results list' },
   { keys: '1–9', action: 'Toggle phase n in the legend' },
   { keys: 'R', action: 'Reset zoom' },
   { keys: 'F', action: 'Fit intensity to view' },
@@ -38,6 +39,17 @@ export function isTypingTarget(target) {
 
 function sameSelection(a, b) {
   return formatSelection(a) === formatSelection(b);
+}
+
+/**
+ * Sample navigation on the task page (opened from Results with its list): `'prev'`, `'next'` or
+ * `null`. `[` / `]` as in an image viewer, or Alt+←/→ (plain ←/→ switch fits in the workspace).
+ */
+export function sampleStep(event) {
+  if (!event || event.ctrlKey || event.metaKey || isTypingTarget(event.target)) return null;
+  if (event.altKey) return event.key === 'ArrowLeft' ? 'prev' : event.key === 'ArrowRight' ? 'next' : null;
+  if (event.shiftKey) return null;
+  return event.key === '[' ? 'prev' : event.key === ']' ? 'next' : null;
 }
 
 /**

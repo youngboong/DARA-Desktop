@@ -1,15 +1,17 @@
 import React from 'react';
 import { tidyFormula } from './composition.mjs';
+import { formatSpaceGroup } from './versions.mjs';
 
 // "P2_12_12_1", "Ia-3", "C12/c1", "P-3c1" or a bare "P212121": a space-group symbol, not a formula.
-const isSpaceGroup = text => /[_/-]/.test(text) || /^[PIFCRA]\d+$/.test(text);
+// Also one already written by formatSpaceGroup ("P2₁2₁2₁": subscript digits).
+// A formula never has a lower-case letter after a digit or two in a row: "P63mc", "Pbcm" are symbols.
+const isSpaceGroup = text => /[_/\-₀-₉]/.test(text) || /^[PIFCRA]\d+$/.test(text) || /\d[a-z]|[a-z]{2}/.test(text);
 
 function Segment({ text }) {
-  if (isSpaceGroup(text)) {
-    // Monoclinic full symbols read better in short form: C12/c1 -> C2/c.
-    const parts = text.replace(/^([A-Z])1(.+)1$/, '$1$2').split(/(_\d)/g).filter(Boolean);
-    return <>{parts.map((part, index) => part.startsWith('_') ? <sub key={index}>{part.slice(1)}</sub> : <React.Fragment key={index}>{part}</React.Fragment>)}</>;
-  }
+  // A database record ("COD 1010912") is plain text: its digits are not counts.
+  if (/\s/.test(text)) return <>{text}</>;
+  // The one space-group format of the UI (C12/c1 -> C2/c, P2_1/c -> P2₁/c).
+  if (isSpaceGroup(text)) return <>{formatSpaceGroup(text)}</>;
   const parts = tidyFormula(text).split(/(\d+(?:\.\d+)?)/g).filter(Boolean);
   return <>{parts.map((part, index) => /^\d/.test(part) ? <sub key={index}>{part}</sub> : <React.Fragment key={index}>{part}</React.Fragment>)}</>;
 }

@@ -146,7 +146,24 @@ export function screeningTags(candidateSummary) {
 /** Reasons list for a tooltip: overall or phase confidence object. */
 export function reasonsText(confidenceItem) {
   const reasons = Array.isArray(confidenceItem?.reasons) ? confidenceItem.reasons : [];
-  return reasons.map(reasonText).filter(Boolean);
+  return reasons.map(reasonText).filter(Boolean).map(text => preciseRwp(text, confidenceItem?.evidence));
+}
+
+const fixed2 = value => Number(value).toFixed(2);
+
+/**
+ * "(Rwp 2.6% vs 2.6%)" from the server's one-decimal sentence, written with the two decimals of the
+ * tables from the evidence it was made from (`alternative` / `structure_model_alternative`: the
+ * other fit's `rwp` and `delta_rwp` = its Rwp minus this fit's).
+ */
+export function preciseRwp(text, evidence) {
+  const value = String(text ?? '');
+  const other = /without this phase/.test(value) ? evidence?.alternative
+    : /different (structure model|polymorph)/.test(value) ? evidence?.structure_model_alternative : null;
+  const rwp = Number(other?.rwp);
+  const delta = Number(other?.delta_rwp);
+  if (!Number.isFinite(rwp) || !Number.isFinite(delta)) return value;
+  return value.replace(/\(Rwp [\d.]+% vs [\d.]+%\)/, `(Rwp ${fixed2(rwp)}% vs ${fixed2(rwp - delta)}%)`);
 }
 
 export const EXPORT_FORMATS = [

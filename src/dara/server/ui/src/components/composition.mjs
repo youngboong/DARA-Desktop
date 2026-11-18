@@ -47,6 +47,29 @@ export function fillIndex(keys) {
   return map;
 }
 
+/**
+ * Fill key of each phase name over several fits (`[{phases, weights}]`): `identity(name)` (formula and
+ * space group), so a compound keeps its colour in every tray. Where an identity occurs twice in one fit
+ * (two database records of one compound), the lighter entries get `identity|name`, and so a fill of
+ * their own: duplicates never share a colour. Returns `Map name -> key`.
+ */
+export function fillKeys(fits = [], identity = name => name) {
+  const keys = new Map();
+  const groupsOf = ({ phases = [] }) => {
+    const groups = new Map();
+    phases.forEach(name => groups.set(identity(name), [...(groups.get(identity(name)) || []), name]));
+    return [...groups];
+  };
+  // Duplicates first, so a record seen alone elsewhere still gets its own fill.
+  [true, false].forEach(duplicates => fits.forEach(fit => groupsOf(fit).forEach(([key, names]) => {
+    if ((names.length > 1) !== duplicates) return;
+    const weight = name => Number(fit.weights?.[name]) || 0;
+    [...names].sort((a, b) => weight(b) - weight(a))
+      .forEach((name, i) => { if (!keys.has(name)) keys.set(name, i === 0 ? key : `${key}|${name}`); });
+  })));
+  return keys;
+}
+
 const gcd = (a, b) => (b ? gcd(b, a % b) : a);
 
 /**

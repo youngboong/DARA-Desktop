@@ -1,6 +1,6 @@
 // Pure helpers for selecting peaks on the refinement plot (click -> candidates drawer).
 
-import { knownDisplayFormula } from './versions.mjs';
+import { formatSpaceGroup, knownDisplayFormula } from './versions.mjs';
 
 export const MAX_SELECTED_PEAKS = 10;
 export const MISSING_SNAP_DEG = 0.3;
@@ -152,7 +152,7 @@ export function hintsPending(task) {
 /** "Trace Fe3O4 (Fd-3m) matches 35.42°, 43.05°"; "Consistent with Fe3O4 …" when it explains a significant peak. */
 export function hintText(hint) {
   const peaks = (hint.matched_peaks || []).map(peak => `${Number(peak).toFixed(2)}°`);
-  const symbol = hint.spacegroup_symbol ? ` (${hint.spacegroup_symbol})` : '';
+  const symbol = hint.spacegroup_symbol ? ` (${formatSpaceGroup(hint.spacegroup_symbol)})` : '';
   return `${hint.significant ? 'Consistent with' : 'Trace'} ${knownDisplayFormula(hint.phase) || hint.formula || hint.phase}${symbol}${peaks.length ? ` matches ${peaks.join(', ')}` : ''}`;
 }
 

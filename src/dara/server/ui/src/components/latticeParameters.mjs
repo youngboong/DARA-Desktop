@@ -25,6 +25,16 @@ function equal(names, parameter) {
   return parameter ? { names, parameter, constrained: names.length > 1 } : null;
 }
 
+// Rhombohedral space groups (R3, R-3, R32, R3m, R3c, R-3m, R-3c): a CIF gives them on hexagonal
+// axes (a = b, c, γ = 120°) or on rhombohedral axes (a = b = c, α = β = γ).
+const RHOMBOHEDRAL = new Set([146, 148, 155, 160, 161, 166, 167]);
+
+/** True when the reported angle is not 90°: the cell is on rhombohedral axes. */
+function rhombohedralAxes(parameters) {
+  const alpha = Number((parameters?.alpha || parameters?.beta || parameters?.gamma)?.value);
+  return Number.isFinite(alpha) && Math.abs(alpha - 90) > 0.01;
+}
+
 /** Return conventional-cell rows while marking symmetry-derived equalities. */
 export function latticeParameterRows(parameters = {}, spaceGroup) {
   // Angles alone say nothing: a phase without any axis length (old results) shows "—".
@@ -40,6 +50,10 @@ export function latticeParameterRows(parameters = {}, spaceGroup) {
     add(equal(['a', 'b'], parameters.a || parameters.b));
     add(...reported(['c'], parameters));
     add(fixed(['alpha', 'beta', 'gamma'], 90));
+  } else if (RHOMBOHEDRAL.has(Number(spaceGroup)) && rhombohedralAxes(parameters)) {
+    // An R group on rhombohedral axes (a = b = c, α = β = γ ≠ 90°): the angle comes from the data.
+    add(equal(['a', 'b', 'c'], parameters.a || parameters.b || parameters.c));
+    add(equal(['alpha', 'beta', 'gamma'], parameters.alpha || parameters.beta || parameters.gamma));
   } else if (system === 'trigonal' || system === 'hexagonal') {
     add(equal(['a', 'b'], parameters.a || parameters.b));
     add(...reported(['c'], parameters));
@@ -80,10 +94,9 @@ export function formatParameterWithEsd(parameter) {
     const decimals = Math.max(0, Math.min(8, -Math.floor(Math.log10(esd)) + 1));
     valueText = value.toFixed(decimals);
     esdText = esd.toFixed(decimals);
-  } else if (parameter.unit === 'deg' && Number.isInteger(value)) {
-    valueText = String(value);
   } else {
-    valueText = value.toFixed(5);
+    // No e.s.d. (held fixed, at a limit, set by symmetry): the value's own digits, not padded.
+    valueText = String(Number(value.toFixed(5)));
   }
 
   const unitText = parameter.unit === 'deg' ? '°' : ` ${parameter.unit}`;

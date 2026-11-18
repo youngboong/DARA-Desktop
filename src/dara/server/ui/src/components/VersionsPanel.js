@@ -9,9 +9,11 @@ import { BASELINE_LABEL, QUICK_CHECK_HINT, REFINE_ALL_FIRST, comparisonBase, pha
 
 const { Text } = Typography;
 
+// What made the version, in plain words (the Label column names what changed).
 const ORIGIN_LABEL = {
-  automatic: 'Automatic', add_hint: 'Hint', add_peak_search: 'Peak search', swap: 'Swap',
-  remove: 'Remove', background: 'Background', manual: 'Manual', refine_all: 'Refine all', structure: 'Structure', le_bail: 'Le Bail',
+  automatic: 'Automatic search', add_hint: 'Added from peak hint', add_peak_search: 'Added from peak search', swap: 'Phase swapped',
+  remove: 'Phase removed', background: 'Background edited', manual: 'Phases or controls chosen', refine_all: 'All phases refined',
+  structure: 'Structure refined', le_bail: 'Le Bail fit',
 };
 
 export const VERSIONS_POLL_MS = 15000;
@@ -90,9 +92,9 @@ function phaseSummary(phases = [], symbolOf = () => null) {
 }
 
 function originTag(row) {
-  if (row.label === BASELINE_LABEL) return <Tag>Baseline</Tag>;
+  if (row.label === BASELINE_LABEL) return <Text type="secondary">Baseline (current code)</Text>;
   const kind = row.origin?.kind;
-  return <Tag>{ORIGIN_LABEL[kind] || kind || '—'}</Tag>;
+  return <Text type="secondary">{ORIGIN_LABEL[kind] || kind || '—'}</Text>;
 }
 
 export default function VersionsPanel({ taskId, store, review, onView, onCompare, onRefineAll, refineBusy = false, extra, symbolOf = () => null, onPreview = null, shownSel }) {
@@ -167,7 +169,7 @@ export default function VersionsPanel({ taskId, store, review, onView, onCompare
         <Button size="small" icon={<LineChartOutlined />} onClick={() => onView(row.version === 1 ? null : sel)}>Open</Button>
         {quickCheck
           ? (onRefineAll ? <Tooltip title="Refine all phases, then compare">
-            <Button size="small" type="primary" disabled={refineBusy} onClick={() => onRefineAll(row.version)}>Refine all phases</Button>
+            <Button size="small" disabled={refineBusy} onClick={() => onRefineAll(row.version)}>Refine all phases</Button>
           </Tooltip> : null)
           : <Tooltip title="Adopt (saves notes too)">
             <span><Button size="small" disabled={review.loading || !!review.error || review.saving}
@@ -190,7 +192,7 @@ export default function VersionsPanel({ taskId, store, review, onView, onCompare
         const sel = row.version === 1 ? null : `version:${row.version}`;
         return { onClick: event => { if (!event.target.closest('button, a')) onPreview(sel); },
           onKeyDown: event => { if ((event.key === 'Enter' || event.key === ' ') && event.target === event.currentTarget) { event.preventDefault(); onPreview(sel); } },
-          tabIndex: 0, 'aria-selected': sel === shownSel, style: { cursor: 'pointer' }, title: 'Show this fit in the plot' };
+          tabIndex: 0, 'aria-current': sel === shownSel ? 'true' : undefined, style: { cursor: 'pointer' }, title: 'Show this fit in the plot' };
       }}
       rowClassName={row => ((row.version === 1 ? null : `version:${row.version}`) === shownSel ? 'dara-row-shown' : '')}
       scroll={{ x: 'max-content' }} columns={columns} />

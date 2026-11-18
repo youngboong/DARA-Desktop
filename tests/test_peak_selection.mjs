@@ -89,7 +89,7 @@ assert.deepEqual(collectHints(null), []);
 // the CIF's conventional formula is shown for a known reference
 rememberDisplayFormulas({ 'PH6NO4_19_(cod_9007583)-3': 'NH4H2PO4' });
 assert.equal(hintText({ phase: 'PH6NO4_19_(cod_9007583)-0', formula: 'PH6NO4', spacegroup_symbol: 'P2_12_12_1', matched_peaks: [] }),
-  'Trace NH4H2PO4 (P2_12_12_1)');
+  'Trace NH4H2PO4 (P2₁2₁2₁)');
 
 console.log('test_peak_selection ok');
 

@@ -493,3 +493,169 @@ code {
   align-self: flex-start;
   margin-top: var(--dara-space-2);
 }
+
+/* Task page: the answer under the verdict, one line: the judged fit, its phases with wt% ± e.s.d., the adoption. */
+.dara-result-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--dara-space-1) var(--dara-space-4);
+  margin: 0 0 var(--dara-space-3);
+  padding: var(--dara-space-2) var(--dara-space-3);
+  border: 1px solid var(--dara-border);
+  border-radius: var(--dara-radius);
+  background: var(--dara-surface);
+}
+
+.dara-result-phase {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.dara-result-phase i {
+  display: inline-block;
+  align-self: center;
+  width: 10px;
+  height: 10px;
+  border: 1px solid var(--dara-border-strong);
+}
+
+.dara-result-phase .dara-num {
+  font-weight: 600;
+}
+
+.dara-result-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--dara-space-1) var(--dara-space-3);
+  margin-left: auto;
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
+/* The fit a banner judges, after its verdict ("Check recommended — v3 (adopted)"). */
+.dara-banner-subject {
+  font-weight: 400;
+  color: var(--dara-text-secondary);
+}
+
+/* A table heading with its one action on the same line (Phases … Copy phase table). */
+.dara-section-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dara-space-2);
+  margin: var(--dara-space-4) 0 var(--dara-space-2);
+  scroll-margin-top: var(--dara-space-4);
+}
+
+.dara-section-head h3 {
+  margin: 0;
+}
+
+.ant-tabs .dara-section-head {
+  margin-top: 0;
+}
+
+/* Previous / next sample of the Results list, beside the actions of the title row. */
+.dara-sample-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--dara-space-1);
+  padding-right: var(--dara-space-3);
+  border-right: 1px solid var(--dara-border);
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
+/* Cautions: heading with "Clean up model…", a remedy link after the text it answers. */
+.dara-caution-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--dara-space-1) var(--dara-space-3);
+}
+
+.dara-caution-list .dara-caution-action {
+  height: auto;
+  margin-left: var(--dara-space-2);
+  padding: 0;
+}
+
+.dara-caution-detail {
+  margin-left: 6px;
+  color: var(--dara-text-hint);
+}
+
+.dara-cleanup-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dara-cleanup-list li + li {
+  margin-top: var(--dara-space-2);
+}
+
+.dara-cleanup-why {
+  margin-left: 24px;
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
+/* Fit workspace: the plot toolbar stays in reach while the tables below are scrolled. */
+.dara-fit-modal .dara-plot-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  padding: var(--dara-space-1) 0;
+  background: var(--dara-surface);
+  border-bottom: 1px solid var(--dara-border);
+}
+
+/* Background curve editing: anchor table beside the plot, never above it. */
+.dara-plot-with-side {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: var(--dara-space-3);
+  align-items: start;
+}
+
+.dara-plot-main {
+  min-width: 0;
+}
+
+/* A narrow tray compartment: the space group wraps out of sight whole; only the formula ends in an ellipsis. */
+.dara-tray-name .phase-identity-primary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  max-height: 1.6em;
+  overflow: hidden;
+}
+
+.dara-tray-name .phase-identity-formula {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dara-tray-name .phase-identity-sg {
+  white-space: nowrap;
+}
+
+/* Task title row: full width in every state (a failed task has no wide content to stretch it). */
+.dara-task-title {
+  width: 100%;
+  gap: var(--dara-space-3);
+}
+
+/* The legend line under a tray wraps inside the tray's width instead of widening the column. */
+.dara-tray-rest {
+  width: 0;
+  min-width: 100%;
+}
