@@ -348,3 +348,29 @@ export function taskRankingBody(entries) {
   };
   return Object.fromEntries(Object.entries(body).filter(([, value]) => value !== undefined));
 }
+
+// --- alternatives: candidates peak matching cannot tell apart (the ranking's `alternatives`) ------
+
+/**
+ * `{selected key: [rows]}`: for each selected row, the unselected rows with the same strong peaks
+ * that the server marks as its alternatives (a polymorph or variant). No order between them is claimed.
+ */
+export function alternativeGroups(rows, selectedKeys) {
+  const chosen = new Set(selectedKeys || []);
+  const byKey = Object.fromEntries((rows || []).map(row => [row.key ?? rowKey(row), row]));
+  return Object.fromEntries([...chosen].map(key => [key, (byKey[key]?.alternatives || [])
+    .filter(other => byKey[other] && !chosen.has(other)).map(other => byKey[other])]).filter(([, list]) => list.length));
+}
+
+/** `{row key: selected row}` of the rows that are an alternative of a selected row (the table marks them). */
+export function alternativeOf(rows, selectedKeys) {
+  const byKey = Object.fromEntries((rows || []).map(row => [row.key ?? rowKey(row), row]));
+  return Object.fromEntries(Object.entries(alternativeGroups(rows, selectedKeys))
+    .flatMap(([key, list]) => list.map(row => [row.key ?? rowKey(row), byKey[key]])));
+}
+
+/** Alternatives saved with an identification: `[{source, formula, spacegroup, of}]`. */
+export function alternativeRecords(response, selectedKeys) {
+  return Object.entries(alternativeGroups(response?.ranking || [], selectedKeys))
+    .flatMap(([of, list]) => list.map(row => ({ source: row.source, formula: row.formula, spacegroup: row.spacegroup ?? null, of })));
+}

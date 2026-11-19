@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { HKL_MAX_LABELS, dAxisTicks, hklText, pickHklLabels } from '../src/dara/server/ui/src/components/plotLabels.mjs';
+import { HKL_MAX_LABELS, dAxisTicks, hklLabelPx, hklText, pickHklLabels, topForLabels } from '../src/dara/server/ui/src/components/plotLabels.mjs';
 import { buildRefinementView } from '../src/dara/server/ui/src/components/refinementPlotState.mjs';
 
 assert.equal(hklText(1, 1, 0), '(110)');
@@ -60,5 +60,28 @@ assert.equal(hklText(1, 0, 12), '(1 0 12)');
   assert.deepEqual(zoomed.layout.annotations.filter(item => item.textangle === -90).map(item => item.text), ['(200)']);
   const noWavelength = buildRefinementView({ ...plot, layout: { ...plot.layout, meta: {} } }, { dAxis: true });
   assert.equal(noWavelength.layout.xaxis3, undefined, 'no d axis without a wavelength');
+}
+{
+  // Room above each label: the top is raised until the label fits inside the frame.
+  assert.equal(hklLabelPx('(1̄02)', 10), 3 + 6.2 * 5, 'the overbar adds no length');
+  const top = topForLabels([{ y: 100, px: 40 }, { y: 50, px: 40 }], [0, 105], 200);
+  assert(Math.abs((top - 100) / top * 200 - 40) < 1e-9, 'the tallest label just fits');
+  assert.equal(topForLabels([{ y: 10, px: 40 }], [0, 105], 200), 105, 'never lowered');
+  // An identification: the reference stick stands above the observed points; its label sits on the stick.
+  const plot = { layout: { xaxis: { range: [20, 60] }, yaxis: {}, margin: { t: 40, b: 60 } }, data: [
+    { name: 'Observed', x: [20, 30, 40, 60], y: [10, 400, 10, 10] },
+    { name: 'TiO2', meta: 'reference-sticks', legendgroup: 'T', x: [30, 30, 30], y: [10, 520, null],
+      line: { color: '#0072b2' }, customdata: [[1, 0, 1, 510], [1, 0, 1, 510], [1, 0, 1, 510]] },
+  ] };
+  const view = buildRefinementView(plot, { plotWidth: 1200, plotHeight: 300, hklLabels: true });
+  const [label] = view.layout.annotations.filter(item => item.textangle === -90);
+  assert.equal(label.y, 520, 'above the stick, not across it');
+  assert.equal(label.font.color, '#0072b2');
+  const [bottom, upper] = view.layout.yaxis.range;
+  assert((upper - label.y) / (upper - bottom) * 200 >= hklLabelPx(label.text, 11) - 1e-9, 'inside the frame');
+  // A short panel: the top rises by at most a quarter of the data range; a label that does not fit is dropped.
+  const short = buildRefinementView(plot, { plotWidth: 1200, plotHeight: 130, hklLabels: true });
+  assert.equal(short.layout.annotations.filter(item => item.textangle === -90).length, 0);
+  assert(short.layout.yaxis.range[1] <= 520 + 0.3 * (520 - Math.min(0, 10)) + 1e-9, 'the pattern keeps its height');
 }
 console.log('hkl labels and d-axis ticks passed.');

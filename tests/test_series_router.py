@@ -143,6 +143,15 @@ def test_submit_three_files_queues_in_variable_order(fake):
         assert fields["library_cif_ids"] == "[]"
 
 
+def test_per_file_chemistry_takes_each_file_name(fake):
+    """A batch of different samples: each file runs with the chemistry of its own name."""
+    _submit(["CoO-ZnO_1100C.xy", "Fe2O3-2TiO2_1000C.xy", "sample_7.xy"], per_file_chemistry=True)
+    by_name = {name: fields for name, _, fields in fake.built}
+    assert json.loads(by_name["CoO-ZnO_1100C.xy"]["elements"]) == ["Co", "O", "Zn"]
+    assert json.loads(by_name["Fe2O3-2TiO2_1000C.xy"]["precursor_formulas"]) == ["Fe2O3", "TiO2"]
+    assert by_name["sample_7.xy"]["elements"] == '["Zn", "O"]'  # no chemistry in the name: the form's
+
+
 def test_unreadable_file_rejects_everything_and_queues_nothing(fake):
     with pytest.raises(HTTPException) as caught:
         _submit(["a_300C.xy", "broken_500C.xy", "c_700C.xy"])

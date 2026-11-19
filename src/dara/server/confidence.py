@@ -445,6 +445,27 @@ def _phase_keys(candidate: CandidateEvidence) -> dict[str, tuple]:
     return keys
 
 
+def same_phase(a: tuple, b: tuple) -> bool:
+    """Whether two phase identities ``(reduced formula, space-group number)`` are one phase: the
+    same reduced formula (any setting), or the same space group and a composition within the
+    Search-match "variant of" tolerance (the rule of :func:`_phase_keys` and
+    :func:`merge_close_compositions`)."""
+    from dara.search.quick_rank import _close_composition
+
+    if a[0] is None or b[0] is None:
+        return False
+    return a[0] == b[0] or (a[1] is not None and a[1] == b[1] and _close_composition(a[0], b[0]))
+
+
+def phase_set_differences(here: list[str], there: list[str]) -> tuple[list[str], list[str]]:
+    """Phase names of ``here`` with no same phase in ``there``, and the other way round."""
+    ids_here = {name: phase_identity(name) for name in here}
+    ids_there = {name: phase_identity(name) for name in there}
+    only_here = [n for n, i in ids_here.items() if not any(same_phase(i, j) for j in ids_there.values())]
+    only_there = [n for n, j in ids_there.items() if not any(same_phase(i, j) for i in ids_here.values())]
+    return only_here, only_there
+
+
 def merge_close_compositions(candidates) -> None:
     """Give database records of one phase with slightly different formulas one formula.
 

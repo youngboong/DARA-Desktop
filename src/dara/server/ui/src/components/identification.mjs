@@ -44,3 +44,20 @@ export const rirText = value => (finite(value) ? Number(value).toFixed(1) : null
 
 /** Links of the refinements made from an identification (`refined_as`), newest last. */
 export const refinedTasks = data => (Array.isArray(data?.refined_as) ? data.refined_as.filter(id => Number.isInteger(Number(id))) : []);
+
+/** Status of an identification: its phases come from peak matching; a Rietveld fit verifies them. */
+export const NOT_VERIFIED = 'Peak matching only · not verified by a fit';
+
+/**
+ * Line of a phase-agreement item (GET /task/{id}/phase-agreement): the other task is the Rietveld
+ * refinement on an identification's page (`otherKind` "Rietveld"), the identification on a refinement's.
+ */
+export function agreementText(item, otherKind) {
+  const task = `${otherKind} Task ${item.task_id}`;
+  if (item.agree === null || item.agree === undefined) return `${task}: ${String(item.status || 'pending').toLowerCase()}`;
+  if (item.agree) return `${task}: same phases`;
+  const parts = [];
+  if (item.only_here?.length) parts.push(`only here ${item.only_here.join(', ')}`);
+  if (item.only_there?.length) parts.push(`only in Task ${item.task_id} ${item.only_there.join(', ')}`);
+  return `${task}: phases differ · ${parts.join(' · ')}`;
+}

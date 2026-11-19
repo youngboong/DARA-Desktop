@@ -323,6 +323,7 @@ def test_identification_report_figure_and_bundle(server):
     assert headings == ["Summary", "Experimental and methods", "Results", "Assessment", "Limitations", "References"]
     assert "XRD phase identification" in html and "search-match" in html and "no structure was refined" in html
     assert "Search-match statistics." in html and "Semi-quantitative phase analysis." in html
+    assert "Peak matching only · not verified by a fit." in html
     assert "wt% (RIR)" in html and "I/Ic" in html and "Crystallite size, Scherrer (nm)" in html
     assert "COD&nbsp;9004178" in html and "COD&nbsp;9007432" in html
     assert "Hubbard" in html and "Chung" in html and "Patterson" in html and "Crystallography Open Database" in html
@@ -377,3 +378,93 @@ def test_worker_start_leaves_a_running_identification_to_the_server(server):
     assert status(ident) == "RUNNING" and status(search) == "FIZZLED"
     mark_running_jobs_as_fizzled(identification=True)  # the server's own start-up
     assert status(ident) == "FIZZLED"
+
+
+def test_automatic_identification_takes_the_suggestion_and_joins_its_series(server, monkeypatch):
+    """"Identify all": no reference ids; the worker ranks, accepts the non-weak suggestion, and the
+    task is an ordinary identification (editable via the search-match) in its batch's series."""
+    from fastapi import HTTPException
+
+    from dara.server import api_router, identification_router, series_router
+    from dara.server import quick_rank_router as router_module
+    from dara.server.utils import get_worker_store
+
+    combination = [{"source": IDS[0], "weak": False}, {"source": IDS[1], "weak": False}, {"source": "cod:5", "weak": True}]
+    calls = []
+    monkeypatch.setattr(router_module, "_run", lambda params: calls.append(params) or {
+        "ranking": [], "combination": combination if params["elements"] != ["O"] else [], "caveats": []})
+    assert identification_router.suggested_ids({"combination": combination}) == IDS
+
+    async def done(index):
+        for _ in range(400):
+            with get_worker_store() as store:
+                record = store.query_one({"index": index})
+            if record["status"] != "RUNNING":
+                return record
+            await asyncio.sleep(0.05)
+        raise AssertionError("still running")
+
+    series = {"id": "abc123def456", "name": "anneal", "order": 0, "size": 2, "variable": None}  # order 0-based, as /submit-series
+
+    async def scenario():
+        first = await _create(server, reference_ids="[]", automatic=True, use_mp=False, series=json.dumps(series))
+        assert first["status"] == "RUNNING"  # answered at once
+        second = await _create(server, reference_ids="[]", automatic=True, elements='["O"]',
+                               series=json.dumps({**series, "order": 1}))
+        record = await done(first["wf_id"])
+        assert record["status"] == "COMPLETED"
+        assert calls[0]["use_mp"] is False and calls[0]["elements"] == ["O", "Ti", "Zn"]
+        settings = (await api_router.rerun_settings(first["wf_id"]))["settings"]
+        assert settings["reference_ids"] == IDS and settings["analysis_mode"] == "identification"
+        payload = await api_router.result(first["wf_id"])
+        assert len(payload["phases"]) == 2
+        failed = await done(second["wf_id"])
+        assert failed["status"] == "FIZZLED" and failed["error"] == identification_router.NO_SUGGESTION
+        listed = (await series_router.list_series())["series"]
+        assert [(item["series_id"], item["n_tasks"]) for item in listed if item["name"] == "anneal"] == [("abc123def456", 2)]
+        for fields, text in (({"automatic": True, "reference_ids": json.dumps(IDS)}, "takes no reference_ids"),
+                             ({"automatic": True, "reference_ids": "[]", "series": '{"id": "x"}'}, "Invalid series")):
+            with pytest.raises(HTTPException) as info:
+                await _create(server, **fields)
+            assert info.value.status_code == 400 and text in str(info.value.detail)
+
+    asyncio.run(scenario())
+
+
+def test_alternatives_are_stored_refined_together_and_phase_sets_compared(server):
+    """"Tell apart with Rietveld": the stored alternatives join the refinement hand-off; the
+    phase-agreement view compares an identification with its refinements by the same-phase rule."""
+    from fastapi import HTTPException
+
+    from dara.server import api_router, identification_router
+    from dara.server.confidence import phase_set_differences, same_phase
+    from dara.server.utils import get_worker_store
+
+    alternative = [{"source": IDS[1], "formula": "TiO2", "spacegroup": 136, "of": IDS[0]}]
+
+    async def scenario():
+        created = await _create(server, reference_ids=json.dumps(IDS[:1]), alternatives=json.dumps(alternative))
+        task_id = created["wf_id"]
+        payload = await api_router.result(task_id)
+        assert payload["phases"][0]["alternatives"] == alternative
+        with pytest.raises(HTTPException) as info:
+            await identification_router.refine_identification(
+                task_id, identification_router.RefineRequest(extra_reference_ids=["cod:1234567"]))
+        assert info.value.status_code == 400
+        handed = await identification_router.refine_identification(
+            task_id, identification_router.RefineRequest(extra_reference_ids=[IDS[1]]))
+        with get_worker_store() as store:
+            new = store.query_one({"index": handed["wf_id"]})
+        assert new["job"]["metadata"]["submission_settings"]["reference_ids"] == IDS
+        view = await identification_router.phase_agreement(task_id)
+        assert view["items"] == [{"task_id": handed["wf_id"], "status": "READY", "agree": None, "only_here": [], "only_there": []}]
+        back = await identification_router.phase_agreement(handed["wf_id"])
+        assert [item["task_id"] for item in back["items"]] == [task_id]
+        with pytest.raises(HTTPException):
+            await _create(server, alternatives=json.dumps([{"source": "cod:5", "of": "cod:6"}]))
+
+    asyncio.run(scenario())
+    assert same_phase(("Fe2O3", 167), ("Fe2O3", 15)) and same_phase(("TiO2", 136), ("Ti0.99O2", 136))
+    assert not same_phase(("Fe3O4", 227), ("Fe2O3", 167))
+    only_here, only_there = phase_set_differences(["ZnO_186_(cod_1)", "TiO2_136_(cod_2)"], ["ZnO_186_(cod_9)", "Fe2O3_167_(cod_3)"])
+    assert only_here == ["TiO2_136_(cod_2)"] and only_there == ["Fe2O3_167_(cod_3)"]

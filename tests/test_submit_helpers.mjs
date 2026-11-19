@@ -136,3 +136,16 @@ console.log('element entry, recent sets, file-name tokens and preview ok');
   assert.equal(results[4].value, 5);
   console.log('limiter ok');
 }
+
+{
+  const { batchName, batchRowView, hexId } = await import('../src/dara/server/ui/src/components/submitHelpers.mjs');
+  assert.equal(batchName(['V2O5-2ZnO_300C_60min.xrdml', 'V2O5-2ZnO_400C_60min.xrdml']), 'V2O5-2ZnO');
+  assert.equal(batchName(['CoO-ZnO_1100C.xrdml', 'Fe2O3-2TiO2_1000C.xrdml', 'GeO2.xy']), 'Batch of 3 files');
+  assert.equal(batchName([]), '');
+  assert.deepEqual(batchRowView({ state: 'done', phases: ['ZnO', 'V2O5'] }), { text: 'ZnO + V2O5', tone: 'ok' });
+  assert.deepEqual(batchRowView({ state: 'failed', error: 'Could not read pattern' }), { text: 'Could not read pattern', tone: 'fail' });
+  assert.equal(batchRowView({ state: 'running' }).text, 'Searching');
+  assert.equal(batchRowView(undefined).text, 'Queued');
+  assert.match(hexId(), /^[0-9a-f]{12}$/);
+  console.log('batch helpers ok');
+}

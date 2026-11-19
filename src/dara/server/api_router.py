@@ -3875,11 +3875,13 @@ async def delete_result(task_id: int):
     return {"message": "deleted", "task_id": task_id}
 
 
-def _plot_meta(wavelength_angstrom: float, spec) -> dict:
-    """Plot ``layout.meta``: the Kα1 wavelength, and whether Kα2 stripping is offered (lab anode)."""
+def _plot_meta(wavelength_angstrom: float, spec, counts_like: bool | None = None) -> dict:
+    """Plot ``layout.meta``: the Kα1 wavelength, whether Kα2 stripping is offered (lab anode), the
+    radiation setting and whether the intensities look like counts (the figure export's axis titles)."""
     from dara.export.pattern_treatment import kalpha_pair
 
-    return {"wavelength_angstrom": round(wavelength_angstrom, 6), "kalpha2": kalpha_pair(spec) is not None}
+    return {"wavelength_angstrom": round(wavelength_angstrom, 6), "kalpha2": kalpha_pair(spec) is not None,
+            "wavelength": spec, "counts": counts_like}
 
 
 @lru_cache(maxsize=24)
@@ -3914,7 +3916,7 @@ def _plot_json(uuid: str, idx: int | None) -> str:
         from dara.search.candidate_cost import wavelength_angstrom
 
         spec = (getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu")
-        figure.update_layout(meta=_plot_meta(wavelength_angstrom(spec), spec))
+        figure.update_layout(meta=_plot_meta(wavelength_angstrom(spec), spec, _counts_like(document)))
     except Exception:
         logger.debug("Plot wavelength unavailable", exc_info=True)
     return figure.to_json()

@@ -189,8 +189,17 @@ export function selectionQuery(selection) {
 /** `query` plus the option that writes Miller indices on the figure. */
 export const withHkl = (query, hkl) => (hkl ? `${query}${query ? '&' : '?'}hkl=true` : query);
 
-export const figureHref = (api, taskId, format, selection, hkl = false) =>
-  `${api}/task/${taskId}/figure.${format}${withHkl(selectionQuery(selection), hkl)}`;
+/** Journal-style figure file: `widthMm` 170 (double column, the server's default) or 85 (single). */
+export const figureHref = (api, taskId, format, selection, hkl = false, widthMm = 170) => {
+  const query = withHkl(selectionQuery(selection), hkl);
+  return `${api}/task/${taskId}/figure.${format}${widthMm === 170 ? query : `${query}${query ? '&' : '?'}width_mm=${widthMm}`}`;
+};
+
+/** The figure files of the Download menus: each format at double- and single-column width. */
+export const FIGURE_FILES = ['png', 'svg', 'pdf'].flatMap(format => [170, 85].map(widthMm => ({
+  key: `figure:${format}:${widthMm}`, format, widthMm,
+  label: `${format === 'png' ? 'PNG, 600 dpi' : format.toUpperCase()} · ${widthMm} mm (${widthMm === 170 ? 'double' : 'single'} column)`,
+})));
 
 export const exportHref = (api, taskId, format, selection) =>
   `${api}/task/${taskId}/export/${format}${selectionQuery(selection)}`;

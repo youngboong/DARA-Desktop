@@ -32,3 +32,13 @@ test('Scherrer size per phase: the median over its peaks with a size', () => {
   assert.equal(rirText(56.02), '56.0');
   assert.equal(rirText(null), null);
 });
+
+{
+  const { NOT_VERIFIED, agreementText } = await import('../src/dara/server/ui/src/components/identification.mjs');
+  assert.equal(NOT_VERIFIED, 'Peak matching only · not verified by a fit');
+  assert.equal(agreementText({ task_id: 9, agree: null, status: 'RUNNING' }, 'Rietveld'), 'Rietveld Task 9: running');
+  assert.equal(agreementText({ task_id: 9, agree: true }, 'Rietveld'), 'Rietveld Task 9: same phases');
+  assert.equal(agreementText({ task_id: 4, agree: false, only_here: ['ZnO'], only_there: ['V2O5', 'TiO2'] }, 'Identification'),
+    'Identification Task 4: phases differ · only here ZnO · only in Task 4 V2O5, TiO2');
+  console.log('agreement text ok');
+}

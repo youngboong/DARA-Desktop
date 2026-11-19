@@ -233,3 +233,37 @@ export function limiter(n) {
   };
   return task => new Promise((resolve, reject) => { queue.push([task, resolve, reject]); next(); });
 }
+
+/**
+ * Default name of a batch of files (a series): the common start of the file names without the
+ * extension and trailing separators ("V2O5-2ZnO" of V2O5-2ZnO_300C.xrdml, V2O5-2ZnO_400C.xrdml),
+ * else "Batch of N files".
+ */
+export function batchName(names) {
+  const stems = (names || []).map(name => String(name).replace(/\.[^.]*$/, ''));
+  if (!stems.length) return '';
+  let common = stems[0];
+  stems.forEach(stem => { while (!stem.startsWith(common)) common = common.slice(0, -1); });
+  common = common.replace(/[\s_\-.,;+]+$/, '');
+  return common.length >= 3 ? common : `Batch of ${stems.length} files`;
+}
+
+/**
+ * Row of a file in "Identify all": `{text, tone}` from its state (`queued`, `sending`, `running`
+ * {taskId}, `done` {taskId, phases}, `failed` {error}); tone `ok` / `fail` / undefined.
+ */
+export function batchRowView(entry) {
+  if (!entry || entry.state === 'queued') return { text: 'Queued' };
+  if (entry.state === 'sending') return { text: 'Uploading' };
+  if (entry.state === 'running') return { text: 'Searching' };
+  if (entry.state === 'done') {
+    const phases = entry.phases || [];
+    return { text: phases.length ? phases.join(' + ') : 'No phase', tone: 'ok' };
+  }
+  return { text: entry.error || 'Failed', tone: 'fail' };
+}
+
+/** A random lower-case hexadecimal id of `length` digits (a batch's series id). */
+export function hexId(length = 12, random = Math.random) {
+  return Array.from({ length }, () => Math.floor(random() * 16).toString(16)).join('');
+}

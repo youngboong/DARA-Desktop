@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {
-  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, selectionQuery, levelRank, overallAlertClass, overallAlertType, overallColor, reasonsText,
+  EXPORT_FORMATS, FIGURE_FILES, displacementTag, evidenceLines, exportHref, figureHref, selectionQuery, levelRank, overallAlertClass, overallAlertType, overallColor, reasonsText,
   missingCell, patternFiles, patternHref, screeningTags, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, verdictColor,
 } from '../src/dara/server/ui/src/components/confidence.mjs';
 
@@ -137,6 +137,10 @@ assert.equal(selectionQuery(0), '?idx=0');
 assert.equal(selectionQuery(-1), '');
 assert.equal(figureHref('/api', 7, 'png'), '/api/task/7/figure.png');
 assert.equal(figureHref('/api', 7, 'svg', 2), '/api/task/7/figure.svg?idx=2');
+assert.equal(figureHref('/api', 7, 'pdf', 2, true, 85), '/api/task/7/figure.pdf?idx=2&hkl=true&width_mm=85');
+assert.equal(figureHref('/api', 7, 'png', undefined, false, 85), '/api/task/7/figure.png?width_mm=85');
+assert.deepEqual(FIGURE_FILES.map(file => file.key).slice(0, 2), ['figure:png:170', 'figure:png:85']);
+assert.equal(FIGURE_FILES.length, 6);
 assert.equal(exportHref('/api', 7, 'topas', 'best'), '/api/task/7/export/topas?best=true');
 assert.deepEqual(EXPORT_FORMATS.map(item => item.key), ['profex', 'topas', 'gsas2', 'highscore']);
 

@@ -20,8 +20,8 @@ import ChemicalFormula from '../components/ChemicalFormula';
 import FitCautions from '../components/FitCautionsPanel';
 import { cautionDisplay, cautionRemedies, cautionSortValue, cautionTagColor, cautionTooltip, countCautions } from '../components/fitCautions.mjs';
 import { listContext, positionText, resultsHref, seriesOf, taskHref } from '../components/sampleNav.mjs';
-import { SMOOTH_WINDOWS, levelRank, missingCell, patternFiles, patternHref, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
-import { isIdentification, peakStatusText, phasesFoundText, refinedTasks, rirText, scherrerByPhase, sizeText } from '../components/identification.mjs';
+import { FIGURE_FILES, SMOOTH_WINDOWS, figureHref, levelRank, missingCell, patternFiles, patternHref, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
+import { NOT_VERIFIED, agreementText, isIdentification, peakStatusText, phasesFoundText, refinedTasks, rirText, scherrerByPhase, sizeText } from '../components/identification.mjs';
 import { latticePercent, sourceInfo } from '../components/quickRanking.mjs';
 import { ConfidenceBanner, DisplacementTag, DownloadMenu, OverallTag, ScreeningTags, StateTag, VerdictTag } from '../components/ConfidenceViews';
 import VersionsPanel, { useVersions } from '../components/VersionsPanel';
@@ -294,13 +294,14 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   const readoutRef = React.useRef(null);
   // Width of the plot: below COMPACT_LEGEND_WIDTH the legend column is made narrower.
   const [plotWidth, setPlotWidth] = React.useState(null);
+  const [plotHeight, setPlotHeight] = React.useState(null); // room for the hkl labels above the peaks
   const containerRef = React.useRef(null);
   React.useEffect(() => {
     const element = containerRef.current;
     if (!element) return undefined;
     // Layout width, not getBoundingClientRect: the workspace modal opens with a zoom transform,
     // and a width read mid-animation put the legend under a squeezed plot.
-    const measure = () => setPlotWidth(element.offsetWidth || null);
+    const measure = () => { setPlotWidth(element.offsetWidth || null); setPlotHeight(element.offsetHeight || null); };
     measure();
     if (typeof ResizeObserver === 'undefined') {
       window.addEventListener('resize', measure);
@@ -380,10 +381,10 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   const labelKey = (labeled || []).map((trace, index) => [trace?.name, phaseColor && ['phase-profile', 'reflection'].includes(plot.data[index]?.meta)
     ? phaseColor(plot.data[index].legendgroup) : ''].join('\u0000')).join('\u0001');
   const view = React.useMemo(() => (plot ? buildRefinementView({ ...plot, data: labeled }, {
-    selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis,
+    selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis, plotHeight: hklLabels ? plotHeight : null,
   }) : null),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  [plot, labelKey, shownTreated, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis]);
+  [plot, labelKey, shownTreated, selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis, hklLabels && plotHeight]);
   // The edited curve and its anchors are two extra traces; without editing the key is constant, so
   // the plot is not redrawn. During a drag RefinementPlotly restyles them directly.
   const editing = Boolean(anchorEdit);
@@ -452,9 +453,8 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   };
   // Ranges are React state: Plotly's own reset/autoscale buttons would only
   // restore the state they were last given, so Reset zoom replaces them.
-  const config = React.useMemo(() => ({ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG,
-    toImageButtonOptions: { format: 'svg', filename: `dara_${task_id}_${String(plot_id ?? 'best').replace(':', '_')}`, width: 1600, height: 900 } }),
-  [task_id, plot_id]);
+  const config = React.useMemo(() => ({ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG }), []);
+  const figureName = `dara_${task_id}_${String(plot_id ?? 'best').replace(':', '_')}_figure`;
   // Plotly keeps the handlers of its last redraw; these stable ones always call the current render's.
   const handlers = React.useRef({});
   const plotHandlers = React.useMemo(() => Object.fromEntries(['onLegendClick', 'onLegendDoubleClick', 'onDoubleClick', 'onClick', 'onHover', 'onRelayout']
@@ -571,7 +571,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     </div>
     {annotate && !onAnnotatingChange ? <div className="dara-footnote" style={{ marginBottom: 4 }}>{ANNOTATING_HINT}</div> : null}
     <div ref={containerRef} style={{ width: '100%', position: 'relative' }}>
-    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config} anchorEdit={anchorEditing} annotate={annotate}
+    <Plotly key={`${task_id}-${plot_id}`} data={data} xBounds={view.fullXRange} layout={layout} config={config} figureName={figureName} anchorEdit={anchorEditing} annotate={annotate}
       {...plotHandlers} useResizeHandler style={{ height, width: '100%' }} />
     {labelEditor && annotate ? <AnnotationEditor key={`${labelEditor.id}-${labelEditor.px}-${labelEditor.py}`} editor={labelEditor} onCommit={commitLabel}
       onCancel={() => setLabelEditor(null)}
@@ -913,8 +913,8 @@ function ShortcutHelp({ open, onClose }) {
 // The Submit page's names of the modes and of their formula field.
 const ANALYSIS_MODE = {
   known_mixture: 'Known-phase refinement',
-  identification: 'Search-match (no refinement)',
-  elemental: 'Phase search + Rietveld',
+  identification: 'Identify (search-match)',
+  elemental: 'Identify + verify (phase search with Rietveld)',
   reaction: 'Reaction check',
   selected_phases: 'User-selected phase refinement',
 };
@@ -1528,8 +1528,9 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
         <TaskMoreMenu onDelete={onDelete} taskId={task_id} />
       </TaskTitle>
       <Divider style={{ margin: '12px 0' }} />
-      {data.identified_from ? <Text type="secondary" style={{ display: 'block', margin: '-4px 0 8px' }}>
-        {'Refined from the identification '}<a href={`/task/?id=${data.identified_from}`}>{`Task ${data.identified_from}`}</a></Text> : null}
+      {data.identified_from ? <p className="dara-ident-summary" style={{ margin: '-4px 0 8px' }}>
+        <span>{'Refined from the identification '}<a href={`/task/?id=${data.identified_from}`}>{`Task ${data.identified_from}`}</a></span>
+        <PhaseAgreement taskId={task_id} otherKind="Identification" deps={data.identified_from} bare /></p> : null}
       {/* Confidence banner and review side by side on wide screens, stacked below 1200 px. */}
       <Row gutter={[16, 12]} className="dara-summary-row" style={{ marginBottom: 8 }}>
         {hasBanner ? <Col xs={24}>
@@ -1684,7 +1685,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
         labelOf={labelIn(shownPhases)} />
       <Descriptions bordered column={columns} size='small'>
         <Descriptions.Item label="Pattern file">{data.task_label}</Descriptions.Item>
-        <Descriptions.Item label="Analysis mode">{ANALYSIS_MODE[data.analysis_mode] || data.analysis_mode || (data.use_rxn_predictor ? "Reaction check" : "Phase search + Rietveld")}</Descriptions.Item>
+        <Descriptions.Item label="Analysis mode">{ANALYSIS_MODE[data.analysis_mode] || data.analysis_mode || (data.use_rxn_predictor ? "Reaction check" : ANALYSIS_MODE.elemental)}</Descriptions.Item>
         <Descriptions.Item label="Run">
           {runText(data.start_time, data.runtime)}
           {searchSummary.stopped_early ? <Tag color="gold" style={{ marginLeft: 8 }}>{`Stopped at time limit (${STOP_STAGE_LABEL[searchSummary.stopped_at_stage] || 'search'})`}</Tag> : null}
@@ -1998,8 +1999,26 @@ function TaskUnavailable({ taskId, reason, data = null, context = null }) {
   </div>;
 }
 
+/**
+ * Whether an identification and its Rietveld refinement found the same phases (GET
+ * /task/{id}/phase-agreement), one line per linked task; `otherKind` names the other task.
+ */
+function PhaseAgreement({ taskId, otherKind, deps, bare = false }) {
+  const [items, setItems] = React.useState([]);
+  React.useEffect(() => {
+    let current = true;
+    requestJson(`/task/${taskId}/phase-agreement`).then(body => { if (current) setItems(body.items || []); }).catch(() => {});
+    return () => { current = false; };
+  }, [taskId, deps]);
+  // `bare`: the verdict alone, where the line already names the other task.
+  return items.map(item => <span key={item.task_id} className={item.agree === false ? 'dara-ident-open' : undefined}>
+    {bare ? null : <a href={`/task/?id=${item.task_id}`}>{`${otherKind} Task ${item.task_id}`}</a>}
+    {bare ? agreementText(item, otherKind).slice(`${otherKind} Task ${item.task_id}: `.length) : agreementText(item, otherKind).slice(`${otherKind} Task ${item.task_id}`.length)}
+  </span>);
+}
+
 /** "Amount by RIR" and "Crystallite size" are the quantities of an identification: shown regardless of the advanced tools. */
-function IdentificationPhaseTable({ phases, sizes, rirComplete }) {
+function IdentificationPhaseTable({ phases, sizes, rirComplete, onTellApart, busy }) {
   const corrected = sizes?.corrected;
   return <Table size="small" pagination={false} rowKey="name" scroll={{ x: 'max-content' }} tableLayout="auto" dataSource={phases}
     columns={[
@@ -2010,26 +2029,33 @@ function IdentificationPhaseTable({ phases, sizes, rirComplete }) {
           <div><Text strong><ChemicalFormula formula={row.formula} />{row.spacegroup_symbol ? ` · ${formatSpaceGroup(row.spacegroup_symbol)}` : ''}</Text></div>
           <Text type="secondary" style={{ fontSize: 'var(--dara-font-12)' }}>
             {url ? <a href={url} target="_blank" rel="noreferrer">{label}</a> : label}{row.spacegroup ? ` · No. ${row.spacegroup}` : ''}</Text>
+          {row.alternatives?.length ? <div className="dara-ident-alt">
+            <Tooltip title="The same strong peaks as this phase: peak matching cannot tell them apart"><span>Alternatives: </span></Tooltip>
+            {row.alternatives.map((other, index) => <React.Fragment key={other.source}>{index ? ', ' : ''}
+              <ChemicalFormula formula={other.formula} />{` ${sourceInfo(other.source).label}`}</React.Fragment>)}
+            {' '}<Tooltip title="Known-phase Rietveld refinement of these phases with the alternatives, as a new task: the fit tells them apart">
+              <Button size="small" type="link" loading={busy} onClick={() => onTellApart(row.alternatives.map(other => other.source))}>Tell apart with Rietveld</Button></Tooltip>
+          </div> : null}
         </>;
       } },
-      { title: <Tooltip title="Strong calculated peaks found in the pattern / strong peaks in range (search-match)"><span>Matched strong peaks</span></Tooltip>,
+      { title: <Tooltip title="Strong calculated peaks found in the pattern / strong peaks in range (search-match)"><span>Peaks</span></Tooltip>,
         key: 'matched', className: 'dara-num',
         render: (_, row) => <Tooltip title={row.observed_peaks == null ? null : `${row.observed_peaks} observed peaks assigned to this phase`}>
           <span>{`${row.matched ?? '—'}/${row.expected ?? '—'}`}</span></Tooltip> },
-      { title: <Tooltip title="Lattice change that fits the peak positions best (d scale − 1); no refinement"><span>Lattice change</span></Tooltip>,
+      { title: <Tooltip title="Lattice change that fits the peak positions best (d scale − 1); no refinement"><span>Lattice</span></Tooltip>,
         key: 'lattice', className: 'dara-num', render: (_, row) => latticePercent(row.lattice_scale) },
-      { title: <Tooltip title="Reference intensity ratio method (I/Ic, normalised over the identified phases): semi-quantitative, no refinement. Amorphous or unidentified phases make every fraction too high.">
-        <span>Amount by RIR<div className="dara-th-note">wt%, semi-quantitative</div></span></Tooltip>,
+      { title: <Tooltip title="Semi-quantitative amount by the reference intensity ratio method (I/Ic, normalised over the identified phases), no refinement. Amorphous or unidentified phases make every fraction too high.">
+        <span>RIR (wt%)</span></Tooltip>,
         key: 'rir', className: 'dara-num', render: (_, row) => {
           const text = rirText(row.rir_weight_percent);
           if (text === null) return <Tooltip title={rirComplete === false ? 'No usable line for the RIR method: the other phases are normalised among themselves' : 'Not available'}><Text type="secondary">—</Text></Tooltip>;
           return <Tooltip title={row.rir == null ? null : `I/Ic = ${Number(row.rir).toFixed(2)}`}><span>{text}</span></Tooltip>;
         } },
       { title: <Tooltip title={corrected ? 'Median Scherrer size of the phase’s fitted peaks, instrument broadening removed' : 'Median Scherrer size of the phase’s fitted peaks; no instrument broadening removed, so a lower bound'}>
-        <span>Crystallite size<div className="dara-th-note">{corrected ? 'Scherrer, median' : 'Scherrer, median, uncorrected'}</div></span></Tooltip>,
+        <span>{corrected ? 'Crystallite size (nm)' : 'Crystallite size (nm) ≥'}</span></Tooltip>,
         key: 'size', className: 'dara-num', render: (_, row) => {
           const entry = sizes?.byPhase?.[row.name];
-          return entry ? <Tooltip title={`Median of ${entry.n} peak${entry.n === 1 ? '' : 's'}; the Peaks tab lists each one`}><span>{sizeText(entry)}</span></Tooltip>
+          return entry ? <Tooltip title={`Median of ${entry.n} peak${entry.n === 1 ? '' : 's'}; the Peaks tab lists each one`}><span>{sizeText(entry).replace(' nm', '')}</span></Tooltip>
             : <Text type="secondary">{sizes ? '—' : '…'}</Text>;
         } },
     ]} />;
@@ -2057,10 +2083,10 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
     fetch(`${URL}/task/${task_id}/figure.svg`).then(response => { if (current) setReportReady(response.ok); }).catch(() => {});
     return () => { current = false; };
   }, [task_id]);
-  const refine = async () => {
+  const refine = async (extra = []) => {
     setRefining(true);
     try {
-      const body = await postJson(`/task/${task_id}/refine`, {});
+      const body = await postJson(`/task/${task_id}/refine`, extra.length ? { extra_reference_ids: extra } : {});
       window.location.href = `/task/?id=${body.wf_id}`;
     } catch (error) {
       message.error(error.message || 'The refinement could not be submitted.');
@@ -2074,8 +2100,8 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const downloads = [
     ...(reportReady ? [
       { key: 'report', label: 'Report (PDF + Word)' }, { key: 'report-html', label: 'Report (HTML)' },
-      { key: 'png', label: <a href={`${URL}/task/${task_id}/figure.png`}>Figure (PNG)</a> },
-      { key: 'svg', label: <a href={`${URL}/task/${task_id}/figure.svg`}>Figure (SVG)</a> }] : []),
+      { key: 'figure', label: 'Figure', children: FIGURE_FILES.map(file => ({
+        key: file.key, label: <a href={figureHref(URL, task_id, file.format, undefined, false, file.widthMm)}>{file.label}</a> })) }] : []),
     { key: 'pattern', label: 'Pattern data', children: patternFiles(display).map(file => ({
       key: `pattern:${file.key}`, label: <a href={patternHref(URL, task_id, file.path, 'best')}>{file.label}</a> })) },
     { key: 'peaks', label: <a href={`${URL}/task/${task_id}/peaks.csv?sel=best`}>Reference reflections (CSV)</a> },
@@ -2096,14 +2122,14 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
         <Button href={`/?clone_task=${task_id}&search=1`}>Edit phases (Search-match)</Button>
       </Tooltip>
       <Tooltip title="Refine these phases with Rietveld as a new task: refined amounts, lattice parameters and fit quality (about a minute)">
-        <Button type="primary" loading={refining} onClick={refine}>Refine with Rietveld</Button>
+        <Button type="primary" loading={refining} onClick={() => refine()}>Refine with Rietveld</Button>
       </Tooltip>
       <TaskMoreMenu onDelete={onDelete} taskId={task_id} />
     </TaskTitle>
     <Divider style={{ margin: '12px 0' }} />
     <div className="dara-ident-summary">
       <Tooltip title="Phases accepted from the search-match; nothing was refined">
-        <Tag className="dara-ident-mode">Search-match · no refinement</Tag>
+        <Tag className="dara-ident-mode">Search-match</Tag>
       </Tooltip>
       <span>{phasesFoundText(phases)}</span>
       {status ? <span className={open.length ? 'dara-ident-open' : undefined}>{status}</span> : null}
@@ -2116,9 +2142,13 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
     </section>
     <Tabs activeKey={tab} onChange={setTab} destroyInactiveTabPane items={[
       { key: 'phases', label: 'Phases', children: <>
-        <div className="dara-fit-table"><IdentificationPhaseTable phases={phases} sizes={sizes} rirComplete={data.rir_complete} /></div>
-        <Text className="dara-footnote" style={{ marginTop: 8 }}>
-          Amounts by the RIR method and Scherrer sizes from single peaks are estimates without refinement. Refine with Rietveld for refined amounts and lattice parameters.</Text>
+        <p className="dara-ident-summary dara-ident-status">
+          <Tooltip title="The phases were matched by peak positions and intensities; Refine with Rietveld verifies them with a fit and gives refined wt%">
+            <span>{NOT_VERIFIED}</span></Tooltip>
+          {refined.length ? <PhaseAgreement taskId={task_id} otherKind="Rietveld" deps={refined.join()} /> : null}
+        </p>
+        <div className="dara-fit-table"><IdentificationPhaseTable phases={phases} sizes={sizes} rirComplete={data.rir_complete} onTellApart={refine} busy={refining} /></div>
+        <Text className="dara-footnote" style={{ marginTop: 8 }}>RIR amounts and Scherrer sizes are estimates without refinement.</Text>
         {advanced ? <RirSemiQuant taskId={task_id} sel="best" identification /> : null}
       </> },
       { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel="best" active={tab === 'peaks'} identification

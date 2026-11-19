@@ -99,6 +99,8 @@ def test_figure_endpoint(monkeypatch):
     assert "dara_task_9_Sample_figure_candidate_2.svg" in svg.headers["Content-Disposition"]
     assert b"Excluded from refinement" in svg.content
 
+    pdf = client.get("/api/task/9/figure.pdf?width_mm=85")
+    assert pdf.status_code == 200 and pdf.headers["Content-Type"] == "application/pdf" and pdf.content.startswith(b"%PDF")
     assert client.get("/api/task/9/figure.gif").status_code == 404
     assert client.get("/api/task/9/figure.svg?idx=0&best=true").status_code == 422
     assert client.get("/api/task/9/figure.svg?idx=99").status_code == 404
@@ -130,3 +132,55 @@ def test_report_falls_back_to_builtin_svg_when_matplotlib_fails(monkeypatch):
     assert re.search(r"</svg><figcaption>Figure 1\. ", html)
     assert re.search(r"<table><caption><b>Table 1\.</b> ", html)
     assert review_router._fit_svg  # fallback remains available
+
+
+def test_journal_style_axes_fonts_and_formats():
+    from dara.server.report.figures import PHASE_COLORS, radiation_text
+
+    assert radiation_text("Cu") == "Cu Kα" and radiation_text("0.07293") == "λ = 0.7293 Å"
+    assert radiation_text(None) is None and radiation_text("unknown") is None
+    svg = fit_figure(_fit(), fmt="svg", radiation="Cu Kα").decode("utf-8")
+    assert "2θ (°, Cu Kα)" in svg
+    assert "Arial" in svg or "DejaVu Sans" in svg  # real text with the journal font (or its fallback)
+    assert PHASE_COLORS[0].lower() in svg.lower()  # Okabe-Ito tick rows
+    assert fit_figure(_fit(), fmt="pdf").startswith(b"%PDF")
+
+
+def test_hkl_labels_stay_inside_the_frame_and_off_the_legend():
+    """An identification: the reference line stands above the observed points; its label sits on
+    the line and inside the frame, and the strongest label wins a collision."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    x = np.linspace(10, 80, 1400)
+    obs = 20 + 800 * np.exp(-0.5 * ((x - 30) / 0.1) ** 2) + 300 * np.exp(-0.5 * ((x - 78) / 0.1) ** 2)
+    peaks = pd.DataFrame({"2theta": [30.0, 30.05, 78.0], "phase": [A, A, B], "intensity": [950.0, 100.0, 280.0],
+                          "h": [1, 2, 3], "k": [0, 0, 1], "l": [1, 0, 1]})
+    refinement = SimpleNamespace(
+        plot_data=SimpleNamespace(x=x, y_obs=obs, y_calc=None, y_bkg=np.full_like(x, 20.0)),
+        lst_data=SimpleNamespace(phases_results={A: object(), B: object()}), peak_data=peaks,
+    )
+    svg = fit_figure(refinement, fmt="svg", hkl_labels=True, width_mm=85).decode("utf-8")
+    assert "(101)" in svg  # the strongest line
+    assert "(200)" not in svg  # 0.05° from the strongest: left out
+    # (311) sits under the legend at the top right only if it fits; never drawn across it
+    from dara.server.report import figures
+
+    seen = {}
+    original = figures._draw_hkl_labels
+
+    def spy(figure, ax, legend, *args, **kwargs):
+        original(figure, ax, legend, *args, **kwargs)
+        renderer = figure.canvas.get_renderer()
+        frame = ax.get_window_extent(renderer)
+        boxes = [text.get_window_extent(renderer) for text in ax.texts]
+        seen["inside"] = all(box.y1 <= frame.y1 + 0.5 for box in boxes)
+        seen["off_legend"] = not any(box.overlaps(legend.get_window_extent(renderer)) for box in boxes)
+        seen["count"] = len(boxes)
+
+    figures._draw_hkl_labels = spy
+    try:
+        fit_figure(refinement, fmt="png", dpi=100, hkl_labels=True)
+    finally:
+        figures._draw_hkl_labels = original
+    assert seen == {"inside": True, "off_legend": True, "count": seen["count"]} and seen["count"] >= 1

@@ -24,6 +24,7 @@ FIGURE_CAPTION = (
     "Shaded intervals were excluded from refinement."
 )
 HKL_CAPTION = " Miller indices (hkl) label the strongest reflections."
+NOT_VERIFIED = "Peak matching only · not verified by a fit"  # the status of an identification (also on its page)
 LIMITATIONS = (
     "Weight fractions refer to the crystalline phases in the model; amorphous or unidentified "
     "phases are not quantified. The esd values are least-squares estimates without systematic "
@@ -1179,6 +1180,7 @@ def _build_report_html(
             fit_figure(
                 refinement, fmt="svg", width_mm=170, excluded_ranges=excluded_ranges,
                 counts_like=counts_like, hkl_labels=hkl_labels, annotations=task.get("annotations"),
+                radiation=review_router.figure_radiation(document),
             ),
             "Observed and calculated diffraction patterns with reflection positions and difference curve",
         )
@@ -1419,6 +1421,7 @@ def build_identification_report_html(
 
 def _build_identification_html(task_id, task, document, review, *, observed, scherrer, rir, hkl_labels):
     from dara.export.peak_list import ASSIGN_TOLERANCE_DEG
+    from dara.server import review_router
     from dara.server.api_router import _counts_like, _spacegroup_symbol
     from dara.xrd import get_xrdml_metadata
 
@@ -1520,6 +1523,7 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
             fit_figure(
                 fit, fmt="svg", width_mm=170, excluded_ranges=excluded_ranges,
                 counts_like=_counts_like(document), hkl_labels=hkl_labels, annotations=task.get("annotations"),
+                radiation=review_router.figure_radiation(document),
             ),
             "Observed pattern and background with the reference lines of the identified phases",
         )
@@ -1558,6 +1562,7 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
         ["Phase", "Space group", "wt% (RIR)", "I/Ic", "Crystallite size, Scherrer (nm)", "Reference"], rows,
         caption=numbering.caption("Semi-quantitative phase analysis."), align="cccccc", nowrap="--nnnn",
     ))
+    parts.append(f'<p class="note"><b>{escape(NOT_VERIFIED)}.</b> A Rietveld refinement of these phases verifies them.</p>')
     parts.append(
         '<p class="note">RIR weight fractions are normalised to the identified phases. Crystallite size: '
         "mean ± standard deviation of the Scherrer sizes of the assigned peaks (their number in brackets), "

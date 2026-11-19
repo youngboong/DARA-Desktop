@@ -44,9 +44,12 @@ Click on "Submit" in the navigation menu to access the submission form.
 
 ### Step 3: Choose the Analysis Mode and Enter the Chemistry
 
-Select one of three analysis modes. The fields below the selector change with the mode.
+Select one of four analysis modes. The fields below the selector change with the mode.
 
-- **Phase search + Rietveld**: DARA searches the databases for the phases in your pattern. Enter the elements, or the formulas of the starting materials or the expected phases.
+The first two modes are one flow at two depths, with the same input (the elements, or the formulas of the starting materials or the expected phases):
+
+- **Identify** (the default): search-match in seconds, as HighScore and Match! do. The phases are found by peak matching and are not verified by a fit. See [Search-match and identification](#search-match-and-identification).
+- **Identify + verify**: the phase search with Rietveld (minutes). DARA refines the candidate phase sets and ranks them by the fit, so the result is a verified phase set with wt%.
 - **Known-phase refinement**: DARA refines only the phases you list under "Phases to refine". Use it when you already know what is in the sample.
 - **Reaction check**: DARA compares your formulas with a predicted reaction at a given temperature (27 to 1727 °C) and atmosphere.
 
@@ -75,21 +78,38 @@ Select your diffractometer configuration from the dropdown.
 - **Temperature**: Specify the reaction temperature in Celsius (27 °C minimum, 1727 °C maximum)
 - **Atmosphere**: Select the atmosphere of the reaction
 
-### Step 5: Submit Analysis
+### Step 5: Run
 
-Click "Submit Analysis" to queue your job. You will see if there is any error in the submission. Otherwise, you will see the task submitted successfully and appear in the results page.
+The Run card has one main action per mode:
+
+- **Identify**: **Search-match** opens the search-match for the pattern (seconds). With several files it becomes **Identify all (N)** (see below).
+- **Identify + verify** and the other Rietveld modes: **Run analysis** queues the automatic analysis. **Check candidates first** opens the same search-match before you commit to the run.
+
+Errors in the form are marked at their field; otherwise the task appears in Results.
 
 ## Search-match and identification
 
-Search-match ranks reference structures against your pattern in seconds, as HighScore and Match! do. Load a pattern, enter the elements or formulas, then click **Search-match** in the run card of the Submit page.
+Search-match ranks reference structures against your pattern in seconds, as HighScore and Match! do. Choose the **Identify** mode, load a pattern, enter the elements or formulas, then click **Search-match** in the Run card. (In the Rietveld modes the same search-match is **Check candidates first**.)
 
 - The candidate table lists the matching structures with their score and how much of the pattern they explain. Click a candidate to preview its reflections on the pattern; tick it to select it.
 - **Residual** shows what the selected phases leave unexplained, with the best matches for the peaks that remain.
+- Candidates whose strong peaks fall on the same positions as a selected phase (a polymorph or a close-composition variant) are listed as **Alternatives** under it, and marked *alt.* in the table instead of a rank: peak matching cannot tell them apart. **Tell apart with Rietveld** refines the selected phases together with them.
 - **Background…** sets the background removed before ranking: Automatic, or Granularity / bending as in HighScore. The curve is drawn on the pattern while you move the sliders; "Accept and rank again" ranks with it.
 - **Refine with Rietveld** submits a Known-phase refinement of the selected structures (minutes).
 - **Save identification** stores the selected phases as the result without refinement. An identification has no Rwp; its amounts are estimated from reference intensity ratios (RIR).
 
+An identification is marked **Peak matching only · not verified by a fit**. **Refine with Rietveld** on its page verifies the phases with a fit (a new, linked task); once that is done, both pages say whether the two found the same phases and list the phases found by only one of them. Alternatives saved with a phase can be refined with it from the phase table (**Tell apart with Rietveld**).
+
 To change the phases of a saved identification, open its task and click **Edit phases (Search-match)**: the search-match opens again on the stored pattern with those phases selected. Saving makes a new task; the first one is kept.
+
+### Several files: Identify all
+
+Drop several files on the pattern field (or switch on **Several files**). In the Identify mode the main action becomes **Identify all (N)**: each file gets a search-match with the same settings, and its suggested phases (the suggestion without the weak picks, as "Use suggestion" would tick) are saved as one identification per file. The files are grouped as a series under the series name (filled in from the file names), so they appear together in Results and Series.
+
+- The files table shows each file's result as it arrives: the task and its phases, or why the file failed (for example an unreadable file or another radiation). The other files go on.
+- Files of different samples: switch on **Use each file's own elements** in the note above the table, and each file is searched with the elements of its own name.
+- Each row says *not verified*: tick the files to check and click **Verify selected with Rietveld** to queue a Known-phase refinement of each (minutes per file).
+- Each identification can be changed afterwards with **Edit phases (Search-match)**.
 
 ## Results
 
@@ -177,11 +197,15 @@ The assessment describes what the data support. It is not a statement that a res
 
 ## Series
 
-Switch on "Submit as a series" on the Submit page to analyse 2 to 50 patterns with identical settings. A temperature, time or similar variable in the file names (for example `ZnO_300C_60min.xy`) is used to order the samples and to label the x axis. The Series page tracks progress and plots phase fractions, lattice parameters, and Rwp/GOF against the variable.
+Drop several files on the pattern field, or switch on "Several files" on the Submit page, to analyse 2 to 50 patterns with identical settings. The series name is filled in from the file names. For files of different samples, "Use each file's own elements" runs each file with the elements of its own name. A temperature, time or similar variable in the file names (for example `ZnO_300C_60min.xy`) is used to order the samples and to label the x axis. The Series page tracks progress and plots phase fractions, lattice parameters, and Rwp/GOF against the variable.
 
 ## Figures and exports
 
-Use "Figure (PNG)" or "Figure (SVG)" on a result for a publication-style refinement figure, and "Export for..." to create starting models for Profex/BGMN, TOPAS, GSAS-II or HighScore.
+**Download → Figure** on a result gives a journal-style figure as PNG (600 dpi), SVG or PDF, at double-column (170 mm) or single-column (85 mm) width: Arial text at 7–8 pt, observed points in black, the calculated curve in red, one row of Bragg ticks per phase under the pattern and the difference curve below them, in a closed frame with inward ticks. An identification shows the measured pattern with its background and the reference lines of each phase. "Miller indices on the figure" labels the strongest reflections; a label that would cross the legend or a stronger label is left out.
+
+The camera buttons in the plot's toolbar save the view on screen (with its zoom and the phases shown) in the same style, as SVG or as PNG at 600 dpi.
+
+"Export for..." creates starting models for Profex/BGMN, TOPAS, GSAS-II or HighScore.
 
 ## Advanced Features
 

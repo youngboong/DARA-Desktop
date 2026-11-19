@@ -21,6 +21,9 @@ Per candidate (all numpy, no BGMN):
    0.08 is "weak".
 8. Grouping: same (formula, space group) is one row; same formula with another space group is a
    "polymorph"; a composition within 3.5 at% of a higher row is a "variant of X".
+9. Alternatives: a polymorph or variant row whose strong lines fall on the same positions as
+   another row's (:func:`same_peaks`) cannot be told apart by peak matching; each lists the other
+   in ``alternatives`` (no order between them is claimed).
 
 Simulated reflections ("sticks") are cached on disk per structure and wavelength
 (:func:`stick_cache_dir`), so a warm pool of ~150 candidates scores in about a second.
@@ -781,6 +784,7 @@ def rank(
         weak = next((c["weak"] for c in combination if c["source"] == row["source"]), False)
         if weak:
             row["flags"].append("weak")
+    mark_alternatives(ranking)
 
     return {
         "ranking": ranking,
@@ -790,6 +794,41 @@ def rank(
         "background": background_view(profile, settings),
         "caveats": [],
     }
+
+
+def _strong_positions(sticks, config=CONFIG) -> np.ndarray:
+    lines = np.asarray([line for line in sticks or [] if len(line) == 2], dtype=float).reshape(-1, 2)
+    if not len(lines) or not lines[:, 1].max() > 0:
+        return np.empty(0)
+    strong = lines[lines[:, 1] >= config.strong_rel * lines[:, 1].max()]
+    return strong[np.argsort(-strong[:, 1], kind="stable")][: config.max_strong, 0]
+
+
+def same_peaks(a_sticks, b_sticks, config=CONFIG) -> bool:
+    """Whether two rows' strong lines (at least ``strong_rel`` of their strongest, at most
+    ``max_strong``, at their matched positions) coincide: every strong line of each lies within the
+    observed-maximum window (2 * ``window_hw_deg``) of a strong line of the other."""
+    a, b = _strong_positions(a_sticks, config), _strong_positions(b_sticks, config)
+    if not len(a) or not len(b):
+        return False
+    tolerance = 2 * config.window_hw_deg
+    return bool(np.all(np.min(np.abs(a[:, None] - b[None, :]), axis=1) <= tolerance)
+                and np.all(np.min(np.abs(b[:, None] - a[None, :]), axis=1) <= tolerance))
+
+
+def _related(a: dict, b: dict) -> bool:
+    """Polymorphs (same formula) or a "variant of" the other's formula."""
+    return a["formula"] == b["formula"] or f"variant of {a['formula']}" in b["flags"] or f"variant of {b['formula']}" in a["flags"]
+
+
+def mark_alternatives(rows: list[dict]) -> None:
+    """``alternatives`` (sources) of each ranking row: related rows with the same strong peaks."""
+    for row in rows:
+        row["alternatives"] = []
+    for a, b in itertools.combinations(rows, 2):
+        if _related(a, b) and same_peaks(a["sticks"], b["sticks"]):
+            a["alternatives"].append(b["source"])
+            b["alternatives"].append(a["source"])
 
 
 def background_view(profile, settings: dict) -> dict:

@@ -232,3 +232,17 @@ test('stored-pattern ranking: the setup options as typed JSON', async () => {
   });
   assert.deepEqual(taskRankingBody([['include_theoretical', 'true']]), { include_theoretical: true, library_cif_ids: [], elements: [], precursor_formulas: [] });
 });
+
+{
+  const { alternativeGroups, alternativeOf, alternativeRecords } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  const ranking = [
+    { source: 'cod:1', formula: 'TiO2', spacegroup: 141, alternatives: ['cod:2'] },
+    { source: 'cod:2', formula: 'Ti0.99O2', spacegroup: 141, alternatives: ['cod:1'] },
+    { source: 'cod:3', formula: 'ZnO', spacegroup: 186, alternatives: [] },
+  ];
+  assert.deepEqual(Object.keys(alternativeGroups(ranking, ['cod:1', 'cod:3'])), ['cod:1']);
+  assert.deepEqual(alternativeGroups(ranking, ['cod:1', 'cod:2']), {}, 'both selected: nothing to tell apart here');
+  assert.equal(alternativeOf(ranking, ['cod:1'])['cod:2'].source, 'cod:1');
+  assert.deepEqual(alternativeRecords({ ranking }, ['cod:1']), [{ source: 'cod:2', formula: 'Ti0.99O2', spacegroup: 141, of: 'cod:1' }]);
+  console.log('alternatives ok');
+}

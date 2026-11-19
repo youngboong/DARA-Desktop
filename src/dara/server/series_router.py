@@ -74,6 +74,20 @@ async def preview_series(request: SeriesPreviewRequest):
     return _preview([Path(name).name for name in request.filenames])
 
 
+def file_chemistry(filename: str, enabled: bool) -> dict:
+    """``elements`` / ``precursor_formulas`` form fields from the file name (``{}`` when off or none)."""
+    import json
+
+    from dara.filename_chemistry import suggest_filename_chemistry
+
+    if not enabled:
+        return {}
+    chemistry = suggest_filename_chemistry(filename)
+    if not chemistry.get("elements"):
+        return {}
+    return {"elements": json.dumps(chemistry["elements"]), "precursor_formulas": json.dumps(chemistry.get("formulas") or [])}
+
+
 def _prefixed(exc: HTTPException, filename: str) -> HTTPException:
     if isinstance(exc.detail, str):
         return HTTPException(status_code=exc.status_code, detail=f"{filename}: {exc.detail}")
@@ -107,8 +121,12 @@ async def submit_series(
     screening_timeout_s: Annotated[Optional[float], Form()] = None,
     max_analysis_minutes: Annotated[Optional[float], Form()] = None,
     phase_set_task_id: Annotated[Optional[int], Form()] = None,
+    per_file_chemistry: Annotated[bool, Form()] = False,
 ):
-    """Validate and build every job first, then queue them all in series order."""
+    """Validate and build every job first, then queue them all in series order.
+
+    ``per_file_chemistry``: each file runs with the elements and formulas its name gives (a batch
+    of different samples); a name without chemistry runs with the form's elements and formulas."""
     name = (series_name or "").strip()
     if not 1 <= len(name) <= 120:
         raise HTTPException(status_code=400, detail="Series name must be 1 to 120 characters")
@@ -182,7 +200,8 @@ async def submit_series(
                         mismatch = _wavelength_mismatch(pattern, pattern_path, wavelength)
                         if mismatch:
                             raise HTTPException(status_code=400, detail={**mismatch, "filename": filename})
-                jobs.append(_build_job(pattern, filename, **fields, additional_cifs=list(cifs)))
+                jobs.append(_build_job(pattern, filename, **{**fields, **file_chemistry(filename, per_file_chemistry)},
+                                       additional_cifs=list(cifs)))
             except HTTPException as exc:
                 raise _prefixed(exc, filename) from exc
             except Exception as exc:

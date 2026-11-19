@@ -636,3 +636,19 @@ def test_background_preview_of_a_job_without_ranking(monkeypatch):
         assert info.value.status_code == 404
 
     asyncio.run(scenario())
+
+
+def test_alternatives_are_related_rows_with_the_same_strong_peaks():
+    """Peak matching cannot tell apart a variant (or polymorph) whose strong lines coincide."""
+    tio2 = {"source": "cod:1", "formula": "TiO2", "flags": [], "sticks": [[25.3, 100], [37.8, 20], [48.0, 30], [70.0, 5]]}
+    same = {"source": "cod:2", "formula": "Ti0.99O2", "flags": ["variant of TiO2"],
+            "sticks": [[25.33, 90], [37.85, 22], [48.05, 28]]}
+    rutile = {"source": "cod:3", "formula": "TiO2", "flags": ["polymorph"], "sticks": [[27.4, 100], [36.1, 50], [54.3, 60]]}
+    other = {"source": "cod:4", "formula": "ZnO", "flags": [], "sticks": [[25.3, 100], [37.8, 20], [48.0, 30]]}
+    assert qr.same_peaks(tio2["sticks"], same["sticks"])
+    assert not qr.same_peaks(tio2["sticks"], rutile["sticks"])
+    assert not qr.same_peaks(tio2["sticks"], [[25.3, 100], [37.8, 20], [48.0, 30], [62.0, 40]]), "an extra strong line"
+    rows = [tio2, same, rutile, other]
+    qr.mark_alternatives(rows)
+    assert tio2["alternatives"] == ["cod:2"] and same["alternatives"] == ["cod:1"]
+    assert rutile["alternatives"] == [] and other["alternatives"] == []  # same peaks but unrelated: not flagged

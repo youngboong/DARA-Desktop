@@ -9,6 +9,7 @@ import {
   MAX_REFINE, SORTERS, assignColors, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
   progressText, rankingNotes, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, suggestedKeys, toggleKey,
   mismatchView, startingPoints, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withPoints, withResidualProfile, zoomWindow,
+  alternativeGroups, alternativeOf, alternativeRecords,
 } from './quickRanking.mjs';
 import { addAnchor, anchorError, curveWarnings, pchip, removeAnchor } from './backgroundAnchors.mjs';
 import { BackgroundCurvePanel } from './BackgroundEditor';
@@ -192,12 +193,15 @@ export function useQuickRanking(buildRequest) {
       background.current = settings;
       start(theoretical);
     },
-    /** `onRefine({referenceIds, formulas})` resolves to whether a refinement was submitted. */
-    async refine(onRefine) {
+    /**
+     * `onRefine({referenceIds, formulas})` resolves to whether a refinement was submitted; `extra`
+     * keys (alternatives to tell apart) are refined with the selected phases.
+     */
+    async refine(onRefine, extra = []) {
       setRefining(true);
       let submitted = false;
       try {
-        submitted = await onRefine(refineSelection(state.data, selected));
+        submitted = await onRefine(refineSelection(state.data, [...selected, ...extra]));
       } finally {
         setRefining(false);
       }
@@ -210,7 +214,7 @@ export function useQuickRanking(buildRequest) {
     async identify(onIdentify) {
       setIdentifying(true);
       try {
-        await onIdentify({ referenceIds: [...selected], background: background.current });
+        await onIdentify({ referenceIds: [...selected], background: background.current, alternatives: alternativeRecords(state.data, selected) });
       } finally {
         setIdentifying(false);
       }
@@ -290,6 +294,15 @@ function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
   </div>;
 }
 
+// Column definitions, shared by the candidate table and the side lists (one term per thing).
+const HELP = {
+  explains: 'Share of the measured net intensity this structure explains on its own (lattice-penalised). Not an amount: refine for wt%.',
+  rest: 'Share of the intensity the selected phases leave unexplained that this structure explains',
+  peaks: 'Strong calculated peaks found in the pattern / strong peaks in range',
+  lattice: 'Lattice change that fits best (d scale − 1)',
+  flags: 'picked: in the suggestion · weak: small share of the pattern · polymorph: other structures of the formula ranked · theoretical: computed only (MP) · variant of: same structure as a higher row',
+};
+
 /** "Ia-3 (206)" with the symbol set as a space group; a bare number when there is no symbol. */
 const SpaceGroup = ({ row }) => (row.spacegroup_symbol
   ? <><ChemicalFormula formula={row.spacegroup_symbol} />{` (${row.spacegroup})`}</> : String(row.spacegroup ?? '—'));
@@ -309,12 +322,16 @@ function ResidualPanel({ residual, rows, selected, setSelected }) {
       <p className={`dara-qr-left-status${open ? ' is-open' : ''}${residual.stale ? ' is-stale' : ''}`} role="status">{unexplainedStatus(left)}</p>
     </Tooltip>
     {open && next.length ? <>
-      <h3>Best matches for the remaining peaks</h3>
-      <ul>{next.map(row => <li key={row.key}>
+      <ul className="dara-qr-next">
+        <li className="dara-qr-list-head"><span>Next best match</span><Tooltip title={HELP.peaks}><span className="dara-num">Peaks</span></Tooltip>
+          <Tooltip title={HELP.rest}><span className="dara-num">Explains</span></Tooltip><span /></li>
+        {next.map(row => <li key={row.key}>
         <div className="dara-qr-phase">
           <div><ChemicalFormula formula={row.formula} /> <span className="meta"><SpaceGroup row={row} /></span></div>
-          <div className="meta">{`${row.sourceLabel} · ${row.peaksText} peaks · explains ${row.scoreText} of the rest`}</div>
+          <div className="meta">{row.sourceLabel}</div>
         </div>
+        <span className="dara-num" aria-label={`Peaks ${row.peaksText}`}>{row.peaksText}</span>
+        <span className="dara-num" aria-label={`Explains ${row.scoreText} of the rest`}>{row.scoreText}</span>
         <Tooltip title={row.inRanking ? null : 'Not in the ranked list'}>
           <Button size="small" icon={<PlusOutlined />} disabled={!row.inRanking || selected.includes(row.key) || selected.length >= MAX_REFINE}
             onClick={() => setSelected([...selected, row.key])}>Add</Button>
@@ -386,10 +403,17 @@ const Workspace = styled.section`
   .dara-qr-selected h2 span { font-weight: 400; color: var(--dara-text-secondary); font-size: var(--dara-font-12); }
   .dara-qr-selected ul { margin: 0; padding: 0; list-style: none; }
   .dara-qr-selected li {
-    display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; align-items: center; gap: 0 8px;
+    display: grid; grid-template-columns: 12px minmax(0, 1fr) 48px 24px; align-items: center; gap: 0 8px;
     padding: 4px 0; border-top: 1px solid var(--dara-border);
   }
-  .dara-qr-selected li:first-child { border-top: 0; }
+  .dara-qr-selected li.dara-qr-list-head { padding: 0 0 2px; border-top: 0; font-size: var(--dara-font-12); color: var(--dara-text-secondary); }
+  .dara-qr-list-head > span { cursor: default; }
+  .dara-qr-selected .dara-num { text-align: right; font-variant-numeric: tabular-nums; }
+  .dara-qr-selected .dara-qr-next li { grid-template-columns: minmax(0, 1fr) 40px 48px auto; }
+  .dara-qr-selected li:first-child, .dara-qr-selected li.dara-qr-list-head + li { border-top: 0; }
+  .dara-qr-selected li.dara-qr-alt { display: block; padding: 0 0 6px 20px; border-top: 0; font-size: var(--dara-font-12); color: var(--dara-text-secondary); }
+  .dara-qr-selected li.dara-qr-alt .ant-btn { margin-top: 2px; }
+  .dara-qr-alt-rank { color: var(--dara-text-secondary); }
   .dara-qr-swatch { width: 12px; height: 12px; border-radius: var(--dara-radius); }
   .dara-qr-phase { min-width: 0; }
   .dara-qr-phase > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -405,8 +429,6 @@ const Workspace = styled.section`
   .dara-qr-left-status { margin: 0 0 8px; font-weight: 600; }
   .dara-qr-left-status.is-open { color: var(--dara-review); }
   .dara-qr-left-status.is-stale { opacity: 0.6; }
-  .dara-qr-left h3 { margin: 0 0 4px; font-size: var(--dara-font-12); font-weight: 400; color: var(--dara-text-secondary); }
-  .dara-qr-left li { grid-template-columns: minmax(0, 1fr) auto; }
   .dara-qr-plot-tools { display: inline-flex; align-items: center; gap: 12px; }
   .dara-qr-plot-tools label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   .dara-qr-body.single { grid-template-columns: minmax(0, 1fr); }
@@ -442,6 +464,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const suggestion = data ? suggestedKeys(data) : [];
   const usingSuggestion = suggestion.every(key => selected.includes(key));
   const weakLeft = data ? weakNotSelected(data, selected) : [];
+  // Candidates peak matching cannot tell apart from a selected phase: grouped under it, not ranked.
+  const groups = alternativeGroups(rows, selected);
+  const altOf = alternativeOf(rows, selected);
   // The ranking's own check (the server compares the file's anode with the request) wins over the setup's.
   const mismatch = mismatchView(data?.wavelength_mismatch) || inspected;
 
@@ -513,7 +538,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   };
 
   const columns = [
-    { title: 'Rank', dataIndex: 'rank', width: 64, className: 'dara-num', sorter: SORTERS.rank, defaultSortOrder: 'ascend' },
+    { title: 'Rank', dataIndex: 'rank', width: 64, className: 'dara-num', sorter: SORTERS.rank, defaultSortOrder: 'ascend',
+      render: (rank, row) => (altOf[row.key] ? <Tooltip title={`Alternative of ${altOf[row.key].formula} (rank ${altOf[row.key].rank}): the same strong peaks, so peak matching cannot tell them apart`}>
+        <span className="dara-qr-alt-rank">alt.</span></Tooltip> : rank) },
     { title: 'Formula', dataIndex: 'formula', render: formula => <ChemicalFormula formula={formula} /> },
     { title: 'Space group', dataIndex: 'spacegroupText', render: (_, row) => <span style={{ whiteSpace: 'nowrap' }}><SpaceGroup row={row} /></span> },
     {
@@ -526,19 +553,19 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
       },
     },
     {
-      title: <Tooltip title="Share of the measured net intensity this structure explains on its own (lattice-penalised). Not an amount: refine for wt%.">Explains</Tooltip>,
+      title: <Tooltip title={HELP.explains}>Explains</Tooltip>,
       dataIndex: 'scoreText', width: 84, className: 'dara-num', sorter: SORTERS.score, sortDirections: ['descend', 'ascend'],
     },
     {
-      title: <Tooltip title="Strong calculated peaks found in the pattern / strong peaks in range">Peaks</Tooltip>,
+      title: <Tooltip title={HELP.peaks}>Peaks</Tooltip>,
       dataIndex: 'peaksText', width: 84, className: 'dara-num', sorter: SORTERS.peaks, sortDirections: ['descend', 'ascend'],
     },
     {
-      title: <Tooltip title="Lattice change that fits best (d scale − 1)">Lattice</Tooltip>,
+      title: <Tooltip title={HELP.lattice}>Lattice</Tooltip>,
       dataIndex: 'latticeText', width: 92, className: 'dara-num', sorter: SORTERS.lattice,
     },
     {
-      title: 'Flags', dataIndex: 'tags',
+      title: <Tooltip title={HELP.flags}>Flags</Tooltip>, dataIndex: 'tags',
       render: tags => tags.map(tag => <Tag key={tag.label} color={tag.color} style={{ marginBottom: 2 }}>{tag.label}</Tag>),
     },
   ];
@@ -600,10 +627,8 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
               <span>{focusedRow
                 ? <><span className="dara-qr-preview-mark" />Preview <b><ChemicalFormula formula={focusedRow.formula} /></b>
                   {` · ${focusedRow.sourceLabel}`}{selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
-                : 'Click a candidate to preview its reflections; tick it to keep it.'}</span>
+                : 'Click a row to preview its sticks'}</span>
               <span className="dara-qr-plot-tools">
-                <span>{pointTraces ? 'Measured pattern with base points of its background' : withBackground ? 'Measured pattern with its background'
-                  : showResidual && left ? 'What is left: measured minus the selected phases' : 'Measured pattern, background removed'}</span>
                 {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground || Boolean(backgroundPreview) || Boolean(points)}
                   onChange={value => { setShowBackground(value); if (!value) setPoints(null); }} aria-label="Show the background" />Background</label> : null}
                 {showBackground && !points && backgroundTraces(data.background) ? <Tooltip title="Set the background by hand: drag, add and remove base points on the curve (search-match only)">
@@ -619,7 +644,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                   }} />}>
                   <Button size="small">Background…</Button>
                 </Popover> : null}
-                <Tooltip title={selected.length ? 'Show what the selected phases leave unexplained (the residual net pattern)' : 'Select phases first'}>
+                <Tooltip title={selected.length ? 'Measured minus the selected phases (the residual net pattern)' : 'Select phases first'}>
                   <label><Switch size="small" checked={showResidual && Boolean(left)} disabled={!left || Boolean(withBackground)} onChange={setShowResidual} aria-label="Show the residual" />Residual</label>
                 </Tooltip>
                 {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
@@ -634,7 +659,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 autosize: true, uirevision: `${state.key}-${zoom.revision}`, showlegend: false, hovermode: 'closest',
                 margin: { l: 56, r: 12, t: 8, b: 40 }, font: { size: 12 },
                 xaxis: { title: { text: '2θ (°)' }, ...(zoom.range ? { range: [...zoom.range], autorange: false } : {}) },
-                yaxis: { title: { text: withBackground ? 'Intensity' : showResidual && left ? 'Residual net intensity' : 'Net intensity' }, rangemode: 'tozero',
+                yaxis: { title: { text: withBackground ? 'Intensity' : showResidual && left ? 'Residual (net)' : 'Net intensity' }, rangemode: 'tozero',
                   ...(zoom.range && zoom.y ? { range: [...zoom.y], autorange: false } : {}) },
               }}
               config={{ displaylogo: false, responsive: true }} /></div>
@@ -648,8 +673,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
             </div> : null}
           </section>
           <div className="dara-qr-toolbar">
-            <label><Switch size="small" checked={quick.theoretical} onChange={quick.toggleTheoretical} />
-              Include theoretical (computed) structures</label>
+            <Tooltip title="Include structures computed only (Materials Project), not measured">
+              <label><Switch size="small" checked={quick.theoretical} onChange={quick.toggleTheoretical} />Theoretical structures</label>
+            </Tooltip>
             <Button size="small" icon={<ReloadOutlined />} onClick={() => quick.start()}>Run again</Button>
             <span className="dara-qr-pool">{poolText(data)}</span>
           </div>
@@ -673,19 +699,31 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
           </div>}
         </div>
         {rows.length ? <aside className="dara-qr-panel dara-qr-selected" aria-label="Selected phases">
-          <h2>Selected phases <span>{`${selected.length} of at most ${MAX_REFINE}`}</span></h2>
-          {chosen.length ? <ul>{chosen.map(row => <li key={row.key}>
+          <h2>Selected phases <Tooltip title={`At most ${MAX_REFINE} phases`}><span>{`${selected.length} / ${MAX_REFINE}`}</span></Tooltip></h2>
+          {chosen.length ? <ul>
+            <li className="dara-qr-list-head"><span /><span>Phase</span><Tooltip title={HELP.explains}><span className="dara-num">Explains</span></Tooltip><span /></li>
+            {chosen.map(row => [<li key={row.key}>
             <i className="dara-qr-swatch" style={{ background: colors[row.key] }} aria-hidden="true" />
             <div className="dara-qr-phase">
               <div><ChemicalFormula formula={row.formula} /> <span className="meta"><SpaceGroup row={row} /></span></div>
-              <div className="meta">{`${row.sourceLabel} · explains ${row.scoreText} alone`}</div>
+              <div className="meta">{row.sourceLabel}</div>
             </div>
+            <span className="dara-num" aria-label={`Explains ${row.scoreText}`}>{row.scoreText}</span>
             <Button type="text" size="small" icon={<CloseOutlined />} aria-label={`Remove ${row.formula}`}
               onClick={() => setSelected(selected.filter(key => key !== row.key))} />
-          </li>)}</ul>
-            : <p className="dara-qr-empty">No phase selected. Tick candidates in the table to draw their sticks on the pattern, then refine them together.</p>}
+          </li>, groups[row.key] ? <li key={`${row.key}-alt`} className="dara-qr-alt">
+            <Tooltip title="The same strong peaks as the phase above: peak matching cannot tell them apart">
+              <span>{'Alternatives: '}</span></Tooltip>
+            {groups[row.key].map((other, index) => <React.Fragment key={other.key}>{index ? ', ' : ''}
+              <ChemicalFormula formula={other.formula} />{` ${other.sourceLabel}`}</React.Fragment>)}
+            <div><Tooltip title="Known-phase Rietveld refinement of the selected phases with these alternatives (minutes): the fit tells them apart">
+              <Button size="small" loading={quick.refining} disabled={quick.identifying || selected.length + groups[row.key].length > MAX_REFINE}
+                onClick={() => quick.refine(onRefine, groups[row.key].map(other => other.key))}>Tell apart with Rietveld</Button>
+            </Tooltip></div>
+          </li> : null])}</ul>
+            : <p className="dara-qr-empty">No phase selected: tick candidates in the table.</p>}
           {weakLeft.length ? <p className="dara-qr-weak">
-            {`${weakLeft.length} weak suggestion${weakLeft.length === 1 ? '' : 's'} not selected: `}
+            {'Weak, not selected: '}
             {/* One click adds the one phase it names. */}
             {weakLeft.map((item, index) => <React.Fragment key={item.key}>{index ? ' ' : ''}
               <Button type="link" size="small" icon={<PlusOutlined />} disabled={selected.length >= MAX_REFINE}
@@ -693,7 +731,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
             </React.Fragment>)}
           </p> : null}
           {chosen.length ? <ResidualPanel residual={residual} rows={rows} selected={selected} setSelected={setSelected} /> : null}
-          {over ? <p className="dara-qr-limit">{`A refinement takes at most ${MAX_REFINE} phases: remove ${selected.length - MAX_REFINE}.`}</p> : null}
+          {over ? <p className="dara-qr-limit">{`At most ${MAX_REFINE} phases: remove ${selected.length - MAX_REFINE}.`}</p> : null}
           {data.combination?.length ? <div className="dara-qr-suggest">
             <p>Suggested: <Suggestion combination={data.combination} /></p>
             <Button size="small" onClick={() => setSelected(suggestion)} disabled={usingSuggestion}>Use suggestion</Button>

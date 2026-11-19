@@ -31,6 +31,24 @@ export function pickHklLabels(reflections, [lo, hi], minGap, max = HKL_MAX_LABEL
   return picked.sort((a, b) => a.x - b.x);
 }
 
+/** Height in pixels of a rotated "(hkl)" label at `fontPx`, with its 3 px gap above the peak (overbars add no width). */
+export function hklLabelPx(text, fontPx = 11) {
+  return 3 + 0.62 * fontPx * [...String(text)].filter(char => !/\p{M}/u.test(char)).length;
+}
+
+/**
+ * Top of the intensity axis (data units; log10 units on a log axis) that leaves each label room
+ * above its anchor: a label of `px` pixels at `y` fits when (top − y) / (top − bottom) · areaPx ≥ px.
+ * `labels`: `{y, px}`; never lower than the current top.
+ */
+export function topForLabels(labels, [bottom, top], areaPx) {
+  let needed = top;
+  labels.forEach(({ y, px }) => {
+    if (areaPx > px && Number.isFinite(y)) needed = Math.max(needed, (y * areaPx - px * bottom) / (areaPx - px));
+  });
+  return needed;
+}
+
 // Steps of the d values tried, coarse first: 10 and 5, whole numbers, halves (2.5), then
 // 0.2, 0.1 ... so the axis reads 10, 5, 4, 3, 2.5, 2, 1.8, 1.6, 1.5 ... as room allows.
 const D_STEPS = [10, 5, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];

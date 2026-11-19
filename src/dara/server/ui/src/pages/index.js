@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
-import { Alert, AutoComplete, Button, Form, Input, InputNumber, message, Modal, Radio, Select, Space, Switch, Table, Tag, Typography, Upload } from 'antd';
+import { Alert, AutoComplete, Button, Form, Input, InputNumber, message, Modal, Radio, Select, Space, Switch, Table, Tag, Tooltip, Typography, Upload } from 'antd';
 import { FileOutlined, MinusCircleOutlined, PlusOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
 import { CalibrateProfile, DEFAULT_CONTROLS, InstrumentManager, RefinementControlsEditor } from '../components/PracticalControls';
 import { detailMessage, qualityAlertItems, qualityStatText, wavelengthMismatch } from '../components/dataQuality.mjs';
@@ -12,14 +12,15 @@ import { FwhmCurveButton } from '../components/InstrumentFwhmCurve';
 import { curveText } from '../components/instrumentCurve.mjs';
 import useAdvancedTools from '../components/useAdvancedTools';
 import {
-  advancedChanges, checkElements, forgetRemembered, limiter, previewShape, readRecentElements, readRemembered, rememberElements,
-  runAfterSuccess, unrecognisedTokens, writeRemembered,
+  advancedChanges, batchName, batchRowView, checkElements, forgetRemembered, hexId, limiter, previewShape, readRecentElements, readRemembered,
+  rememberElements, runAfterSuccess, unrecognisedTokens, writeRemembered,
 } from '../components/submitHelpers.mjs';
 import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../components/knownPhases.mjs';
 // explicit .js: on case-insensitive disks webpack would resolve quickRanking.mjs / structureLibrary.mjs first
 import QuickRankingWorkspace, { QuickRankingSummary, useQuickRanking } from '../components/QuickRanking.js';
 import StructureLibrary from '../components/StructureLibrary.js';
 import { setLeaveGuard } from '../components/leaveGuard.mjs';
+import { NOT_VERIFIED } from '../components/identification.mjs';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const { confirm } = Modal;
@@ -83,8 +84,13 @@ const Container = styled.div`
   .dara-run-actions.single { grid-template-columns: minmax(0, 1fr); }
   /* The time an action costs sits in its label: "Search-match · seconds", "Run analysis · about 16 min". */
   .dara-run-actions .ant-btn .cost { margin-left: 6px; font-size: var(--dara-font-13); opacity: 0.85; }
+  /* Two actions side by side at 1366 px: the labels with their time cost fit without clipping. */
+  .dara-run-actions .ant-btn-lg { padding-left: 8px; padding-right: 8px; }
   .dara-run-action-note { margin: 4px 0 0; color: var(--dara-text-hint); font-size: var(--dara-font-12); }
   .dara-run-summary .invalid { color: var(--dara-fail); }
+  .dara-batch-ok { color: var(--dara-text); }
+  .dara-batch-fail { color: var(--dara-fail); }
+  .dara-batch-wait { color: var(--dara-text-secondary); }
   /* antd's warning text (#faad14) is too light on white: the review tone carries it. */
   .ant-form-item-explain-warning { color: var(--dara-review); }
   .dara-run-submitted { margin: 0; padding: 0 0 16px; list-style: none; font-size: var(--dara-font-13); color: var(--dara-text-secondary); }
@@ -136,9 +142,16 @@ const Container = styled.div`
   }
 `;
 
-const MODE_LABELS = { elemental: 'Phase search + Rietveld', known_mixture: 'Known-phase refinement', reaction: 'Reaction check' };
+// One flow at two depths, named by depth: Identify (search-match, as HighScore and Match!) first,
+// then Identify + verify (the phase search with Rietveld-verified phase sets).
+const MODE_LABELS = {
+  search_match: 'Identify', elemental: 'Identify + verify', known_mixture: 'Known-phase refinement', reaction: 'Reaction check',
+};
+const DEFAULT_MODE = 'search_match';
 // One name per field; the formula list changes its name with the mode.
-const FORMULA_LABELS = { elemental: 'Expected formulas', known_mixture: 'Phases to refine', reaction: 'Precursors' };
+const FORMULA_LABELS = { search_match: 'Expected formulas', elemental: 'Expected formulas', known_mixture: 'Phases to refine', reaction: 'Precursors' };
+// Modes that search the element system (elements, or formulas to derive them from).
+const SEARCH_MODES = ['search_match', 'elemental'];
 const PATTERN_ACCEPT = '.xy,.xye,.xrdml,.raw,.rasx,.txt,.scn,.ras,.brml,.csv,.dat,.asc';
 
 function Card({ name, title, children }) {
@@ -237,7 +250,7 @@ function PatternPreview({ points, start, end, excluded }) {
 
 function Submission() {
   const [form] = Form.useForm();
-  const [analysisMode, setAnalysisMode] = useState('elemental');
+  const [analysisMode, setAnalysisMode] = useState(DEFAULT_MODE);
   const [synchrotron, setSynchrotron] = useState(false);
   const [previousInstrument, setPreviousInstrument] = useState('Aeris-fds-Pixcel1d-Medipix3');
   const [instrumentNames, setInstrumentNames] = useState(INSTRUMENT_NAMES);
@@ -267,7 +280,7 @@ function Submission() {
   const applyRemembered = saved => {
     if (!saved) return false;
     form.setFieldsValue(saved.fields);
-    setAnalysisMode(saved.fields.analysis_mode ?? 'elemental');
+    setAnalysisMode(saved.fields.analysis_mode ?? DEFAULT_MODE);
     setSynchrotron(Boolean(saved.fields.synchrotron));
     if (saved.controls) setRefinementControls(saved.controls);
     setUsingRemembered(true);
@@ -276,7 +289,7 @@ function Submission() {
   const resetToDefaults = () => {
     forgetRemembered(browserStorage());
     form.resetFields();
-    setAnalysisMode('elemental');
+    setAnalysisMode(DEFAULT_MODE);
     setSynchrotron(false);
     setRefinementControls(DEFAULT_CONTROLS);
     setUsingRemembered(false);
@@ -287,6 +300,13 @@ function Submission() {
   const [reopenSearch, setReopenSearch] = useState(null);
   const [firstRun, setFirstRun] = useState(false); // an empty database: the Tutorial is offered
   const [seriesMode, setSeriesMode] = useState(false);
+  // "Identify all": {seriesId, running, rows: {file key: {state, taskId, phases, error}}}
+  const [batch, setBatch] = useState(null);
+  const [perFileChemistry, setPerFileChemistry] = useState(false); // each file's elements from its name
+  const [verifyKeys, setVerifyKeys] = useState([]); // identified files ticked for "Verify selected with Rietveld"
+  const [verifying, setVerifying] = useState(false);
+  const updateBatchRow = (key, entry) => setBatch(previous => (previous
+    ? { ...previous, rows: { ...previous.rows, [key]: { ...previous.rows[key], ...entry } } } : previous));
   // "Submit a series" from the Series page opens the form in series mode.
   useEffect(() => { if (new URLSearchParams(window.location.search).get('series')) setSeriesMode(true); }, []);
   const [seriesPreview, setSeriesPreview] = useState(null);
@@ -353,11 +373,12 @@ function Submission() {
   const inspectedThetaMax = patternInspection?.two_theta_max;
   const inspectedPoints = patternInspection?.data_points;
   useEffect(() => {
-    const mode = watchedMode || 'elemental';
+    const mode = watchedMode || DEFAULT_MODE;
     const { symbols: elementSymbols, error: elementError } = checkElements(watchedElements);
     const precursorList = splitList(watchedPrecursors);
     setEstimateFailed(false);
-    if (elementError || (mode === 'elemental' && !elementSymbols.length && !precursorList.length) || (mode !== 'elemental' && !precursorList.length)) {
+    // The candidate and run-time estimate is the Rietveld run's; a search-match takes seconds.
+    if (mode === 'search_match' || elementError || (mode === 'elemental' && !elementSymbols.length && !precursorList.length) || (mode !== 'elemental' && !precursorList.length)) {
       setEstimate(null);
       setEstimating(false);
       return undefined;
@@ -456,9 +477,9 @@ function Submission() {
           standard_wt: settings.internal_standard?.wt_percent,
         });
         if (settings.internal_standard) setStandardOpen(true);
-        // An identification is a search-match result, not a form mode: the form keeps a search mode.
+        // An identification is a Search-match result: it reopens in the Search-match mode.
         const identification = settings.analysis_mode === 'identification';
-        const mode = identification ? 'elemental' : settings.analysis_mode;
+        const mode = identification ? 'search_match' : settings.analysis_mode;
         if (identification) form.setFieldsValue({ analysis_mode: mode });
         setAnalysisMode(mode);
         if (identification || new URLSearchParams(window.location.search).get('search') === '1') {
@@ -504,6 +525,10 @@ function Submission() {
   useEffect(() => { if (seriesMode) (seriesFiles || []).forEach(seriesInspection); }, [seriesMode, seriesFiles]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onSeriesFilesChange = info => {
+    setBatch(previous => (previous?.running ? previous : null)); // results of other files go
+    if (info?.fileList?.length && !(form.getFieldValue('series_name') || '').trim()) {
+      form.setFieldValue('series_name', batchName(info.fileList.map(item => item.name)));
+    }
     // The first file's inspection sets the instrument, wavelength and elements; re-apply when another file becomes first.
     const first = info?.fileList?.[0];
     const key = fileKey(first);
@@ -514,10 +539,21 @@ function Submission() {
 
   const toggleSeriesMode = checked => {
     setSeriesMode(checked);
+    setBatch(null);
     firstSeriesFile.current = null;
     form.setFieldsValue({ pattern_file: undefined, series_files: [] });
     setSeriesPreview(null);
     inspectFile(null);
+  };
+  // Several files dropped on (or selected in) the pattern field: they all go to the several-files view.
+  const takeSeveral = files => {
+    const list = files.map(file => ({ uid: file.uid, name: file.name, size: file.size, type: file.type, lastModified: file.lastModified, originFileObj: file }));
+    setSeriesMode(true);
+    setBatch(null);
+    firstSeriesFile.current = null;
+    form.setFieldsValue({ pattern_file: undefined, series_files: list, series_name: batchName(list.map(item => item.name)) });
+    setSeriesPreview(null);
+    onSeriesFilesChange({ fileList: list });
   };
 
   const inspectPattern = info => {
@@ -599,16 +635,13 @@ function Submission() {
     }
   };
 
-  // Quick ranking: the current pattern and chemistry, without validating the whole form.
-  const quickRankingRequest = () => {
+  // Search-match request of `file` with the form's settings; `chemistry` ({elements, formulas}) replaces the form's.
+  const searchMatchBody = (file, chemistry = null) => {
     const values = form.getFieldsValue(true);
-    if (!values.pattern_file && !cloneSource) throw new Error('Upload a pattern first.');
     const body = new FormData();
-    // A rerun without a replacement file ranks the source task's stored pattern.
-    if (values.pattern_file) body.append('pattern_file', uploadFile(values.pattern_file));
-    else body.append('source_task_id', cloneSource.source_task_id);
-    body.append('elements', elementList(values.elements));
-    body.append('precursor_formulas', commaList(values.precursor_formulas));
+    if (file) body.append('pattern_file', file);
+    body.append('elements', chemistry ? JSON.stringify(chemistry.elements) : elementList(values.elements));
+    body.append('precursor_formulas', chemistry ? JSON.stringify(chemistry.formulas || []) : commaList(values.precursor_formulas));
     body.append('wavelength', synchrotron ? Number((Number(values.wavelength_sync_a) / 10).toPrecision(10)) : (values.wavelength_lab || 'Cu'));
     if (values.two_theta_min != null) body.append('two_theta_min', values.two_theta_min);
     if (values.two_theta_max != null) body.append('two_theta_max', values.two_theta_max);
@@ -618,6 +651,15 @@ function Submission() {
     body.append('mp_e_hull_cutoff', values.mp_e_hull_cutoff ?? 0.05);
     body.append('max_mp_structures', values.max_mp_structures ?? 100);
     body.append('library_cif_ids', JSON.stringify(values.library_cif_ids || []));
+    return body;
+  };
+  // Quick ranking: the current pattern and chemistry, without validating the whole form.
+  const quickRankingRequest = () => {
+    const values = form.getFieldsValue(true);
+    if (!values.pattern_file && !cloneSource) throw new Error('Upload a pattern first.');
+    const body = searchMatchBody(values.pattern_file ? uploadFile(values.pattern_file) : null);
+    // A rerun without a replacement file ranks the source task's stored pattern.
+    if (!values.pattern_file) body.append('source_task_id', cloneSource.source_task_id);
     return body;
   };
   // "Refine selected": a Known-phase refinement of exactly the ranked structures. Resolves to
@@ -692,7 +734,7 @@ function Submission() {
   // "Save identification": the selected phases as the result, without refinement. Uses the ranking's
   // pattern and chemistry with the setup's user, sample and instrument; a field the setup has not
   // filled in yet takes the user back to it, like "Refine with Rietveld".
-  const saveIdentification = async ({ referenceIds: ids, background }) => {
+  const saveIdentification = async ({ referenceIds: ids, background, alternatives = [] }) => {
     let values;
     try {
       values = await form.validateFields(['user', 'instrument_profile', ...(synchrotron ? ['wavelength_sync_a'] : ['wavelength_lab'])]);
@@ -717,6 +759,8 @@ function Submission() {
     if (sample?.trim()) body.append('sample', sample.trim());
     body.append('instrument_profile', values.instrument_profile);
     body.append('reference_ids', JSON.stringify(ids));
+    // Candidates peak matching cannot tell apart from an accepted phase: kept for "Tell apart with Rietveld".
+    if (alternatives.length) body.append('alternatives', JSON.stringify(alternatives));
     // The background the ranking used (sliders or base points): stored and named in the report's methods.
     if (background) body.set('background', JSON.stringify(background));
     setMsg(null);
@@ -753,6 +797,97 @@ function Submission() {
   };
 
   /**
+   * "Identify all": one automatic identification per file (the search-match suggestion, as "Use
+   * suggestion"), saved as a series. Files are sent one after another; the server ranks them in
+   * turn while this page follows each task, and a file that fails is reported in its row.
+   */
+  const identifyAll = async () => {
+    let values;
+    try {
+      values = await form.validateFields(['user', 'instrument_profile', 'series_name', 'series_files', 'elements', 'precursor_formulas',
+        synchrotron ? 'wavelength_sync_a' : 'wavelength_lab']);
+    } catch (error) {
+      const first = (error?.errorFields || [])[0];
+      if (first) form.scrollToField(first.name, { block: 'center' });
+      return;
+    }
+    const rows = [...seriesRows];
+    const preview = Object.fromEntries((seriesPreview?.items || []).map(item => [item.filename, item]));
+    const files = Object.fromEntries((values.series_files || []).map(item => [fileKey(item), uploadFile(item)]));
+    const series = { id: hexId(12), name: values.series_name.trim(), size: rows.length };
+    const update = updateBatchRow;
+    setVerifyKeys([]);
+    setMsg(null);
+    setBatch({ seriesId: series.id, running: true, rows: Object.fromEntries(rows.map(row => [row.key, { state: 'queued' }])) });
+    const started = [];
+    for (const [index, row] of rows.entries()) {
+      update(row.key, { state: 'sending' });
+      const chemistry = perFileChemistry && row.elements.length ? { elements: row.elements, formulas: row.formulas } : null;
+      const body = searchMatchBody(files[row.key], chemistry);
+      body.append('user', values.user);
+      body.append('instrument_profile', values.instrument_profile);
+      body.append('automatic', 'true');
+      body.append('series', JSON.stringify({ ...series, order: preview[row.filename]?.order ?? index, variable: preview[row.filename]?.variable ?? null }));
+      try {
+        const response = await fetch(`${URL}/identification`, { method: 'POST', body });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.wf_id == null) throw new Error(detailMessage(data.detail, `Not saved (HTTP ${response.status}).`));
+        update(row.key, { state: 'running', taskId: data.wf_id });
+        started.push([row.key, data.wf_id]);
+      } catch (error) {
+        update(row.key, { state: 'failed', error: String(error.message || error) });
+      }
+    }
+    if (started.length) runAfterSuccess([() => writeRemembered(browserStorage(), form.getFieldsValue(true), refinementControls)]);
+    // Follow the tasks until each is done (the server works through them one search-match at a time).
+    let open = started;
+    while (open.length) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const next = [];
+      for (const [key, taskId] of open) {
+        try {
+          const task = await requestTask(taskId);
+          if (task.status === 'COMPLETED') update(key, { state: 'done', phases: (task.phases || []).map(phase => phase.formula) });
+          else if (['FIZZLED', 'CANCELLED'].includes(task.status)) {
+            // error_summary: {title, detail, ...} of the failed task (the detail names the cause)
+            const summary = task.error_summary;
+            update(key, { state: 'failed', error: String(summary?.detail || summary?.title || `Task ${taskId}: ${task.status.toLowerCase()}`) });
+          }
+          else next.push([key, taskId]);
+        } catch (error) {
+          next.push([key, taskId]); // a missed poll is tried again
+        }
+      }
+      open = next;
+    }
+    setBatch(previous => (previous ? { ...previous, running: false } : previous));
+  };
+  // "Verify selected with Rietveld": each ticked identification goes to the existing refine hand-off
+  // (a Known-phase refinement of its phases, queued as a new task).
+  const verifySelected = async () => {
+    setVerifying(true);
+    for (const key of verifyKeys) {
+      const entry = batch?.rows?.[key];
+      if (entry?.state !== 'done' || entry.refinedTaskId != null) continue;
+      try {
+        const response = await fetch(`${URL}/task/${entry.taskId}/refine`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || data.wf_id == null) throw new Error(detailMessage(data.detail, `HTTP ${response.status}`));
+        updateBatchRow(key, { refinedTaskId: data.wf_id, verifyError: null });
+      } catch (error) {
+        updateBatchRow(key, { verifyError: String(error.message || error) });
+      }
+    }
+    setVerifyKeys([]);
+    setVerifying(false);
+  };
+  const requestTask = async taskId => {
+    const response = await fetch(`${URL}/task/${taskId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  };
+
+  /**
    * Validates and submits the form; resolves to whether the server accepted it. `openTask` opens the
    * new task page; `rememberedMode` is the mode remembered for the next analysis; `confirmed` skips
    * the confirmation of a long run or a series.
@@ -767,6 +902,9 @@ function Submission() {
         'screening_timeout_s', 'max_analysis_minutes', 'library_cif_ids', 'additional_phases', 'reuse_additional_cifs'];
       if ((error?.errorFields || []).some(item => advancedNames.includes(item.name?.[0]))) setAdvancedOpen(true);
       if ((error?.errorFields || []).some(item => String(item.name?.[0]).startsWith('standard_'))) setStandardOpen(true);
+      // The Run card stays in view while the field with the error may be far above it.
+      const first = (error?.errorFields || [])[0];
+      if (first) setTimeout(() => form.scrollToField(first.name, { block: 'center' }), 0);
       return false;
     }
 
@@ -797,6 +935,7 @@ function Submission() {
     if (values.max_analysis_minutes != null) formData.append('max_analysis_minutes', values.max_analysis_minutes);
     if (seriesMode) {
       formData.append('series_name', (values.series_name || '').trim());
+      if (perFileChemistry) formData.append('per_file_chemistry', 'true');
       (values.series_files || []).forEach(file => formData.append('pattern_files', uploadFile(file)));
     } else {
       if (values.pattern_file) formData.append('pattern_file', uploadFile(values.pattern_file));
@@ -853,7 +992,7 @@ function Submission() {
               () => { autoElements.current = null; autoFormulas.current = null; },
               () => setCloneSource(null),
               () => setPatternInspection(null),
-              () => setAnalysisMode('elemental'),
+              () => setAnalysisMode(DEFAULT_MODE),
               () => setSynchrotron(false),
               () => applyRemembered(readRemembered(browserStorage())),
               () => {
@@ -921,11 +1060,13 @@ function Submission() {
     return done;
   };
 
-  const modeMessage = analysisMode === 'reaction'
+  const searchOnly = analysisMode === 'search_match';
+  const modeMessage = searchOnly ? 'Search-match · seconds · peak matching, not verified by a fit'
+    : analysisMode === 'reaction'
     ? 'Predict products from precursors, temperature, and atmosphere, then fit the XRD pattern.'
     : analysisMode === 'known_mixture'
       ? 'Every listed phase is refined together; DARA picks the best database structure for each. Unlisted impurities or products are not searched.'
-      : 'Search plausible phases in the selected element system, then refine them with Rietveld; expected formulas are prioritized.';
+      : 'Phase search with Rietveld · minutes · verified phase sets and wt%';
 
   const instrumentLabel = name => (instrumentDetails[name]
     ? `${instrumentDetails[name].label} — ${instrumentDetails[name].verified ? 'operator verified' : 'unverified'}`
@@ -964,7 +1105,8 @@ function Submission() {
     ] : [];
     return {
       key: fileKey(item), filename: item.name, order: order?.order ?? null, variableText: order?.variableText ?? '—',
-      pending: !data, elements: data?.filename_chemistry?.elements || [],
+      pending: !data, elements: data?.filename_chemistry?.elements || [], formulas: data?.filename_chemistry?.formulas || [],
+      result: batch?.rows?.[fileKey(item)] || null,
       instrument: data ? (data.profile_suggestion?.profile || data.metadata?.instrument_system || '—') : '…',
       range: Number.isFinite(data?.two_theta_min) && Number.isFinite(data?.two_theta_max) ? `${data.two_theta_min.toFixed(1)}–${data.two_theta_max.toFixed(1)}°` : '—',
       notes,
@@ -973,6 +1115,7 @@ function Submission() {
   const usedElements = elementCheck.symbols.length ? elementCheck.symbols
     : [...new Set(splitList(watchedPrecursors).flatMap(formula => formula.match(/[A-Z][a-z]?/g) || []))];
   const otherChemistry = seriesRows.filter(row => row.elements.some(symbol => !usedElements.includes(symbol)));
+  const batchDone = batch && !batch.running ? Object.values(batch.rows) : null;
   const wavelengthSummary = synchrotron
     ? (watchedWavelengthSync ? `${watchedWavelengthSync} Å (synchrotron)` : missing('wavelength not set'))
     : (watchedWavelengthLab || 'Cu');
@@ -989,6 +1132,7 @@ function Submission() {
       : !hasChemistry ? 'Needs the elements or expected formulas'
         : quick.ranked ? 'Ranked: open to pick the phases' : 'Ranks reference structures; you pick the phases';
   const runtimeText = estimate?.runtime_s?.expected ? `about ${formatDuration(estimate.runtime_s.expected)}${seriesMode ? ' per file' : ''}` : null;
+  const identifyReady = seriesCount >= 2 && !batch?.running && !elementCheck.error && (hasChemistry || perFileChemistry);
   const msgAlert = msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null;
 
   return (
@@ -1004,7 +1148,7 @@ function Submission() {
         {firstRun ? <p className="dara-first-run">No analyses yet. The <a href="/tutorial/">tutorial</a> walks through a first one, from the pattern to the adopted fit.</p> : null}
         <Form className="dara-submit-layout" layout="vertical" form={form}
           initialValues={{
-            analysis_mode: 'elemental', temperature: 800, atmosphere: 'air', use_cod: true,
+            analysis_mode: DEFAULT_MODE, temperature: 800, atmosphere: 'air', use_cod: true,
             use_mp: true, mp_e_hull_cutoff: 0.05, max_mp_structures: 100,
             wavelength_lab: 'Cu', instrument_profile: 'Aeris-fds-Pixcel1d-Medipix3', synchrotron: false,
             excluded_ranges: [], reuse_additional_cifs: true,
@@ -1044,8 +1188,8 @@ function Submission() {
                   <Input placeholder="e.g. NCM811 calcined 800 °C, batch 3 (optional)" maxLength={120} />
                 </Form.Item>
                 {!cloneSource && !loadingClone ? (
-                  <Form.Item label="Submit as a series" tooltip="Analyse several patterns (for example a temperature or time series) with identical settings.">
-                    <Switch checked={seriesMode} onChange={toggleSeriesMode} aria-label="Submit as a series" />
+                  <Form.Item label="Several files" tooltip="Analyse several patterns with identical settings, grouped as a series (for example a temperature or time series). Dropping several files on the pattern field turns this on.">
+                    <Switch checked={seriesMode} onChange={toggleSeriesMode} aria-label="Several files" />
                   </Form.Item>
                 ) : null}
               </div>
@@ -1059,7 +1203,8 @@ function Submission() {
               ) : null}
               {seriesMode ? (
                 <>
-                  <Form.Item label="Series name" name="series_name" rules={[{ required: true, whitespace: true, message: 'Please enter a series name.' }, { max: 120 }]}>
+                  <Form.Item label="Series name" name="series_name" rules={[{ required: true, whitespace: true, message: 'Please enter a series name.' }, { max: 120 }]}
+                    tooltip="The files appear together under this name in Series; filled in from the file names.">
                     <Input placeholder="e.g. ZnO anneal series" maxLength={120} />
                   </Form.Item>
                   <Form.Item label="XRD patterns" name="series_files" valuePropName="fileList" getValueFromEvent={event => event?.fileList}
@@ -1074,8 +1219,14 @@ function Submission() {
                   </Form.Item>
                   {seriesPreview?.error ? <Alert type="warning" showIcon message="Series order preview unavailable" description={seriesPreview.error} /> : null}
                   {otherChemistry.length ? <Alert type="warning" showIcon
-                    message={`${otherChemistry.length} of ${seriesRows.length} file names point to other elements than ${usedElements.join(', ') || 'the ones entered'}`}
-                    description={`${otherChemistry.map(row => `${row.filename} (${row.elements.filter(symbol => !usedElements.includes(symbol)).join(', ')})`).join('; ')}. All files run with the listed elements; add the missing elements, or submit the files of the other chemical system as their own series.`} /> : null}
+                    message={perFileChemistry ? 'Each file runs with the elements of its own name'
+                      : `${otherChemistry.length} of ${seriesRows.length} file names point to other elements than ${usedElements.join(', ') || 'the ones entered'}`}
+                    description={<>
+                      {perFileChemistry ? 'A file without chemistry in its name runs with the elements entered under Chemistry.'
+                        : `${otherChemistry.map(row => `${row.filename} (${row.elements.filter(symbol => !usedElements.includes(symbol)).join(', ')})`).join('; ')}.`}
+                      {analysisMode === 'known_mixture' ? null : <div><Switch size="small" checked={perFileChemistry} onChange={setPerFileChemistry} aria-label="Use each file's own elements" />
+                        <span style={{ marginLeft: 8 }}>Use each file's own elements (from its name)</span></div>}
+                    </>} /> : null}
                   {seriesRows.length ? (
                     <div style={{ marginBottom: 16 }}>
                       <div className="dara-subhead">Files</div>
@@ -1085,12 +1236,35 @@ function Submission() {
                           { title: 'File', dataIndex: 'filename', render: (name, row) => <span style={{ whiteSpace: 'nowrap' }}>{name}{row.pending ? <span className="dara-dim"> · reading…</span> : null}</span> },
                           ...(seriesPreview?.items?.length ? [{ title: seriesPreview.unit ? `Variable (${seriesPreview.unit})` : 'Variable', dataIndex: 'variableText' }] : []),
                           { title: 'Elements in name', dataIndex: 'elements', render: list => (list.length ? list.join(', ') : '—') },
-                          { title: 'Instrument', dataIndex: 'instrument' },
-                          { title: '2θ', dataIndex: 'range', className: 'dara-num' },
-                          { title: 'Notes', dataIndex: 'notes', width: 220, render: notes => (notes.length ? <Typography.Text type="warning" title={notes.join('\n')}>{notes[0]}{notes.length > 1 ? ` (+${notes.length - 1})` : ''}</Typography.Text> : '—') },
-                        ]} />
+                          // Once identified, the result takes the place of the file inspection columns.
+                          ...(batch ? [] : [
+                            { title: 'Instrument', dataIndex: 'instrument' },
+                            { title: '2θ', dataIndex: 'range', className: 'dara-num' },
+                            { title: 'Notes', dataIndex: 'notes', width: 220, render: notes => (notes.length ? <Typography.Text type="warning" title={notes.join('\n')}>{notes[0]}{notes.length > 1 ? ` (+${notes.length - 1})` : ''}</Typography.Text> : '—') },
+                          ]),
+                          ...(batch ? [{ title: 'Identification', dataIndex: 'result', width: 280, render: entry => {
+                            const view = batchRowView(entry);
+                            const text = <span className={view.tone ? `dara-batch-${view.tone}` : 'dara-batch-wait'}>{view.text}</span>;
+                            // An identified file is peak matching only until its refinement is queued.
+                            const verify = entry?.state !== 'done' ? null : entry.refinedTaskId != null
+                              ? <> · <a href={`/task/?id=${entry.refinedTaskId}`}>{`Rietveld Task ${entry.refinedTaskId}`}</a></>
+                              : <> · <span className="dara-batch-wait" title={NOT_VERIFIED}>not verified</span>
+                                {entry.verifyError ? <span className="dara-batch-fail">{` (${entry.verifyError})`}</span> : null}</>;
+                            return entry?.taskId != null ? <span><a href={`/task/?id=${entry.taskId}`}>{`Task ${entry.taskId}`}</a> · {text}{verify}</span> : text;
+                          } }] : []),
+                        ]}
+                        rowSelection={batch && !batch.running ? { selectedRowKeys: verifyKeys, onChange: setVerifyKeys, columnWidth: 36,
+                          getCheckboxProps: row => ({ disabled: row.result?.state !== 'done' || row.result?.refinedTaskId != null,
+                            'aria-label': `Verify ${row.filename}` }) } : undefined} />
+                      {batchDone?.some(entry => entry.state === 'done') ? <div className="dara-inline" style={{ margin: '8px 0' }}>
+                        <Tooltip title="Known-phase Rietveld refinement of each ticked file's phases, queued as new tasks linked to the identifications (minutes each)">
+                          <Button onClick={verifySelected} loading={verifying} disabled={!verifyKeys.length}>
+                            {`Verify selected with Rietveld${verifyKeys.length ? ` (${verifyKeys.length})` : ''}`}</Button>
+                        </Tooltip>
+                      </div> : null}
                       <Typography.Text type="secondary">
-                        Files are analysed independently with identical settings and the listed elements; the variable is parsed from the file names for plotting only.
+                        {perFileChemistry ? 'Each file runs with the elements of its name, with identical other settings; the variable is parsed from the file names for plotting only.'
+                          : 'Each file runs with identical settings and the listed elements; the variable is parsed from the file names for plotting only.'}
                       </Typography.Text>
                     </div>
                   ) : null}
@@ -1110,10 +1284,15 @@ function Submission() {
                       <Button size="small" onClick={removePattern}>Remove</Button>
                     </div>
                   ) : (
-                    <Dragger maxCount={1} beforeUpload={() => false} onChange={inspectPattern} accept={PATTERN_ACCEPT}>
+                    <Dragger maxCount={1} multiple onChange={inspectPattern} accept={PATTERN_ACCEPT}
+                      beforeUpload={(file, list) => {
+                        if (list.length < 2 || cloneSource) return false;
+                        if (file === list[0]) takeSeveral(list);
+                        return Upload.LIST_IGNORE;
+                      }}>
                       <p className="ant-upload-drag-icon"><UploadOutlined /></p>
                       <p className="ant-upload-text">{cloneSource ? 'Select a replacement file (optional)' : 'Start by selecting the measured XRD file'}</p>
-                      <p className="ant-upload-hint">xrdml (metadata-aware) / xy(e) / txt / csv / dat / asc / ras / rasx / brml / raw</p>
+                      <p className="ant-upload-hint">xrdml (metadata-aware) / xy(e) / txt / csv / dat / asc / ras / rasx / brml / raw · several files at once for a batch</p>
                     </Dragger>
                   )}
                 </Form.Item>
@@ -1178,8 +1357,8 @@ function Submission() {
                 <Form.Item label="Elements" name="elements" dependencies={['precursor_formulas']}
                   rules={[
                     { validator: (_, value) => (checkElements(value).error ? Promise.reject(new Error(checkElements(value).error)) : Promise.resolve()) },
-                    // Search-match and Phase search + Rietveld take the same input: elements, or formulas to derive them from.
-                    ({ getFieldValue }) => ({ validator: (_, value) => (getFieldValue('analysis_mode') === 'elemental' && !checkElements(value).symbols.length
+                    // Identify and Identify + verify take the same input: elements, or formulas to derive them from.
+                    ({ getFieldValue }) => ({ validator: (_, value) => (SEARCH_MODES.includes(getFieldValue('analysis_mode')) && !perFileChemistry && !checkElements(value).symbols.length
                       && !splitList(getFieldValue('precursor_formulas')).length ? Promise.reject(new Error('Enter the elements, or the expected formulas.')) : Promise.resolve()) }),
                   ]}
                   tooltip="Symbols separated by commas or spaces, e.g. In, La, Ti, O; case is corrected where the symbol is unambiguous. Left empty, they are derived from the formulas."
@@ -1208,8 +1387,8 @@ function Submission() {
                   </Form.Item>
                 ) : (
                   <Form.Item label={FORMULA_LABELS[analysisMode] || 'Expected formulas'}
-                    name="precursor_formulas" rules={[{ required: analysisMode !== 'elemental', message: 'Please input chemical formulas.' }]}
-                    tooltip="In Phase search + Rietveld this is optional, but listed phases are guaranteed candidates. Optional amounts enable the mass-balance check: a molar coefficient before the formula (Fe2O3, 2 TiO2) or a weighed mass after a colon (In2O3:0.3022g, TiO2:0.2004g)."
+                    name="precursor_formulas" rules={[{ required: !SEARCH_MODES.includes(analysisMode), message: 'Please input chemical formulas.' }]}
+                    tooltip="Optional in Identify and Identify + verify, but listed phases are guaranteed candidates. Optional amounts enable the mass-balance check: a molar coefficient before the formula (Fe2O3, 2 TiO2) or a weighed mass after a colon (In2O3:0.3022g, TiO2:0.2004g)."
                     extra={offeredFormulas ? <span className="dara-recent">From the file name:
                       <Button type="link" size="small" onClick={() => {
                         form.setFieldsValue({ precursor_formulas: offeredFormulas.join(', ') });
@@ -1234,13 +1413,13 @@ function Submission() {
                   ]} />
                 </Form.Item>
               </div>
-              <button type="button" className="dara-advanced-toggle" style={{ paddingBottom: 8 }} aria-expanded={standardOpen} aria-controls="dara-standard-body"
+              {searchOnly ? null : <button type="button" className="dara-advanced-toggle" style={{ paddingBottom: 8 }} aria-expanded={standardOpen} aria-controls="dara-standard-body"
                 onClick={() => setStandardOpen(open => !open)}>
                 <RightOutlined />
                 <span>Internal standard (optional)</span>
                 <span className="note">For absolute phase amounts</span>
-              </button>
-              <div id="dara-standard-body" hidden={!standardOpen}>
+              </button>}
+              <div id="dara-standard-body" hidden={searchOnly || !standardOpen}>
                 <div className="dara-field-row wide-cells">
                   <Form.Item label="Standard formula" name="standard_formula"
                     tooltip="A crystalline phase you mixed into the sample, for example Si. Its elements are added to Elements."
@@ -1359,29 +1538,45 @@ function Submission() {
                 <dt>Pattern</dt><dd>{patternSummary}</dd>
                 <dt>Mode</dt><dd>{MODE_LABELS[analysisMode] || analysisMode}</dd>
                 <dt>Elements</dt><dd>{elementCheck.error ? <span className="invalid">{elementCheck.error}</span>
-                  : elementSummary || missing(formulaSummary || analysisMode !== 'elemental' ? 'From the formulas' : 'Not entered')}</dd>
+                  : elementSummary || missing(formulaSummary || !SEARCH_MODES.includes(analysisMode) ? 'From the formulas' : 'Not entered')}</dd>
                 {formulaSummary ? <><dt>{FORMULA_LABELS[analysisMode] || 'Formulas'}</dt><dd>{formulaSummary}</dd></> : null}
                 <dt>Instrument</dt><dd>{selectedInstrument ? instrumentLabel(selectedInstrument) : missing('Not selected')}</dd>
                 <dt>Radiation</dt><dd>{wavelengthSummary} · {rangeSummary}</dd>
               </dl>
-              {estimate || estimating
+              {searchOnly ? null : estimate || estimating
                 ? <EstimateAlert estimate={estimate} loading={estimating} prefilter={watchedPrefilter !== false} />
                 : <p className="dara-run-hint">{elementCheck.error ? `Fix the elements to see the estimate: ${elementCheck.error}.`
                   : estimateFailed ? 'The candidate and run-time estimate is unavailable.'
                     : `${analysisMode === 'elemental' ? 'Enter elements or formulas' : 'Enter formulas'} to see the candidate and run-time estimate.`}</p>}
               {seriesMode ? null : <QuickRankingSummary quick={quick} />}
               {quick.shown ? null : msgAlert}
-              {/* Two ways to run, HighScore's order: search-match first (seconds, the primary action),
-                  then the full automatic analysis. Each label carries its time cost. */}
-              <div className={`dara-run-actions${seriesMode ? ' single' : ''}`}>
-                {seriesMode ? null : <div>
+              {/* One primary action per mode; each label carries its time cost. Search-match mode:
+                  Search-match (one file) or Identify all (several). Rietveld modes: Run analysis, with
+                  the search-match as the secondary "check candidates first". */}
+              {searchOnly ? <div className="dara-run-actions single">
+                {seriesMode ? <div>
+                  <Button type="primary" size="large" block onClick={identifyAll} loading={batch?.running} disabled={!identifyReady}>
+                    {`Identify all${seriesCount ? ` (${seriesCount})` : ''}`}<span className="cost">· seconds per file</span>
+                  </Button>
+                  <p className="dara-run-action-note">{batch?.running ? 'Identifying: each file\'s result appears in its row'
+                    : batchDone ? <>{`${batchDone.filter(entry => entry.state === 'done').length} of ${batchDone.length} identified · `}
+                      <a href={`/series/?id=${encodeURIComponent(batch.seriesId)}`}>Open in Series</a></>
+                      : seriesCount < 2 ? 'Needs at least two files' : 'One identification per file with the suggested phases, saved as a series'}</p>
+                </div> : <div>
                   <Button type="primary" size="large" block onClick={openSearchMatch} disabled={!quickReady}>
                     {quick.ranked ? 'Open search-match' : <>Search-match<span className="cost">· seconds</span></>}
                   </Button>
                   <p className="dara-run-action-note">{quickNote}</p>
                 </div>}
+              </div> : <div className={`dara-run-actions${seriesMode ? ' single' : ''}`}>
+                {seriesMode ? null : <div>
+                  <Button size="large" block onClick={openSearchMatch} disabled={!quickReady}>
+                    {quick.ranked ? 'Open search-match' : <>Check candidates first<span className="cost">· seconds</span></>}
+                  </Button>
+                  <p className="dara-run-action-note">{quickNote}</p>
+                </div>}
                 <div>
-                  <Button type={seriesMode ? 'primary' : 'default'} size="large" block onClick={() => onSubmit()} loading={spinning}
+                  <Button type="primary" size="large" block onClick={() => onSubmit()} loading={spinning}
                     // Nothing to analyse yet: no pattern (a rerun reuses the original one) and no series files.
                     disabled={spinning || loadingClone || (phaseSet && !phaseSet.phases) || (seriesMode ? !seriesCount : !watchedPattern && !cloneSource)}>
                     {seriesMode ? `Run series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Run analysis'}
@@ -1389,7 +1584,7 @@ function Submission() {
                   </Button>
                   <p className="dara-run-action-note">{MODE_LABELS[analysisMode]}, automatic</p>
                 </div>
-              </div>
+              </div>}
               {submittedTasks.length ? <ul className="dara-run-submitted" aria-label="Submitted from this page">
                 {submittedTasks.map(task => <li key={task.id}>
                   Submitted: <a href={`/task/?id=${task.id}`}>{`Task ${task.id}`}</a>{task.name ? ` · ${task.name}` : ''}
@@ -1404,7 +1599,7 @@ function Submission() {
                 <h2 className="dara-card-title">Advanced</h2>
                 {hasAdvancedChanges
                   ? <Tag color="blue" style={{ marginLeft: 'auto', marginRight: 0 }} title={changedAdvanced.join(', ')}>{changedAdvanced.length} changed</Tag>
-                  : <span className="note">Databases, limits, refinement, extra CIFs</span>}
+                  : <span className="note">{searchOnly ? 'Databases, library CIFs' : 'Databases, limits, refinement, extra CIFs'}</span>}
               </button>
               <div id="dara-advanced-body" className="dara-advanced-body" hidden={!advancedOpen}>
                 <Form.Item label="Reference databases" tooltip="COD: experimental structures. MP: computed structures (Materials Project), used as a supplement.">
@@ -1426,27 +1621,27 @@ function Submission() {
                   <Form.Item label="Maximum MP structures" name="max_mp_structures">
                     <InputNumber min={1} max={1000} style={{ width: '100%' }} />
                   </Form.Item>
-                  <Form.Item label="Reference screening limit (s)" name="screening_timeout_s"
+                  <Form.Item label="Reference screening limit (s)" name="screening_timeout_s" hidden={searchOnly}
                     tooltip="Maximum BGMN time per reference during screening; very large structures get twice this (at most 1200 s). Leave blank for the original 1200 s.">
                     <InputNumber min={60} max={1200} step={30} placeholder="1200" style={{ width: '100%' }} />
                   </Form.Item>
-                  <Form.Item label="Maximum analysis time (min)" name="max_analysis_minutes"
+                  <Form.Item label="Maximum analysis time (min)" name="max_analysis_minutes" hidden={searchOnly}
                     tooltip="When exceeded, the search stops and returns the best result found so far, marked as incomplete. Leave blank for no limit.">
                     <InputNumber min={5} max={720} placeholder="No limit" style={{ width: '100%' }} />
                   </Form.Item>
                 </div>
-                <Form.Item label="Candidate pre-filter" name="candidate_prefilter" valuePropName="checked"
+                <Form.Item label="Candidate pre-filter" name="candidate_prefilter" valuePropName="checked" hidden={searchOnly}
                   tooltip="Skip references whose strongest calculated peaks are absent from the pattern. Uploaded, library and precursor phases are never skipped.">
                   <Switch />
                 </Form.Item>
-                <RefinementControlsEditor bare value={refinementControls} onChange={setRefinementControls} />
-                {cloneSource?.additional_cif_count > 0 ? (
+                {searchOnly ? null : <RefinementControlsEditor bare value={refinementControls} onChange={setRefinementControls} />}
+                {cloneSource?.additional_cif_count > 0 && !searchOnly ? (
                   <Form.Item label={`Reuse ${cloneSource.additional_cif_count} saved reference CIFs`} name="reuse_additional_cifs" valuePropName="checked">
                     <Switch />
                   </Form.Item>
                 ) : null}
                 <ReferenceLibraryField library={library} />
-                <Form.Item label="Additional reference CIFs" name="additional_phases" valuePropName="fileList" getValueFromEvent={event => event?.fileList}>
+                <Form.Item label="Additional reference CIFs" name="additional_phases" valuePropName="fileList" getValueFromEvent={event => event?.fileList} hidden={searchOnly}>
                   <Upload beforeUpload={() => false} multiple accept=".cif">
                     <Button icon={<UploadOutlined />}>Select CIF files</Button>
                   </Upload>

@@ -160,6 +160,8 @@ function SeriesDetail({ id, onName }) {
   const items = data.items || [];
   const axis = xAxis(items);
   const { done, total } = progress(items);
+  // A batch of identifications ("Identify all") has no refined amounts or fit quality to plot.
+  const identifiedOnly = items.length > 0 && items.every(item => item.summary?.analysis_mode === 'identification');
   const completedIds = taskIds(items, { completedOnly: true });
   const compareIds = completedIds.slice(0, MAX_COMPARE);
   // The series variable goes along, so the comparison map can use it as its y axis.
@@ -213,6 +215,8 @@ function SeriesDetail({ id, onName }) {
         { title: 'Variable', key: 'variable', width: 100, className: 'dara-num', render: (_, row) => variableText(row.variable) },
         columns.name, columns.verdict, columns.rwp, columns.gof, columns.phases,
       ]} />
+    {identifiedOnly ? <Alert type="info" showIcon message="Identifications: peak matching only, not verified by a fit"
+      description="No refined wt%, lattice parameters or Rwp to plot. Refine with Rietveld on a task page verifies its phases." /> : <>
     {done < 2 ? <Alert type="info" showIcon message="Trend charts need at least two completed tasks."
       description={<><a href="/results/">Results</a> shows every task's progress; <a href="/?series=1">submit another series</a>.</>} /> : null}
     <ChartBlock title="Phase fractions" note="Weight fractions are relative to the modelled crystalline phases; error bars are BGMN estimated standard deviations. Gaps mean the phase was not in the final result of that sample.">
@@ -224,6 +228,7 @@ function SeriesDetail({ id, onName }) {
     <ChartBlock title="Fit quality" note="Rwp and goodness of fit of the final refinement of each sample.">
       <FitChart items={items} axis={axis} />
     </ChartBlock>
+    </>}
   </Space>;
 }
 
@@ -242,7 +247,7 @@ function SeriesList() {
   return <>
     <div className="dara-page-head"><h1>Series</h1></div>
     {data?.length ? <Typography.Paragraph type="secondary">
-      A series is a set of patterns analysed independently with identical settings. Submit one from the Submit page with “Submit as a series”.
+      A series is a set of patterns analysed independently with identical settings. Drop several files on the Submit page (or switch on “Several files”) to submit one.
     </Typography.Paragraph> : null}
     {error ? <div className="dara-empty" role="alert"><h3>The series list could not be loaded</h3><p>{error}</p>
       <Button type="primary" icon={<ReloadOutlined />} onClick={() => setAttempt(value => value + 1)}>Retry</Button></div> : null}

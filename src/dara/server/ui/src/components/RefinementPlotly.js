@@ -6,6 +6,7 @@ import {
   clampRange, finiteRange, insideRange, panRange, viewChangeFromRelayout, wheelNotches, wheelZoomRange, xRangeUpdate,
 } from './plotNavigation.mjs';
 import { HIT_PX } from './backgroundAnchors.mjs';
+import { FIGURE_WIDTHS, exportOptions, publicationFigure } from './figureExport.mjs';
 
 // The refinement view only renders scatter traces. Importing react-plotly.js
 // directly pulls every Plotly trace type (maps, 3-D, finance, etc.) into the
@@ -13,6 +14,19 @@ import { HIT_PX } from './backgroundAnchors.mjs';
 Plotly.register([Scatter]);
 
 const Plot = createPlotlyComponent(Plotly);
+
+/** The shown view (zoom, phases, labels) as a journal-style figure file, double-column wide. */
+function downloadFigure(gd, format, name) {
+  const figure = publicationFigure(gd.data, gd.layout, { widthMm: FIGURE_WIDTHS.double });
+  return Plotly.downloadImage({ data: figure.data, layout: figure.layout, config: { displaylogo: false } },
+    exportOptions(figure, format, name));
+}
+
+// Plotly's camera saved the screen theme; these save the view in journal style instead.
+const figureButtons = name => [
+  { name: 'Figure (SVG, 170 mm)', icon: Plotly.Icons.camera, click: gd => downloadFigure(gd, 'svg', name) },
+  { name: 'Figure (PNG 600 dpi, 170 mm)', icon: Plotly.Icons.disk, click: gd => downloadFigure(gd, 'png', name) },
+];
 
 const PAN_BUTTONS = new Set([1, 2]); // middle, right
 const CLICK_SLOP_PX = 3;
@@ -446,9 +460,14 @@ function attachAnnotating(gd, annotateRef) {
  * (`curveOf` without `xs` gives the curve on the plotted 2θ grid; `blocked(x)` is true where no
  * anchor may be added; `moveX` [lo, hi] lets a dragged anchor move in 2θ as well, between its
  * neighbours). The curve and anchors are the traces with meta 'bg-curve' / 'bg-anchors'.
- * `annotate` turns on label editing (see attachAnnotating).
+ * `annotate` turns on label editing (see attachAnnotating). `figureName` puts journal-style figure
+ * downloads (SVG, PNG 600 dpi) of the shown view in the modebar.
  */
-export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, anchorEdit = null, annotate = null, ...props }) {
+export default function RefinementPlotly({ onInitialized, onClick, xBounds = null, anchorEdit = null, annotate = null, figureName = null, config, ...props }) {
+  // `figureName`: the modebar saves the view as a journal-style figure file of this name.
+  const shownConfig = React.useMemo(() => (figureName ? { ...config,
+    modeBarButtonsToRemove: [...(config?.modeBarButtonsToRemove || []), 'toImage'],
+    modeBarButtonsToAdd: figureButtons(figureName) } : config), [config, figureName]);
   const detach = React.useRef(null);
   const graph = React.useRef(null);
   const boundsRef = React.useRef(xBounds);
@@ -462,7 +481,7 @@ export default function RefinementPlotly({ onInitialized, onClick, xBounds = nul
   const handleClick = onClick ? event => onClick({
     ...event, cursorX: Number.isFinite(event?.cursorX) ? event.cursorX : cursorTwoTheta(graph.current, event?.event),
   }) : undefined;
-  return <Plot {...props} onClick={handleClick} onInitialized={(figure, gd) => {
+  return <Plot {...props} config={shownConfig} onClick={handleClick} onInitialized={(figure, gd) => {
     if (detach.current) detach.current();
     graph.current = gd;
     const detachNavigation = attachNavigation(gd, boundsRef);

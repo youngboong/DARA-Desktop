@@ -382,6 +382,7 @@ async def download_report_bundle(
             refinement, fmt="png", dpi=300, width_mm=170,
             excluded_ranges=(meta.get("refinement_params") or {}).get("excluded_ranges"),
             counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
+            radiation=figure_radiation(document),
         )
     except Exception:  # noqa: BLE001 - the Word file is written without the figure
         figure_png = None
@@ -408,7 +409,14 @@ async def download_report_bundle(
     )
 
 
-_FIGURE_MEDIA = {"png": "image/png", "svg": "image/svg+xml"}
+_FIGURE_MEDIA = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}
+
+
+def figure_radiation(document) -> str | None:
+    """Radiation named in a figure's 2θ axis title ("Cu Kα"), from the task's wavelength setting."""
+    from dara.server.report.figures import radiation_text
+
+    return radiation_text((getattr(document, "search_kwargs", None) or {}).get("wavelength"))
 
 
 @router.get("/task/{task_id}/figure.{fmt}")
@@ -422,9 +430,10 @@ async def download_figure(
     sel: str | None = Query(None),
     hkl: bool = False,
 ):
-    """Publication-style fit figure (PNG or SVG) of the selected refinement."""
+    """Publication-style fit figure (PNG, SVG or PDF) of the selected refinement; ``width_mm`` about
+    85 for a single journal column, 170 for a double one."""
     if fmt not in _FIGURE_MEDIA:
-        raise HTTPException(404, "Unsupported figure format; use png or svg")
+        raise HTTPException(404, "Unsupported figure format; use png, svg or pdf")
     if idx is not None and best:
         raise HTTPException(422, "Choose either idx or best, not both")
     task, document = await _load_completed_task(task_id)
@@ -439,6 +448,7 @@ async def download_figure(
         content = fit_figure(
             refinement, fmt=fmt, dpi=dpi, width_mm=width_mm, excluded_ranges=excluded,
             counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
+            radiation=figure_radiation(document),
         )
     except Exception as exc:
         raise HTTPException(500, f"Figure rendering failed: {exc}") from exc

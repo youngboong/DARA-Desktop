@@ -3,7 +3,7 @@ import { Alert, Button, Checkbox, Dropdown, Space, Tag, Tooltip } from 'antd';
 import { DownloadOutlined, DownOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import { FormulaText } from './ChemicalFormula';
 import {
-  EXPORT_FORMATS, displacementTag, evidenceLines, exportHref, figureHref, overallAlertClass, overallAlertType, patternHref,
+  EXPORT_FORMATS, FIGURE_FILES, displacementTag, evidenceLines, exportHref, figureHref, overallAlertClass, overallAlertType, patternHref,
   overallColor, overallShortLabel, patternFiles, reasonsText, screeningTags, verdictColor,
 } from './confidence.mjs';
 
@@ -103,8 +103,8 @@ export function DownloadMenu({ taskId, selection, size, blocked = null, reportBl
   const items = [
     { key: 'report', disabled: Boolean(reportBlocked), label: reportBlocked ? `Report (${reportBlocked})` : 'Report (PDF + Word)' },
     { key: 'report-html', disabled: Boolean(reportBlocked), label: 'Report (HTML)' },
-    { key: 'png', label: <a href={figureHref(API, taskId, 'png', selection, hkl)}>Figure (PNG)</a> },
-    { key: 'svg', label: <a href={figureHref(API, taskId, 'svg', selection, hkl)}>Figure (SVG)</a> },
+    { key: 'figure', label: 'Figure', children: FIGURE_FILES.map(file => ({
+      key: file.key, label: <a href={figureHref(API, taskId, file.format, selection, hkl, file.widthMm)}>{file.label}</a> })) },
     { key: 'export', label: 'Export for…', children: EXPORT_FORMATS.map(format => ({
       key: `export:${format.key}`, label: <a href={exportHref(API, taskId, format.key, selection)}>{format.label}</a> })) },
     { key: 'pattern', label: 'Pattern data', children: patternFiles(treatment).map(file => ({
