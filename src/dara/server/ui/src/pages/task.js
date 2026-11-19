@@ -913,8 +913,8 @@ function ShortcutHelp({ open, onClose }) {
 // The Submit page's names of the modes and of their formula field.
 const ANALYSIS_MODE = {
   known_mixture: 'Known-phase refinement',
-  identification: 'Identify (search-match)',
-  elemental: 'Identify + verify (phase search with Rietveld)',
+  identification: 'Search-match',
+  elemental: 'Rietveld phase search',
   reaction: 'Reaction check',
   selected_phases: 'User-selected phase refinement',
 };

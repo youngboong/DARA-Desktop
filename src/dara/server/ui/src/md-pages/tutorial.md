@@ -48,8 +48,8 @@ Select one of four analysis modes. The fields below the selector change with the
 
 The first two modes are one flow at two depths, with the same input (the elements, or the formulas of the starting materials or the expected phases):
 
-- **Identify** (the default): search-match in seconds, as HighScore and Match! do. The phases are found by peak matching and are not verified by a fit. See [Search-match and identification](#search-match-and-identification).
-- **Identify + verify**: the phase search with Rietveld (minutes). DARA refines the candidate phase sets and ranks them by the fit, so the result is a verified phase set with wt%.
+- **Search-match** (the default): peak matching against the database in seconds, as HighScore and Match! do. The phases are found by peak matching and are not verified by a fit. See [Search-match and identification](#search-match-and-identification).
+- **Rietveld phase search**: the automatic phase search (minutes). DARA refines the candidate phase sets and ranks them by the fit, so the result is a verified phase set with wt%.
 - **Known-phase refinement**: DARA refines only the phases you list under "Phases to refine". Use it when you already know what is in the sample.
 - **Reaction check**: DARA compares your formulas with a predicted reaction at a given temperature (27 to 1727 °C) and atmosphere.
 
@@ -83,13 +83,13 @@ Select your diffractometer configuration from the dropdown.
 The Run card has one main action per mode:
 
 - **Identify**: **Search-match** opens the search-match for the pattern (seconds). With several files it becomes **Identify all (N)** (see below).
-- **Identify + verify** and the other Rietveld modes: **Run analysis** queues the automatic analysis. **Check candidates first** opens the same search-match before you commit to the run.
+- **Rietveld phase search** and the other Rietveld modes: **Run analysis** queues the automatic analysis. **Check candidates first** opens the same search-match before you commit to the run.
 
 Errors in the form are marked at their field; otherwise the task appears in Results.
 
 ## Search-match and identification
 
-Search-match ranks reference structures against your pattern in seconds, as HighScore and Match! do. Choose the **Identify** mode, load a pattern, enter the elements or formulas, then click **Search-match** in the Run card. (In the Rietveld modes the same search-match is **Check candidates first**.)
+Search-match ranks reference structures against your pattern in seconds, as HighScore and Match! do. Choose the **Search-match** mode, load a pattern, enter the elements or formulas, then click **Search-match** in the Run card. (In the Rietveld modes the same search-match is **Check candidates first**.)
 
 - The candidate table lists the matching structures with their score and how much of the pattern they explain. Click a candidate to preview its reflections on the pattern; tick it to select it.
 - **Residual** shows what the selected phases leave unexplained, with the best matches for the peaks that remain.

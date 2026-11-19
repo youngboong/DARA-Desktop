@@ -142,10 +142,9 @@ const Container = styled.div`
   }
 `;
 
-// One flow at two depths, named by depth: Identify (search-match, as HighScore and Match!) first,
-// then Identify + verify (the phase search with Rietveld-verified phase sets).
+// Modes carry the name of their method, the words an XRD analyst already uses.
 const MODE_LABELS = {
-  search_match: 'Identify', elemental: 'Identify + verify', known_mixture: 'Known-phase refinement', reaction: 'Reaction check',
+  search_match: 'Search-match', elemental: 'Rietveld phase search', known_mixture: 'Known-phase refinement', reaction: 'Reaction check',
 };
 const DEFAULT_MODE = 'search_match';
 // One name per field; the formula list changes its name with the mode.
@@ -1061,12 +1060,12 @@ function Submission() {
   };
 
   const searchOnly = analysisMode === 'search_match';
-  const modeMessage = searchOnly ? 'Search-match · seconds · peak matching, not verified by a fit'
+  const modeMessage = searchOnly ? 'Peak matching against the database · seconds · not verified by a fit'
     : analysisMode === 'reaction'
     ? 'Predict products from precursors, temperature, and atmosphere, then fit the XRD pattern.'
     : analysisMode === 'known_mixture'
       ? 'Every listed phase is refined together; DARA picks the best database structure for each. Unlisted impurities or products are not searched.'
-      : 'Phase search with Rietveld · minutes · verified phase sets and wt%';
+      : 'Phases found and verified by Rietveld fits, automatically · minutes · wt%';
 
   const instrumentLabel = name => (instrumentDetails[name]
     ? `${instrumentDetails[name].label} — ${instrumentDetails[name].verified ? 'operator verified' : 'unverified'}`
@@ -1357,7 +1356,7 @@ function Submission() {
                 <Form.Item label="Elements" name="elements" dependencies={['precursor_formulas']}
                   rules={[
                     { validator: (_, value) => (checkElements(value).error ? Promise.reject(new Error(checkElements(value).error)) : Promise.resolve()) },
-                    // Identify and Identify + verify take the same input: elements, or formulas to derive them from.
+                    // Search-match and Rietveld phase search take the same input: elements, or formulas to derive them from.
                     ({ getFieldValue }) => ({ validator: (_, value) => (SEARCH_MODES.includes(getFieldValue('analysis_mode')) && !perFileChemistry && !checkElements(value).symbols.length
                       && !splitList(getFieldValue('precursor_formulas')).length ? Promise.reject(new Error('Enter the elements, or the expected formulas.')) : Promise.resolve()) }),
                   ]}
@@ -1388,7 +1387,7 @@ function Submission() {
                 ) : (
                   <Form.Item label={FORMULA_LABELS[analysisMode] || 'Expected formulas'}
                     name="precursor_formulas" rules={[{ required: !SEARCH_MODES.includes(analysisMode), message: 'Please input chemical formulas.' }]}
-                    tooltip="Optional in Identify and Identify + verify, but listed phases are guaranteed candidates. Optional amounts enable the mass-balance check: a molar coefficient before the formula (Fe2O3, 2 TiO2) or a weighed mass after a colon (In2O3:0.3022g, TiO2:0.2004g)."
+                    tooltip="Optional in Search-match and Rietveld phase search, but listed phases are guaranteed candidates. Optional amounts enable the mass-balance check: a molar coefficient before the formula (Fe2O3, 2 TiO2) or a weighed mass after a colon (In2O3:0.3022g, TiO2:0.2004g)."
                     extra={offeredFormulas ? <span className="dara-recent">From the file name:
                       <Button type="link" size="small" onClick={() => {
                         form.setFieldsValue({ precursor_formulas: offeredFormulas.join(', ') });
