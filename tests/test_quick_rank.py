@@ -447,7 +447,7 @@ def test_suggested_structure_with_unphysical_density_is_left_out(monkeypatch):
     pool.candidates[0].path = Path("bad.cif")
     monkeypatch.setattr(qr, "build_pool", lambda *a, **k: pool)
     monkeypatch.setattr(qr, "_unphysical_density", lambda path: path.name == "bad.cif")
-    x, y = _pattern([(A_D, A_I, 1.0, 1.0), (B_D, B_I, 0.6, 1.0)])
+    x, y = _pattern([(A_D, A_I, 2000, 1.0), (B_D, B_I, 1200, 1.0)])  # peaks above the noise floor
     result = qr.quick_ranking(x, y, elements=["A"])
     assert [row["source"] for row in result["ranking"]] == ["cod:2"]
     assert [step["source"] for step in result["combination"]] == ["cod:2"]
@@ -652,3 +652,65 @@ def test_alternatives_are_related_rows_with_the_same_strong_peaks():
     qr.mark_alternatives(rows)
     assert tio2["alternatives"] == ["cod:2"] and same["alternatives"] == ["cod:1"]
     assert rutile["alternatives"] == [] and other["alternatives"] == []  # same peaks but unrelated: not flagged
+
+
+def test_mp_pool_queries_named_formulas_on_their_own(monkeypatch):
+    """A named precursor (an oxalate hydrate) the chemical-system query did not return (its structure
+    cap cuts) is queried by formula, as the search does; a named organic is kept; a named formula
+    already returned is not queried again."""
+    from types import SimpleNamespace
+
+    from pymatgen.core import Composition
+
+    from dara import structure_db
+
+    def doc(material_id, formula):
+        return {"material_id": material_id, "formula_pretty": formula, "symmetry": {"number": 15},
+                "energy_above_hull": 0.0, "theoretical": False,
+                "structure": SimpleNamespace(composition=Composition(formula))}
+
+    calls = []
+
+    def query(self, *, formulas=None, chemsys=None, max_structures=None, **kwargs):
+        calls.append((formulas, max_structures))
+        if formulas:
+            return [doc("mp-2", "FeC2O4(H2O)2"), doc("mp-4", "C2H2O4"), doc("mp-1", "Fe2O3")]
+        return [doc("mp-1", "Fe2O3"), doc("mp-3", "C6H6")]
+
+    monkeypatch.setattr(structure_db.MaterialsProjectDatabase, "_query", query)
+    qr._MP_ROWS_MEMO.clear()
+    rows = qr.mp_pool_rows(["C", "Fe", "H", "O"], 0.05, 100, ["FeC2O4(H2O)2", "H2C2O4", "Fe2O3"])
+    assert [r["material_id"] for r in rows] == ["mp-1", "mp-2", "mp-4"]  # no duplicate, C6H6 left out
+    assert calls[1] == (["FeH4(CO3)2", "HCO2"], 100)  # reduced formulas
+    qr._MP_ROWS_MEMO.clear()
+
+
+def test_a_pick_needs_correlated_lines_above_the_noise_floor(monkeypatch):
+    """Lines predicted above the noise floor and present in the pattern are counted (Match!'s
+    "correlated peaks"); a row with fewer than MIN_CORRELATED is passed over by the combination."""
+    cands = [_cand("cod:3", "Cc", C_D, C_I), _cand("cod:1", "Aa", A_D, A_I), _cand("cod:2", "Bb", B_D, B_I)]
+    x, y = _pattern([(A_D, A_I, 2000, 1.0), (B_D, B_I, 1200, 1.0)])
+    ctx, _ = qr._context(x, y, wavelength="Cu", wmin=None, wmax=None, excluded_ranges=None)
+    assert qr._score(ctx, cands[1])["correlated"] == len(A_D)  # every line of A is there
+    assert qr._score(ctx, cands[0])["correlated"] < qr.MIN_CORRELATED  # nothing of C is measured
+    assert [c["formula"] for c in qr.rank(x, y, cands)["combination"]][:2] == ["Aa", "Bb"]
+    monkeypatch.setattr(qr, "MIN_CORRELATED", len(B_D) + 1)  # B (7 lines) can no longer pass, A (9) can
+    assert [c["formula"] for c in qr.rank(x, y, cands)["combination"]] == ["Aa"]
+
+
+def test_doped_entry_gives_way_to_the_entered_formula_of_the_same_structure():
+    assert qr._doped_form("Zn1.7Co0.3O2", 186, "ZnO", 186)
+    assert qr._doped_form("Ti4H0.36O8", 141, "TiO2", 141)  # interstitial H in anatase
+    assert not qr._doped_form("ZnFe2O4", 227, "Fe3O4", 227), "a stoichiometric compound is no dopant"
+    assert not qr._doped_form("Zn1.7Co0.3O2", 186, "ZnO", 225), "another structure"
+    # the doped entry fits a little better (intensities closer), the entered formula almost as well
+    doped = _cand("cod:5", "Zn1.7Co0.3O2", A_D, A_I, sg=186)
+    base = _cand("cod:6", "ZnO", A_D, [v * (0.9 if i % 2 else 1.0) for i, v in enumerate(A_I)], sg=186)
+    cands = [doped, base, _cand("cod:2", "Bb", B_D, B_I)]
+    x, y = _pattern([(A_D, A_I, 2000, 1.0), (B_D, B_I, 1200, 1.0)])
+    plain = qr.rank(x, y, cands)
+    assert plain["combination"][0]["formula"] == "Zn1.7Co0.3O2"
+    named = qr.rank(x, y, cands, named=["ZnO", "Bb"])
+    assert [c["formula"] for c in named["combination"]] == ["ZnO", "Bb"]  # the doped entry is not picked later
+    row = next(r for r in named["ranking"] if r["formula"] == "ZnO")
+    assert row["alternatives"] == ["cod:5"]

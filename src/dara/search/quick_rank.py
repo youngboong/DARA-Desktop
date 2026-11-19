@@ -18,12 +18,15 @@ Per candidate (all numpy, no BGMN):
 7. Greedy combination: subtract the best model, re-score, at most 3 more steps, stop below a
    gain of 0.03 or, as an analyst stops searching again, when no significant unexplained peak
    is left (:func:`residual_maxima`, the rule of :func:`residual_step`); a pick with gain below
-   0.08 is "weak".
+   0.08 is "weak". A row is passed over unless at least 2 of its lines predicted above the noise
+   floor are present in the net pattern (``correlated``; Match!'s default minimum of correlated
+   peaks), and a doped entry of a formula the user entered gives way to that formula's row
+   (:func:`_named_instead`).
 8. Grouping: same (formula, space group) is one row; same formula with another space group is a
    "polymorph"; a composition within 3.5 at% of a higher row is a "variant of X".
-9. Alternatives: a polymorph or variant row whose strong lines fall on the same positions as
-   another row's (:func:`same_peaks`) cannot be told apart by peak matching; each lists the other
-   in ``alternatives`` (no order between them is claimed).
+9. Alternatives: a polymorph, variant or doped (:func:`_doped_form`) row whose strong lines fall on
+   the same positions as another row's (:func:`same_peaks`) cannot be told apart by peak
+   matching; each lists the other in ``alternatives`` (no order between them is claimed).
 
 Simulated reflections ("sticks") are cached on disk per structure and wavelength
 (:func:`stick_cache_dir`), so a warm pool of ~150 candidates scores in about a second.
@@ -70,6 +73,11 @@ SCALE_PENALTY = 5.0
 STOP_GAIN = 0.03
 WEAK_GAIN = 0.08
 MAX_EXTRA_STEPS = 3
+# a pick needs at least this many correlated lines (Match!'s default "Min. no. of corr. peaks")
+MIN_CORRELATED = 2
+# a doped entry gives way to an entered formula that explains less by under this (the least gain
+# worth a combination step)
+NAMED_SLACK = STOP_GAIN
 VARIANT_AT_FRACTION = 0.035
 MAX_ROWS = 60
 MAX_STICKS = 60
@@ -259,32 +267,45 @@ _MP_ROWS_MEMO: dict[tuple, tuple[float, list[dict]]] = {}
 MP_MEMO_TTL_S = 3600.0
 
 
-def mp_pool_rows(elements, e_hull_cutoff: float, limit: int) -> list[dict]:
-    """MP candidates of a chemical system through the normal search's query (cached on disk).
+def mp_pool_rows(elements, e_hull_cutoff: float, limit: int, formulas=()) -> list[dict]:
+    """MP candidates of a chemical system through the normal search's queries (cached on disk).
 
-    Only the element set is sent to Materials Project. Raises when the query fails and no
-    cached structures stand in.
+    As the search does (``get_cifs_by_chemsys`` + ``get_cifs_by_formulas``): the element set,
+    then the named ``formulas`` (precursors) the system query did not return on their own, so its
+    ``limit`` cap (lowest energy above hull first) cannot cut a named phase; named formulas are
+    kept even when organic. Only element sets and formulas are sent to Materials Project. Raises
+    when the query fails and no cached structures stand in.
     """
     from dara.structure_db import COMMON_GASES, MaterialsProjectDatabase, is_molecular_organic
 
     names = sorted({str(e) for e in elements})
-    key = (tuple(names), float(e_hull_cutoff), int(limit))
+    named = sorted({_reduced(f) for f in formulas if _fractions(_reduced(f)) is not None})
+    key = (tuple(names), float(e_hull_cutoff), int(limit), tuple(named))
     memo = _MP_ROWS_MEMO.get(key)
     if memo is not None and time.monotonic() - memo[0] < MP_MEMO_TTL_S:
         return memo[1]
     db = MaterialsProjectDatabase(max_structures=limit, e_hull_filter=e_hull_cutoff)
     systems = ["-".join(c) for n in range(1, len(names) + 1) for c in itertools.combinations(names, n)]
-    # shortcut: chemical-system query only (the search also queries named precursor formulas,
-    # which lie inside the system unless the 'limit' cap cuts them); add it if picks go missing.
-    docs = db._query(chemsys=systems)
-    rows = []
+    docs = list(db._query(chemsys=systems))
+    found = {db._doc_value(d, "structure").composition.reduced_formula for d in docs
+             if db._doc_value(d, "structure") is not None}
+    missing = [f for f in named if f not in found]
+    if missing:
+        try:
+            docs += db._query(formulas=missing, max_structures=max(limit, 20 * len(missing)))
+        except Exception:  # noqa: BLE001 - offline with none cached: the system query stands
+            logger.warning("Quick ranking: Materials Project query of the named formulas failed", exc_info=True)
+    rows, seen = [], set()
     for doc in docs:
         structure = db._doc_value(doc, "structure")
         if structure is None:
             continue
         row = db._index_row(doc, structure.composition)
-        if row["formula"] in COMMON_GASES or is_molecular_organic(row["formula"]):
+        if row["material_id"] in seen:
             continue
+        if row["formula"] in COMMON_GASES or (is_molecular_organic(row["formula"]) and row["formula"] not in named):
+            continue
+        seen.add(row["material_id"])
         rows.append(row)
     if not db.offline_cache_used:  # an offline stand-in is not kept for the hour
         _MP_ROWS_MEMO[key] = (time.monotonic(), rows)
@@ -377,7 +398,7 @@ def build_pool(
             pool.caveats.append("Materials Project is not configured (no MP_API_KEY): COD only.")
         else:
             try:
-                listed = mp_pool_rows(elements, e_hull_cutoff, mp_limit)
+                listed = mp_pool_rows(elements, e_hull_cutoff, mp_limit, list(precursors or []))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("Quick ranking: Materials Project query failed", exc_info=True)
                 pool.caveats.append(
@@ -492,6 +513,7 @@ class _Context:
     lam1: float
     lam2: float | None
     window: int = 1  # samples of the window_max filter
+    net_window: np.ndarray | None = None  # window_max of the net pattern (before any subtraction)
 
 
 def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges,
@@ -514,10 +536,12 @@ def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges,
         return None, "No net intensity above the background."
     window = max(1, round(2 * CONFIG.window_hw_deg / profile.step)) + 1
     samples = np.arange(len(x), dtype=float)
+    net_window = maximum_filter1d(residual, window, mode="nearest")
     return _Context(
-        profile=replace(profile, window_max=maximum_filter1d(residual, window, mode="nearest")),
+        profile=replace(profile, window_max=net_window),
         x=x, index_of=lambda t: np.interp(t, x, samples), residual=residual, total=total,
         fwhm=estimate_fwhm(x, residual, profile.step), lam1=lam1, lam2=lam2, window=window,
+        net_window=net_window,
     ), None
 
 
@@ -578,7 +602,7 @@ def _score(ctx: _Context, cand: Candidate) -> dict | None:
     points = [(k, s, z) for k, s, z in bound["grid_top"] if np.isfinite(k) and k > 0]
     if not points:
         return {"score": 0.0, "explained": 0.0, "amplitude": 0.0, "scale": 1.0, "shift": 0.0,
-                "matched": 0, "expected": int(bound["n_strong"]), "model": None, "rel": None}
+                "matched": 0, "expected": int(bound["n_strong"]), "model": None, "rel": None, "correlated": 0}
     lo, hi = ctx.profile.lo, ctx.profile.hi
     inside = (two_theta > lo + CONFIG.edge_margin_deg) & (two_theta < hi - CONFIG.edge_margin_deg)
     rel = weight / weight[inside].max()
@@ -598,10 +622,16 @@ def _score(ctx: _Context, cand: Candidate) -> dict | None:
     pos, _ = _positions(d[strong], scale, shift, ctx.lam1)
     observed = np.interp(pos, ctx.profile.angles, ctx.profile.window_max)
     matched = int(np.sum(observed >= 0.5 * a * rel[strong]))
+    # lines that should be visible (predicted above the noise floor) and are there in the measured
+    # net pattern, overlapped or not: the "correlated peaks" a classical search-match counts
+    pos, ok = _positions(d, scale, shift, ctx.lam1)
+    visible = ok & (pos > lo + CONFIG.edge_margin_deg) & (pos < hi - CONFIG.edge_margin_deg) & ~_in_ranges(
+        pos, ctx.profile.excluded, CONFIG.excluded_margin_deg) & (a * rel >= ctx.profile.floor)
+    correlated = int(np.sum(visible & (np.interp(pos, ctx.x, ctx.net_window) >= 0.5 * a * rel)))
     return {
         "score": float(scores[best]), "explained": float(explained[best]), "amplitude": a,
         "scale": float(scale), "shift": float(shift), "matched": matched,
-        "expected": int(len(strong)), "model": models[best], "rel": rel,
+        "expected": int(len(strong)), "model": models[best], "rel": rel, "correlated": correlated,
     }
 
 
@@ -726,13 +756,16 @@ def rank(
     excluded_ranges=None,
     max_rows: int = MAX_ROWS,
     background=None,
+    named=(),
 ) -> dict:
     """Rank candidates and combine the best ones; see the module docstring.
 
     Returns ``{ranking, combination, fwhm, profile, background, caveats}``. ``profile`` is the
     net (background-removed) pattern, decimated, for an overlay of the sticks; ``background`` the
     curve that was removed (:func:`background_view`). ``background``: settings for
-    ``prefilter.background_settings`` (``None``: the default method).
+    ``prefilter.background_settings`` (``None``: the default method). ``named``: formulas the user
+    entered (precursors); a doped entry of the same structure gives way to one of them
+    (:func:`_named_instead`).
     """
     settings = background_settings(background)
     ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
@@ -753,17 +786,25 @@ def rank(
     # a residual step may regroup to another member; report the ranking row's representative
     representative = {row["key"]: row["candidate"] for row in rows}
     stage_rows = rows
+    named = {_reduced(f) for f in named}
     for step in range(MAX_EXTRA_STEPS + 1):
         if step:
             stage_rows = score_all(picked, flags=False)
-        if not stage_rows:
+        top = next((row for row in stage_rows if row["best"]["model"] is None
+                    or (step and row["best"]["explained"] < STOP_GAIN)
+                    or row["best"]["correlated"] >= MIN_CORRELATED), None)
+        if top is None:
             break
-        top = stage_rows[0]
         gain = top["best"]["explained"]
         if step and gain < STOP_GAIN:
             break
         if top["best"]["model"] is None:
             break
+        instead = _named_instead(ctx, top, stage_rows, named)
+        if instead is not top:
+            picked.add(top["key"])  # the doped entry is the same phase: not a later pick
+            top = instead
+        gain = top["best"]["explained"]
         explained_total += gain
         cand = representative.get(top["key"], top["candidate"])
         combination.append({
@@ -796,6 +837,45 @@ def rank(
     }
 
 
+def _fractional(formula: str) -> bool:
+    """Whether a reduced formula has a non-integer amount (a doped or non-stoichiometric entry)."""
+    from pymatgen.core import Composition
+
+    try:
+        return any(abs(v - round(v)) > 1e-3 for v in Composition(formula).values())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _doped_form(formula: str, spacegroup, base: str, base_spacegroup) -> bool:
+    """``formula`` is a doped (fractional) entry of ``base``'s structure: same space group, a
+    non-integer formula, and every element of ``base`` in it (Zn1.7Co0.3O2 of ZnO)."""
+    fa, fb = _fractions(formula), _fractions(base)
+    return (formula != base and spacegroup is not None and spacegroup == base_spacegroup
+            and fa is not None and fb is not None and set(fb) <= set(fa)
+            and _fractional(formula) and not _fractional(base))
+
+
+def _named_instead(ctx: _Context, top: dict, stage_rows: list[dict], named: set) -> dict:
+    """A pick that is a doped entry (:func:`_doped_form`) of a formula the user entered gives way to
+    that formula's row when their strong lines coincide (:func:`same_peaks`) and it explains as much
+    (less by under ``NAMED_SLACK``): peak matching cannot tell them apart, and the entered
+    composition is the sample knowledge that decides."""
+    formula, spacegroup = top["key"]
+    if not named or formula in named:
+        return top
+    lo, hi = ctx.profile.lo, ctx.profile.hi
+    mine = _sticks_for_display(top["candidate"], top["best"], ctx.lam1, lo, hi)
+    for row in stage_rows:
+        base, base_sg = row["key"]
+        if (base in named and row["best"]["model"] is not None
+                and row["best"]["explained"] >= max(STOP_GAIN, top["best"]["explained"] - NAMED_SLACK)
+                and _doped_form(formula, spacegroup, base, base_sg)
+                and same_peaks(mine, _sticks_for_display(row["candidate"], row["best"], ctx.lam1, lo, hi))):
+            return row
+    return top
+
+
 def _strong_positions(sticks, config=CONFIG) -> np.ndarray:
     lines = np.asarray([line for line in sticks or [] if len(line) == 2], dtype=float).reshape(-1, 2)
     if not len(lines) or not lines[:, 1].max() > 0:
@@ -817,8 +897,12 @@ def same_peaks(a_sticks, b_sticks, config=CONFIG) -> bool:
 
 
 def _related(a: dict, b: dict) -> bool:
-    """Polymorphs (same formula) or a "variant of" the other's formula."""
-    return a["formula"] == b["formula"] or f"variant of {a['formula']}" in b["flags"] or f"variant of {b['formula']}" in a["flags"]
+    """Polymorphs (same formula), a "variant of" the other's formula, or a doped entry of the
+    other's structure (:func:`_doped_form`)."""
+    return (a["formula"] == b["formula"] or f"variant of {a['formula']}" in b["flags"]
+            or f"variant of {b['formula']}" in a["flags"]
+            or _doped_form(a["formula"], a.get("spacegroup"), b["formula"], b.get("spacegroup"))
+            or _doped_form(b["formula"], b.get("spacegroup"), a["formula"], a.get("spacegroup")))
 
 
 def mark_alternatives(rows: list[dict]) -> None:
@@ -996,13 +1080,13 @@ def quick_ranking(
     for _ in range(4):
         result = rank(
             angles, intensities, candidates, wavelength=wavelength, wmin=wmin, wmax=wmax,
-            excluded_ranges=excluded_ranges, background=background,
+            excluded_ranges=excluded_ranges, background=background, named=precursors,
         )
         # a suggested structure with an impossible density makes the refinement of the whole
         # selection fail: drop it and rank again
-        bad = {step["source"] for step in result["combination"]} & {
-            c.source for c in candidates if c.path is not None and _unphysical_density(c.path)
-        } if result["combination"] else set()
+        picks = {step["source"] for step in result["combination"]}  # only these: a CIF read each
+        bad = {c.source for c in candidates
+               if c.source in picks and c.path is not None and _unphysical_density(c.path)}
         if not bad:
             break
         candidates = [c for c in candidates if c.source not in bad]
