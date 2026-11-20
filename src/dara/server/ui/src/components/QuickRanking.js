@@ -516,7 +516,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
       y: shownCurve?.view?.intensity?.length === grid.length ? shownCurve.view.intensity : pchip(points.anchors, grid) },
     { type: 'scatter', mode: 'markers', name: 'Base points', meta: 'bg-anchors', cliponaxis: false,
       x: points.anchors.map(point => point[0]), y: points.anchors.map(point => point[1]),
-      marker: { size: 11, color: points.anchors.map((_, index) => (index === points.selected ? '#3f6c8f' : '#ffffff')), line: { color: '#3f6c8f', width: 2 } },
+      marker: { size: 7, color: points.anchors.map((_, index) => (index === points.selected ? '#3f6c8f' : 'rgba(255,255,255,0)')), line: { color: '#3f6c8f', width: 1.5 } },
       hovertemplate: '2θ %{x:.3f}°<br>%{y:.1f}<extra>Base point</extra>' }] : null;
   const startPoints = () => {
     setPoints({ anchors: startingPoints(bgView), selected: null });

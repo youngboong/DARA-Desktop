@@ -402,7 +402,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
           line: { color: '#1677ff', width: 2 }, hoverinfo: 'skip', showlegend: false },
         { x: anchors.map(point => point[0]), y: anchors.map(point => point[1]), type: 'scatter', mode: 'markers', name: 'Anchors',
           meta: 'bg-anchors', cliponaxis: false, showlegend: false,
-          marker: { size: 11, color: anchors.map((_, index) => (index === selected ? '#1677ff' : '#ffffff')), line: { color: '#1677ff', width: 2 } },
+          marker: { size: 7, color: anchors.map((_, index) => (index === selected ? '#1677ff' : 'rgba(255,255,255,0)')), line: { color: '#1677ff', width: 1.5 } },
           hovertemplate: '2θ %{x:.3f}°<br>%{y:.1f}<extra>Anchor</extra>' }];
     }
     return traces;

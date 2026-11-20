@@ -5,7 +5,7 @@ import Scatter from 'plotly.js/lib/scatter';
 import {
   clampRange, finiteRange, insideRange, panRange, viewChangeFromRelayout, wheelNotches, wheelZoomRange, xRangeUpdate,
 } from './plotNavigation.mjs';
-import { HIT_PX } from './backgroundAnchors.mjs';
+import { HIT_PX, addAnchor } from './backgroundAnchors.mjs';
 import { FIGURE_WIDTHS, exportOptions, publicationFigure } from './figureExport.mjs';
 
 // The refinement view only renders scatter traces. Importing react-plotly.js
@@ -252,7 +252,7 @@ function attachAnchorEditing(gd, editRef) {
     const [curveIndex, anchorIndex] = [traceIndex('bg-curve'), traceIndex('bg-anchors')];
     if (curveIndex < 0 || anchorIndex < 0) return;
     const update = { y: [curve, drag.anchors.map(point => point[1])] };
-    if (drag.edit.moveX) update.x = [gd.data[curveIndex].x, drag.anchors.map(point => point[0])];
+    if (drag.edit.moveX || drag.added) update.x = [gd.data[curveIndex].x, drag.anchors.map(point => point[0])];
     Plotly.restyle(gd, update, [curveIndex, anchorIndex]);
   };
 
@@ -285,9 +285,9 @@ function attachAnchorEditing(gd, editRef) {
     window.removeEventListener('mousemove', onMove, true);
     window.removeEventListener('mouseup', onUp, true);
     if (frame !== null) { window.cancelAnimationFrame(frame); frame = null; }
-    const { edit, anchors, moved } = drag;
+    const { edit, anchors, moved, added, index } = drag;
     drag = null;
-    if (moved) edit.onChange(anchors);
+    if (moved) { edit.onChange(anchors); if (added) edit.onSelect(index); } else if (added) edit.onAdd(added);
   }
 
   const onDown = event => {
@@ -306,13 +306,19 @@ function attachAnchorEditing(gd, editRef) {
       window.addEventListener('mouseup', onUp, true);
       return;
     }
-    // A click on the curve (within HIT_PX) between the range ends adds an anchor there.
+    // A press on the curve (within HIT_PX) between the range ends adds an anchor there; keeping
+    // the button down drags the new anchor in the same gesture.
     const x = at.full.xaxis.p2l(at.px - at.full.xaxis._offset);
     const [y] = edit.curveOf(edit.anchors, [x]);
     const point = dataToPixel(at.full, x, y);
     if (!point || Math.abs(point.py - at.py) > HIT_PX || edit.blocked(x)) return;
+    const added = [roundTo(x, 4), roundTo(y, 2)];
+    const anchors = addAnchor(edit.anchors, added);
+    if (anchors === edit.anchors) return;
     stop();
-    edit.onAdd([roundTo(x, 4), roundTo(y, 2)]);
+    drag = { edit, index: anchors.findIndex(item => item[0] === added[0]), anchors, moved: false, added };
+    window.addEventListener('mousemove', onMove, true);
+    window.addEventListener('mouseup', onUp, true);
   };
 
   // Plotly's drag layer keeps a crosshair cursor; show what a press would do instead.
