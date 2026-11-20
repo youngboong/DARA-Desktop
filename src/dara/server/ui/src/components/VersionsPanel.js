@@ -152,8 +152,8 @@ export default function VersionsPanel({ taskId, store, review, onView, onCompare
       const compareWith = adopted != null && adopted !== sel ? adopted : comparisonBase('best', versions, row.version);
       const items = [
         ...(row.version > 1 ? [{ key: 'compare', label: 'Compare…' }, { type: 'divider' }] : []),
-        { key: 'report', disabled: Boolean(reportBlocked), label: reportBlocked ? `Report (${reportBlocked})` : 'Report (PDF + Word)' },
-        { key: 'report-html', disabled: Boolean(reportBlocked), label: 'Report (HTML)' },
+        { key: 'report-formats', disabled: Boolean(reportBlocked), label: reportBlocked ? `Report (${reportBlocked})` : 'Report',
+          children: [{ key: 'report', label: 'PDF + Word' }, { key: 'report-html', label: 'HTML' }] },
         { key: 'export', label: 'Export for…', disabled: quickCheck, children: EXPORT_FORMATS.map(format => ({
           key: `export:${format.key}`, label: <a href={exportHref(API, taskId, format.key, exportSel)}>{format.label}</a> })) },
         { type: 'divider' },
@@ -196,7 +196,5 @@ export default function VersionsPanel({ taskId, store, review, onView, onCompare
       }}
       rowClassName={row => ((row.version === 1 ? null : `version:${row.version}`) === shownSel ? 'dara-row-shown' : '')}
       scroll={{ x: 'max-content' }} columns={columns} />
-    {!loading && versions.length <= 1 ? <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
-      Only the automatic fit so far. Use Add phase… in the fit workspace to create a version.</Text> : null}
   </section>;
 }

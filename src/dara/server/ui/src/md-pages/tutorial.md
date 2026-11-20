@@ -92,9 +92,9 @@ Errors in the form are marked at their field; otherwise the task appears in Resu
 Search-match ranks reference structures against your pattern in seconds, as HighScore and Match! do. Choose the **Search-match** mode, load a pattern, enter the elements or formulas, then click **Search-match** in the Run card. (In the Rietveld modes the same search-match is **Check candidates first**.)
 
 - The candidate table lists the matching structures with their score and how much of the pattern they explain. Click a candidate to preview its reflections on the pattern; tick it to select it.
-- **Residual** shows what the selected phases leave unexplained, with the best matches for the peaks that remain.
+- **Pattern / Residual** switches the plot between the net pattern and what the selected phases leave. The unexplained peaks are marked on the plot and listed beside it with 2θ, d and height; click one (or press Enter on it) to see the candidates with a strong line there, preview their reflections and add one.
 - Candidates whose strong peaks fall on the same positions as a selected phase (a polymorph or a close-composition variant) are listed as **Alternatives** under it, and marked *alt.* in the table instead of a rank: peak matching cannot tell them apart. **Tell apart with Rietveld** refines the selected phases together with them.
-- **Background…** sets the background removed before ranking: Automatic, or Granularity / bending as in HighScore. The curve is drawn on the pattern while you move the sliders; "Accept and rank again" ranks with it.
+- **Background** (its button shows the method in use) holds everything about the background removed before ranking: **Show on plot**, and the method: Automatic, Granularity / bending as in HighScore, or Manual points dragged on the plot. The curve is drawn on the pattern while you move the sliders; "Accept and rank again" ranks with it. The fit view's Background (Refine menu) uses the same words: Automatic, Polynomial terms or Manual points.
 - **Refine with Rietveld** submits a Known-phase refinement of the selected structures (minutes).
 - **Save identification** stores the selected phases as the result without refinement. An identification has no Rwp; its amounts are estimated from reference intensity ratios (RIR).
 

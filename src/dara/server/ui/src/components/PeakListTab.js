@@ -225,7 +225,7 @@ function ObservedPeaks({ taskId, query, onResponse, active }) {
       <Table size="small" rowKey="key" dataSource={shown} columns={columns} scroll={{ x: 'max-content' }}
         pagination={{ pageSize: 50, showSizeChanger: false, hideOnSinglePage: true }} />
     </div>
-    <Text className="dara-footnote">Peaks found by EFLECH in the analysis range, each assigned to the nearest reflection within max(0.1°, the FWHM of its calculated peak).</Text>
+    <Text className="dara-footnote">Each peak is assigned to the nearest reflection within max(0.1°, its calculated FWHM).</Text>
   </>;
 }
 

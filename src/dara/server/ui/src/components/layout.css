@@ -493,12 +493,20 @@ code {
   overflow-wrap: anywhere;
 }
 
-/* Search-match "Determine background" popover (rendered outside the workspace). */
+/* Search-match Background popover (rendered outside the workspace). */
 .dara-qr-bg-form {
   display: flex;
   flex-direction: column;
   gap: var(--dara-space-1);
-  width: 280px;
+  width: 344px; /* the three methods on one line */
+}
+
+.dara-qr-bg-form > label.dara-qr-bg-show {
+  justify-content: flex-start;
+  align-items: center;
+  gap: var(--dara-space-2);
+  margin: 0 0 var(--dara-space-2);
+  cursor: pointer;
 }
 
 .dara-qr-bg-form > label {

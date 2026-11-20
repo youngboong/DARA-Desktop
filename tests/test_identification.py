@@ -270,6 +270,8 @@ def test_residual_step_after_accepting_one_and_both_phases():
     assert all(row["formula"] != "Aa" for row in one["next"])
     found = [peak[0] for peak in one["unexplained_peaks"]]
     assert all(any(abs(f - t) < 0.15 for f in found) for t in B_LINES)  # B's lines are what is left
+    assert all(peak[2] == pytest.approx(1.540598 / (2 * np.sin(np.radians(peak[0] / 2))), abs=1e-3)
+               for peak in one["unexplained_peaks"])  # [2theta, height, d]
     assert len(one["profile"]["two_theta"]) == len(one["profile"]["net"])
     both = qr.residual_step(x, y, CANDIDATES(), ["cod:1", "cod:2"])
     assert both["explained"] > 0.85 and both["unexplained_peaks"] == []
@@ -301,6 +303,53 @@ def test_residual_endpoint_reuses_the_finished_job(monkeypatch):
     del router_module._JOBS["job1"]
     with pytest.raises(HTTPException) as info:
         asyncio.run(router_module.quick_ranking_residual("job1", request))
+    assert info.value.status_code == 404
+
+
+def test_peak_candidates_endpoint_lists_the_candidates_with_a_line_at_the_peak(monkeypatch):
+    import time
+
+    from fastapi import HTTPException
+
+    from dara.server import quick_rank_router as router_module
+
+    x, y = _pattern([(A_D, A_I, 2000, 1.0), (B_D, B_I, 1200, 1.0)])
+    params = {"angles": list(x), "intensities": list(y), "wavelength": "Cu", "wmin": None, "wmax": None,
+              "excluded_ranges": None}
+    ranking = [{"source": "cod:1", "alternatives": []}]
+    router_module._JOBS["job2"] = {"status": "done", "result": {"ranking": ranking},
+                                   "cancel": __import__("threading").Event(), "params": params,
+                                   "candidates": CANDIDATES(), "finished": time.monotonic()}
+    peak = B_LINES[1]  # B's strongest line (d 3.55), left unexplained after A; Cc has no line there
+    request = router_module.PeakCandidatesRequest(two_theta=peak, selected=["cod:1"])
+    started = time.perf_counter()
+    body = asyncio.run(router_module.quick_ranking_peak_candidates("job2", request))
+    assert time.perf_counter() - started < 1.0
+    assert body["d"] == pytest.approx(3.55, abs=0.005)
+    assert [row["source"] for row in body["candidates"]] == ["cod:2"]  # not Cc, not the selected Aa
+    row = body["candidates"][0]
+    assert row["line"]["rel"] == 1.0 and abs(row["line"]["two_theta"] - peak) <= qr.CONFIG.window_hw_deg
+    assert row["score"] > 0 and "spacegroup_symbol" in row and row["sticks"]
+    # after the residual of the same selection the lookup reuses its scoring, with the same answer
+    asyncio.run(router_module.quick_ranking_residual("job2", router_module.ResidualRequest(selected=["cod:1"])))
+    assert router_module._JOBS["job2"]["scored"]["selected"] == ("cod:1",)
+    again = asyncio.run(router_module.quick_ranking_peak_candidates("job2", request))
+    assert again["candidates"] == body["candidates"]
+    # nothing has a line at 75 deg
+    empty = asyncio.run(router_module.quick_ranking_peak_candidates(
+        "job2", router_module.PeakCandidatesRequest(two_theta=75.0, selected=["cod:1"])))
+    assert empty["candidates"] == [] and empty["total"] == 0
+    # an alternative of a selected phase is not offered again
+    ranking[0]["alternatives"] = ["cod:2"]
+    body = asyncio.run(router_module.quick_ranking_peak_candidates("job2", request))
+    assert body["candidates"] == []
+    with pytest.raises(HTTPException) as info:
+        asyncio.run(router_module.quick_ranking_peak_candidates(
+            "job2", router_module.PeakCandidatesRequest(two_theta=peak, selected=["cod:9"])))
+    assert info.value.status_code == 400
+    del router_module._JOBS["job2"]
+    with pytest.raises(HTTPException) as info:
+        asyncio.run(router_module.quick_ranking_peak_candidates("job2", request))
     assert info.value.status_code == 404
 
 

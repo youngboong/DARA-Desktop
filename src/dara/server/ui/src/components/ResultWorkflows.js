@@ -204,7 +204,7 @@ export function RefinementControlsDialog({ open, onCancel, onSubmit, busy = fals
   return <Modal title="Refinement controls" open={open} width={720} onCancel={onCancel}
     okText="Refine as new version" okButtonProps={{ disabled: busy || !label }}
     onOk={() => onSubmit({ phases: [], remove: [], origin: 'manual', label, controls })}>
-    <Typography.Paragraph type="secondary">Applies to every phase of the displayed fit; “Keep saved/default” leaves a setting as it is.</Typography.Paragraph>
+    <Typography.Paragraph type="secondary">Applies to every phase of the displayed fit.</Typography.Paragraph>
     <RefinementControlsEditor value={controls} onChange={setControls} />
   </Modal>;
 }

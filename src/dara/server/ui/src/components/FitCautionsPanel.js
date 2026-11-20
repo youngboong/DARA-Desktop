@@ -60,10 +60,9 @@ export default function FitCautions({ cautions, style, besideBanner = false, ban
   return (
     <section className="dara-caution-list" aria-label="Cautions" style={{ marginTop: 8, ...style }}>
       <div className="dara-caution-head">
-        <Tooltip title="Automated checks, not a verdict">
+        <Tooltip title={`Automated checks, not a verdict${inBanner ? `; ${inBanner} stated in the summary above` : ''}`}>
           <Text strong>{`Cautions (${items.length + inBanner})`}</Text>
         </Tooltip>
-        {inBanner ? <Text type="secondary">{` · ${inBanner} stated in the summary above`}</Text> : null}
         {actions && remedies.length >= 2 ? <Tooltip title={removeBlocked || 'Remove the phases these cautions name, in one refinement'}>
           <span><Button size="small" disabled={Boolean(removeBlocked)} onClick={() => setCleanUp(true)}>Clean up model…</Button></span>
         </Tooltip> : null}

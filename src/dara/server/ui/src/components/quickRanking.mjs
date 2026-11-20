@@ -152,20 +152,21 @@ const HIDDEN_THEORETICAL = /^(\d+) computed-only \(theoretical\) .* hidden/;
 /** The caveats of a ranking without the routine "N theoretical structures hidden" note (it goes into the pool line). */
 export const rankingNotes = response => (response?.caveats || []).filter(text => !HIDDEN_THEORETICAL.test(text));
 
-/** Pool line: "Ranked 54 candidates (COD 50, MP 4) in 1.2 s · 12 downloaded now · 3 unavailable". */
+/**
+ * Pool line: "54 candidates". Structures that could not be ranked are stated among the caveats, and
+ * the theoretical switch says whether computed structures are in; timings and cache counts are not shown.
+ */
 export function poolText(response) {
   const pool = response?.pool;
   if (!pool) return '';
-  const sources = Object.entries(pool.sources || {}).map(([kind, n]) => `${kind.toUpperCase()} ${n}`).join(', ');
-  const parts = [`Ranked ${pool.candidates ?? 0} candidates${sources ? ` (${sources})` : ''}`];
-  if (Number.isFinite(response.elapsed_s)) parts[0] += ` in ${response.elapsed_s.toFixed(1)} s`;
-  if (pool.downloaded > 0) parts.push(`${pool.downloaded} downloaded now`);
-  if (pool.simulated) parts.push(`${pool.simulated} simulated now`);
-  if (pool.unavailable > 0) parts.push(`${pool.unavailable} unavailable`);
-  if (pool.missing_cif) parts.push(`${pool.missing_cif} not downloaded`);
-  const hidden = (response.caveats || []).map(text => HIDDEN_THEORETICAL.exec(text)).find(Boolean);
-  if (hidden) parts.push(`${hidden[1]} theoretical hidden`);
-  return parts.join(' · ');
+  const n = pool.candidates ?? 0;
+  return `${n} candidate${n === 1 ? '' : 's'}`;
+}
+
+/** Tooltip of the pool line: the candidates per database ("COD 50, MP 4"), or null. */
+export function poolSources(response) {
+  const sources = Object.entries(response?.pool?.sources || {}).map(([kind, n]) => `${kind.toUpperCase()} ${n}`).join(', ');
+  return sources || null;
 }
 
 /** Delay before the next poll of a pending ranking (ms): quick first, then every 2 s. */
@@ -234,17 +235,55 @@ export function nextMatches(residual, rows = [], limit = 3) {
 export const withResidualProfile = (response, residual) => (residual?.profile?.two_theta?.length ? { ...response, profile: residual.profile } : response);
 
 /**
- * Quiet markers just above the 2θ axis (at `level`) at the unexplained peaks; `meta: 'unexplained'`
- * identifies them on click. (On the axis line itself half a marker would be outside the plot area.)
+ * Markers above the tops of the unexplained peaks: a small downward triangle `pad` above the highest
+ * point of the shown `profile` within 0.15° of each peak (so it never covers the data); the
+ * `selected` peak (its 2θ) is drawn larger in the interactive colour. `meta: 'unexplained'`
+ * identifies them on click.
  */
-export function unexplainedMarkers(peaks, level = 0) {
+export function unexplainedMarkers(peaks, profile = null, selected = null) {
   const x = (peaks || []).map(peak => peak[0]).filter(Number.isFinite);
+  const xs = profile?.two_theta || [];
+  const ys = profile?.net || [];
+  const highest = Math.max(0, ...ys.filter(Number.isFinite));
+  const pad = 0.05 * highest;
+  const top = at => {
+    let value = 0;
+    xs.forEach((t, i) => { if (Math.abs(t - at) <= 0.15 && Number.isFinite(ys[i])) value = Math.max(value, ys[i]); });
+    return value + pad;
+  };
+  const isSelected = at => Number.isFinite(selected) && Math.abs(at - selected) < 1e-6;
   return {
-    type: 'scatter', mode: 'markers', name: 'Unexplained peaks', meta: 'unexplained', x, y: x.map(() => level), cliponaxis: false,
-    marker: { symbol: 'triangle-up', size: 9, color: '#874d00', line: { width: 0 } },
-    hovertemplate: 'Unexplained peak %{x:.2f}° 2θ<br>Click to zoom<extra></extra>',
+    type: 'scatter', mode: 'markers', name: 'Unexplained peaks', meta: 'unexplained', x, y: x.map(top), cliponaxis: false,
+    marker: {
+      symbol: 'triangle-down', size: x.map(at => (isSelected(at) ? 13 : 9)),
+      color: x.map(at => (isSelected(at) ? '#3f6c8f' : '#874d00')), line: { width: 0 },
+    },
+    hovertemplate: 'Unexplained peak %{x:.2f}° 2θ<br>Click for candidates<extra></extra>',
   };
 }
+
+/** Rows of the unexplained-peak list: `{x, d, height, key}` from the residual's `[2θ, height, d]`. */
+export const unexplainedRows = residual => (residual?.unexplained_peaks || [])
+  .filter(peak => Number.isFinite(peak?.[0]))
+  .map(peak => ({ x: peak[0], height: peak[1], d: Number.isFinite(peak[2]) ? peak[2] : null, key: peak[0].toFixed(3) }));
+
+/** "Candidates for 2θ 31.72° (d 2.819 Å)" (no d part when it is unknown). */
+export const peakTitle = peak => `Candidates for 2θ ${Number(peak.x).toFixed(2)}°${Number.isFinite(peak.d) ? ` (d ${peak.d.toFixed(3)} Å)` : ''}`;
+
+/**
+ * Rows of a peak lookup (`POST /quick-ranking/{job}/peak-candidates`) as table rows with `lineText`
+ * (the relative intensity of the candidate's line at the peak) and `inRanking` (it can be added).
+ */
+export function peakCandidateRows(response, rows = []) {
+  const known = new Set(rows.map(row => row.key));
+  return rankingRows({ ranking: response?.candidates || [] }).map(row => ({
+    ...row, inRanking: known.has(row.key), lineText: Number.isFinite(row.line?.rel) ? `${Math.round(row.line.rel * 100)} %` : '—',
+  }));
+}
+
+/** The ranking response with `row` (a peak candidate) standing in for its ranking row, so its sticks preview. */
+export const withPreviewRow = (response, row) => (row
+  ? { ...response, ranking: [...(response?.ranking || []).filter(item => rowKey(item) !== rowKey(row)), row] } : response);
 
 /** 2θ window of `half` degrees on either side of `x`, kept inside `bounds`. */
 export function zoomWindow(x, bounds, half = 2) {
@@ -302,7 +341,7 @@ export function backgroundSettings(settings) {
   return {
     method: settings?.method === 'sonneveld_visser' ? 'sonneveld_visser' : 'auto',
     granularity: Number.isFinite(granularity) ? Math.min(200, Math.max(2, Math.round(granularity))) : 20,
-    bending_factor: Number.isFinite(bending) ? Math.min(50, Math.max(0, bending)) : 1,
+    bending_factor: Number.isFinite(bending) ? Math.min(50, Math.max(0, bending)) : 0,
   };
 }
 
@@ -317,6 +356,17 @@ export function startingPoints(view) {
   if (given?.length) return given.map(point => [Number(point[0]), Number(point[1])]);
   if (!backgroundTraces(view)) return [];
   return seedAnchors({ x: view.two_theta, yObs: view.observed, yCalc: view.observed, yBkg: view.intensity });
+}
+
+/** Label of the one Background control: the method in use ("Background: automatic", "…: granularity 20", "…: 9 points"). */
+export function backgroundLabel(settings) {
+  const n = settings?.anchors?.length || 0;
+  if (n) return `Background: ${n} points`;
+  const s = backgroundSettings(settings);
+  if (settings?.method === 'sonneveld_visser' && (s.granularity !== 20 || s.bending_factor !== 0)) {
+    return `Background: granularity ${s.granularity}, bending ${s.bending_factor}`;
+  }
+  return 'Background: automatic';
 }
 
 /** Ranking settings with the base points `anchors` (none: back to the automatic curve of `settings`). */

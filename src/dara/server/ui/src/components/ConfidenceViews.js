@@ -101,8 +101,8 @@ export function DownloadMenu({ taskId, selection, size, blocked = null, reportBl
   const [hkl, setHkl] = React.useState(() => { try { return window.localStorage.getItem(HKL_KEY) === '1'; } catch (e) { return false; } });
   const toggleHkl = () => setHkl(on => { try { window.localStorage.setItem(HKL_KEY, on ? '0' : '1'); } catch (e) { /* private mode */ } return !on; });
   const items = [
-    { key: 'report', disabled: Boolean(reportBlocked), label: reportBlocked ? `Report (${reportBlocked})` : 'Report (PDF + Word)' },
-    { key: 'report-html', disabled: Boolean(reportBlocked), label: 'Report (HTML)' },
+    { key: 'report-formats', disabled: Boolean(reportBlocked), label: reportBlocked ? `Report (${reportBlocked})` : 'Report',
+      children: [{ key: 'report', label: 'PDF + Word' }, { key: 'report-html', label: 'HTML' }] },
     { key: 'figure', label: 'Figure', children: FIGURE_FILES.map(file => ({
       key: file.key, label: <a href={figureHref(API, taskId, file.format, selection, hkl, file.widthMm)}>{file.label}</a> })) },
     { key: 'export', label: 'Export for…', children: EXPORT_FORMATS.map(format => ({

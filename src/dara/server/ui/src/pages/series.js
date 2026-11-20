@@ -205,7 +205,6 @@ function SeriesDetail({ id, onName }) {
         <Progress percent={total ? Math.round((done / total) * 100) : 0} showInfo={false} style={{ flex: '1 1 160px', minWidth: 0, margin: 0 }} />
         <Typography.Text style={{ whiteSpace: 'nowrap' }}>{`${done} / ${total} completed`}</Typography.Text>
       </div>
-      {hasActiveItems(items) ? <Typography.Text type="secondary">Updating every {POLL_MS / 1000} s while tasks are queued or running.</Typography.Text> : null}
       {completedIds.length > MAX_COMPARE ? <div><Typography.Text type="secondary">{`Pattern comparison shows the first ${MAX_COMPARE} completed tasks.`}</Typography.Text></div> : null}
     </div>
     {items.length > MAX_EXPORT ? <Typography.Text type="secondary">{`The table export takes the first ${MAX_EXPORT} tasks; select the rest in Results to export them.`}</Typography.Text> : null}
@@ -219,13 +218,13 @@ function SeriesDetail({ id, onName }) {
       description="No refined wt%, lattice parameters or Rwp to plot. Refine with Rietveld on a task page verifies its phases." /> : <>
     {done < 2 ? <Alert type="info" showIcon message="Trend charts need at least two completed tasks."
       description={<><a href="/results/">Results</a> shows every task's progress; <a href="/?series=1">submit another series</a>.</>} /> : null}
-    <ChartBlock title="Phase fractions" note="Weight fractions are relative to the modelled crystalline phases; error bars are BGMN estimated standard deviations. Gaps mean the phase was not in the final result of that sample.">
+    <ChartBlock title="Phase fractions" note="Relative to the modelled crystalline phases. Error bars are e.s.d.; a gap means the phase is not in that result.">
       <PhaseChart items={items} axis={axis} />
     </ChartBlock>
-    <ChartBlock title="Lattice parameters" note="Per phase identity; error bars are BGMN estimated standard deviations.">
+    <ChartBlock title="Lattice parameters">
       <LatticeChart items={items} axis={axis} />
     </ChartBlock>
-    <ChartBlock title="Fit quality" note="Rwp and goodness of fit of the final refinement of each sample.">
+    <ChartBlock title="Fit quality">
       <FitChart items={items} axis={axis} />
     </ChartBlock>
     </>}
@@ -247,7 +246,7 @@ function SeriesList() {
   return <>
     <div className="dara-page-head"><h1>Series</h1></div>
     {data?.length ? <Typography.Paragraph type="secondary">
-      A series is a set of patterns analysed independently with identical settings. Drop several files on the Submit page (or switch on “Several files”) to submit one.
+      Patterns analysed one by one with the same settings. Submit several files at once to start one.
     </Typography.Paragraph> : null}
     {error ? <div className="dara-empty" role="alert"><h3>The series list could not be loaded</h3><p>{error}</p>
       <Button type="primary" icon={<ReloadOutlined />} onClick={() => setAttempt(value => value + 1)}>Retry</Button></div> : null}

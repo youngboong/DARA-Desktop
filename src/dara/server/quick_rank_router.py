@@ -9,7 +9,9 @@ shape until the ranking is done. The same inputs reuse a running job, or a finis
 "ranking"), ``done`` and ``total`` (0 when unknown); ``DELETE /api/quick-ranking/{job_id}``
 stops the job at its next check and forgets it (downloaded files stay).
 ``POST /api/quick-ranking/{job_id}/residual`` accepts phases and searches again against what is
-left (``quick_rank.residual_step``) on the finished job's pool.
+left (``quick_rank.residual_step``) on the finished job's pool;
+``POST /api/quick-ranking/{job_id}/peak-candidates`` lists the pool's candidates with a strong line
+at one unexplained peak (``quick_rank.peak_candidates``).
 """
 
 from __future__ import annotations
@@ -406,7 +408,46 @@ async def quick_ranking_residual(job_id: str, request: ResidualRequest):
         )
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=f"{exc.args[0]} is not a ranked structure of this search-match.")
+    scored = result.pop("_scored", None)
+    if scored is not None:
+        job["scored"] = scored  # the peak lookup of this selection reuses it (peak-candidates)
     _add_symbols(result["next"])
+    return {"job_id": job_id, "selected": selected, **result}
+
+
+class PeakCandidatesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    two_theta: float = Field(gt=0, lt=180)
+    selected: list[str] = Field(default_factory=list, max_length=12)
+
+
+@router.post("/quick-ranking/{job_id}/peak-candidates")
+async def quick_ranking_peak_candidates(job_id: str, request: PeakCandidatesRequest):
+    """Candidates of the finished job's pool with a strong line at one unexplained peak
+    (``quick_rank.peak_candidates``), after the ``selected`` phases (source ids, in order); the
+    selected phases and their alternatives are left out. Nothing is downloaded or simulated."""
+    from dara.search.quick_rank import peak_candidates
+
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+    if job is None or job["cancel"].is_set():
+        raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
+    if job["status"] != "done" or not job.get("candidates"):
+        raise HTTPException(status_code=409, detail="The search-match has not finished.")
+    params = job["params"]
+    selected = list(dict.fromkeys(source.strip() for source in request.selected))
+    ranking = (job.get("result") or {}).get("ranking") or []
+    alternatives = [alt for row in ranking if row.get("source") in selected for alt in row.get("alternatives") or []]
+    try:
+        result = await asyncio.to_thread(
+            peak_candidates, params["angles"], params["intensities"], job["candidates"], selected,
+            request.two_theta, wavelength=params["wavelength"], wmin=params["wmin"], wmax=params["wmax"],
+            excluded_ranges=params["excluded_ranges"], background=params.get("background"), exclude=alternatives,
+            scored=job.get("scored"),
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=f"{exc.args[0]} is not a ranked structure of this search-match.")
+    _add_symbols(result["candidates"])
     return {"job_id": job_id, "selected": selected, **result}
 
 

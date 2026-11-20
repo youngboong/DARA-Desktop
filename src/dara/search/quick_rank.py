@@ -731,6 +731,10 @@ def _row_payload(rank: int, row: dict, lam1: float, lo: float, hi: float) -> dic
 
 def _score_rows(ctx: _Context, candidates, excluded_keys, flags: bool = True) -> list[dict]:
     """Score every candidate against the current residual, grouped (:func:`group_rows`)."""
+    return group_rows(_score_all(ctx, candidates, excluded_keys), flags)
+
+
+def _score_all(ctx: _Context, candidates, excluded_keys) -> list[tuple[Candidate, dict]]:
     scored = []
     for cand in candidates:
         if (cand.formula, cand.spacegroup) in excluded_keys:
@@ -742,7 +746,7 @@ def _score_rows(ctx: _Context, candidates, excluded_keys, flags: bool = True) ->
             continue
         if result is not None:
             scored.append((cand, result))
-    return group_rows(scored, flags)
+    return scored
 
 
 def rank(
@@ -974,17 +978,52 @@ def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu",
     ``next``: ranking rows scored against the residual without the selection's (formula, space
     group) groups. Raises ``KeyError(source)`` for a source that is not a scored candidate.
     """
+    settings = background_settings(background)
+    ctx, by_source, steps, lines, caveat = _after_selection(
+        angles, intensities, candidates, selected, wavelength=wavelength, wmin=wmin, wmax=wmax,
+        excluded_ranges=excluded_ranges, background=settings)
+    if ctx is None:
+        return {"explained": None, "steps": [], "profile": None, "unexplained_peaks": [], "next": [],
+                "background": {"settings": settings}, "caveats": [caveat]}
+    keys = {(by_source[s].formula, by_source[s].spacegroup) for s in selected}
+    scored = _score_all(ctx, list(by_source.values()), keys)
+    rows = group_rows(scored)
+    lo, hi = ctx.profile.lo, ctx.profile.hi
+    return {
+        # the candidates fitted to this residual, without their model curves (not JSON): the
+        # router keeps it so a peak lookup on the same selection is not scored again
+        "_scored": {"selected": tuple(selected), "lo": lo, "hi": hi, "lam1": ctx.lam1,
+                    "pairs": [(c, {k: v for k, v in r.items() if k != "model"}) for c, r in scored]},
+        "explained": round(1.0 - float(ctx.residual.sum()) / ctx.total, 4),
+        "steps": steps,
+        "profile": _decimated(ctx.x, ctx.residual),
+        "background": background_view(ctx.profile, settings),
+        # [2theta, height, d]: d of K-alpha1 for the peak list
+        "unexplained_peaks": [[t, h, round(_d_spacing(t, ctx.lam1), 4)]
+                              for t, h in residual_maxima(ctx, np.concatenate(lines) if lines else ())],
+        "next": [_row_payload(i + 1, row, ctx.lam1, lo, hi) for i, row in enumerate(rows[:max_rows])],
+        "caveats": [],
+    }
+
+
+def _d_spacing(two_theta: float, lam: float) -> float:
+    return lam / (2.0 * math.sin(math.radians(two_theta / 2.0)))
+
+
+def _after_selection(angles, intensities, candidates, selected, *, wavelength, wmin, wmax, excluded_ranges,
+                     background):
+    """``(ctx, by_source, steps, lines, caveat)``: the scoring context with the ``selected`` sources'
+    models subtracted in order (as the combination subtracts its picks); ``ctx`` is ``None`` with a
+    caveat when the pattern cannot be ranked. Raises ``KeyError(source)`` for an unknown source."""
     by_source = {c.source: c for c in candidates if c.sticks is not None}
     for source in selected:
         if source not in by_source:
             raise KeyError(source)
-    settings = background_settings(background)
     ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
-                           excluded_ranges=excluded_ranges, background=settings)
-    if ctx is None:
-        return {"explained": None, "steps": [], "profile": None, "unexplained_peaks": [], "next": [],
-                "background": {"settings": settings}, "caveats": [caveat]}
+                           excluded_ranges=excluded_ranges, background=background)
     steps, lines = [], []
+    if ctx is None:
+        return None, by_source, steps, lines, caveat
     for source in selected:
         result = _score(ctx, by_source[source])
         model = None if result is None else result["model"]
@@ -992,18 +1031,73 @@ def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu",
         if model is not None:
             lines.append(_line_positions(ctx, by_source[source], result))
             _subtract(ctx, model)
-    keys = {(by_source[s].formula, by_source[s].spacegroup) for s in selected}
-    rows = _score_rows(ctx, list(by_source.values()), keys)
-    lo, hi = ctx.profile.lo, ctx.profile.hi
-    return {
-        "explained": round(1.0 - float(ctx.residual.sum()) / ctx.total, 4),
-        "steps": steps,
-        "profile": _decimated(ctx.x, ctx.residual),
-        "background": background_view(ctx.profile, settings),
-        "unexplained_peaks": residual_maxima(ctx, np.concatenate(lines) if lines else ()),
-        "next": [_row_payload(i + 1, row, ctx.lam1, lo, hi) for i, row in enumerate(rows[:max_rows])],
-        "caveats": [],
-    }
+    return ctx, by_source, steps, lines, None
+
+
+PEAK_CANDIDATES = 6
+
+
+def peak_candidates(angles, intensities, candidates, selected, two_theta: float, *, wavelength="Cu", wmin=None,
+                    wmax=None, excluded_ranges=None, background=None, exclude=(), limit: int = PEAK_CANDIDATES,
+                    scored=None) -> dict:
+    """Candidates of the pool with a strong line at one unexplained peak: the d-spacing lookup of a
+    classical search-match (phases with a strong line at a given d), restricted to this pool.
+
+    After the ``selected`` models are subtracted (:func:`residual_step`), each candidate is fitted to
+    the residual as the ranking fits it; it qualifies when one of its strong lines (``strong_rel``
+    of its strongest in range) lies, at the fitted lattice scale and shift, within ``window_hw_deg``
+    of ``two_theta`` (K-alpha1). The selection's (formula, space group) groups and those of the
+    ``exclude`` sources (their alternatives) are left out. Rows are grouped as the ranking groups
+    them and ordered by what they explain of the residual, then by the line's relative intensity;
+    each row is a ranking row plus ``line`` ``{two_theta, d, rel}``. Returns ``{two_theta, d,
+    candidates, total, caveats}`` (``total``: rows before the ``limit``). ``scored``: the
+    ``_scored`` of :func:`residual_step` for the same ``selected`` (nothing is scored again).
+    """
+    lam1, _ = wavelength_lines(wavelength)
+    head = {"two_theta": round(float(two_theta), 3), "d": round(_d_spacing(float(two_theta), lam1), 4)}
+    by_source = {c.source: c for c in candidates if c.sticks is not None}
+    keys = {(by_source[s].formula, by_source[s].spacegroup) for s in [*selected, *exclude] if s in by_source}
+    hw = CONFIG.window_hw_deg
+    if scored is not None and tuple(scored["selected"]) == tuple(selected):
+        lo, hi, pairs = scored["lo"], scored["hi"], scored["pairs"]
+    else:
+        ctx, by_source, _, _, caveat = _after_selection(
+            angles, intensities, candidates, selected, wavelength=wavelength, wmin=wmin, wmax=wmax,
+            excluded_ranges=excluded_ranges, background=background_settings(background))
+        if ctx is None:
+            return {**head, "candidates": [], "total": 0, "caveats": [caveat]}
+        lo, hi = ctx.profile.lo, ctx.profile.hi
+        s_lo, s_hi = CONFIG.scale_range
+        near = []
+        for cand in by_source.values():
+            tt, weight, d = cand.sticks
+            inside = (tt > lo + CONFIG.edge_margin_deg) & (tt < hi - CONFIG.edge_margin_deg)
+            if (cand.formula, cand.spacegroup) in keys or not inside.any():
+                continue
+            # cheap test first: can a strong line reach the peak anywhere on the lattice grid?
+            reach = (_positions(d, s_hi, -CONFIG.shift_max_deg, lam1)[0] <= two_theta + hw) & (
+                _positions(d, s_lo, CONFIG.shift_max_deg, lam1)[0] >= two_theta - hw)
+            if (reach & (weight / weight[inside].max() >= CONFIG.strong_rel)).any():
+                near.append(cand)
+        pairs = _score_all(ctx, near, keys)
+    found = []
+    for cand, result in pairs:
+        if (cand.formula, cand.spacegroup) in keys or result.get("rel") is None:
+            continue
+        d = cand.sticks[2]
+        pos, ok = _positions(d, result["scale"], result["shift"], lam1)
+        hit = np.flatnonzero(ok & (result["rel"] >= CONFIG.strong_rel) & (np.abs(pos - two_theta) <= hw))
+        if not len(hit):
+            continue
+        i = hit[np.argmax(result["rel"][hit])]
+        line = {"two_theta": round(float(pos[i]), 3), "d": round(float(d[i] * result["scale"]), 4),
+                "rel": round(float(result["rel"][i]), 3)}
+        found.append((cand, {**result, "line": line}))
+    rows = group_rows(found, flags=False)
+    rows.sort(key=lambda row: (-row["best"]["score"], -row["best"]["line"]["rel"]))
+    payload = [{**_row_payload(i + 1, row, lam1, lo, hi), "line": row["best"]["line"]}
+               for i, row in enumerate(rows[:limit])]
+    return {**head, "candidates": payload, "total": len(rows), "caveats": []}
 
 
 @lru_cache(maxsize=4096)

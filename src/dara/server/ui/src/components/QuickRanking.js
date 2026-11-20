@@ -2,14 +2,14 @@ import React, { useEffect, useRef, useState } from 'react';
 import Loadable from 'react-loadable';
 import styled from 'styled-components';
 import { Alert, Button, Popover, Progress, Radio, Slider, Spin, Switch, Table, Tag, Tooltip } from 'antd';
-import { ArrowLeftOutlined, CloseOutlined, PlusOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, CloseOutlined, DownOutlined, PlusOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import ChemicalFormula from './ChemicalFormula';
 import { progressPercent } from './structureLibrary.mjs';
 import {
-  MAX_REFINE, SORTERS, assignColors, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
+  MAX_REFINE, SORTERS, assignColors, backgroundLabel, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
   progressText, rankingNotes, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, suggestedKeys, toggleKey,
-  mismatchView, startingPoints, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withPoints, withResidualProfile, zoomWindow,
-  alternativeGroups, alternativeOf, alternativeRecords,
+  mismatchView, poolSources, startingPoints, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withPoints, withResidualProfile, zoomWindow,
+  alternativeGroups, alternativeOf, alternativeRecords, unexplainedRows, peakTitle, peakCandidateRows, withPreviewRow,
 } from './quickRanking.mjs';
 import { addAnchor, anchorError, curveWarnings, pchip, removeAnchor } from './backgroundAnchors.mjs';
 import { BackgroundCurvePanel } from './BackgroundEditor';
@@ -251,21 +251,24 @@ async function backgroundView(jobId, settings) {
 }
 
 /**
- * HighScore's "Determine Background" for the search-match: the default method, or Sonneveld & Visser
- * with HighScore's granularity and bending factor. While the sliders move, the curve is drawn on the
- * pattern (`onPreview(view)`, debounced, from the finished job's pattern); "Accept" ranks again with them.
- * HighScore's manual mode (base points set by hand) is "Edit points" on the plot; Accept here replaces them.
+ * The one Background control of the search-match (HighScore's "Determine Background"; the fit view's
+ * Background uses the same words): show the curve on the plot, and the method: Automatic, Sonneveld &
+ * Visser with HighScore's granularity and bending factor, or Manual points dragged on the plot. While
+ * the sliders move, the curve is drawn on the pattern (`onPreview(view)`, debounced, from the finished
+ * job's pattern); "Accept and rank again" ranks with it; Manual points opens the point editor (`onManual`).
  */
-function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
+function BackgroundForm({ initial, jobId, onAccept, onPreview, shown, onShow, onManual }) {
   const points = initial?.anchors?.length || 0;
-  const [settings, setSettings] = useState(() => backgroundSettings(initial));
+  const [settings, setSettings] = useState(() => ({ ...backgroundSettings(initial), ...(points ? { method: 'manual' } : {}) }));
   const [previewError, setPreviewError] = useState('');
   const set = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
-  const tuned = settings.method === 'sonneveld_visser';
-  const chosen = tuned ? settings : { method: 'auto' };
+  const manual = settings.method === 'manual';
+  // One automatic method (Sonneveld & Visser); default values are sent as "auto".
+  const tuned = !manual && (settings.granularity !== 20 || settings.bending_factor !== 0);
+  const chosen = tuned ? { ...settings, method: 'sonneveld_visser' } : { method: 'auto' };
   const chosenKey = JSON.stringify(chosen);
   useEffect(() => {
-    if (!jobId) return undefined;
+    if (!jobId || manual) return undefined;
     let current = true;
     const timer = setTimeout(async () => {
       try {
@@ -277,20 +280,25 @@ function BackgroundForm({ initial, jobId, onAccept, onPreview }) {
     }, 300);
     return () => { current = false; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, chosenKey]);
+  }, [jobId, chosenKey, manual]);
   return <div className="dara-qr-bg-form">
-    <Radio.Group size="small" value={settings.method} optionType="button" onChange={event => set('method', event.target.value)}
-      options={[{ value: 'auto', label: 'Automatic' }, { value: 'sonneveld_visser', label: 'Granularity / bending' }]} />
-    <label htmlFor="dara-qr-granularity">Granularity <span className="dara-num">{settings.granularity}</span></label>
-    <Slider id="dara-qr-granularity" min={2} max={200} value={settings.granularity} disabled={!tuned}
-      onChange={value => set('granularity', value)} tooltip={{ formatter: null }} />
-    <label htmlFor="dara-qr-bending">Bending factor <span className="dara-num">{settings.bending_factor}</span></label>
-    <Slider id="dara-qr-bending" min={0} max={50} step={0.5} value={settings.bending_factor} disabled={!tuned}
-      onChange={value => set('bending_factor', value)} tooltip={{ formatter: null }} />
-    {previewError ? <p className="dara-qr-bg-error" role="alert">{`Curve preview unavailable: ${previewError}`}</p> : null}
-    {points ? <p className="dara-qr-bg-note">{`In use: ${points} base points set by hand. Accept replaces them with this curve.`}</p> : null}
-    <p className="dara-qr-bg-note">Base points (Edit points on the plot) change the search-match only; a Rietveld refinement fits its own background.</p>
-    <Button type="primary" size="small" onClick={() => onAccept(chosen)}>Accept and rank again</Button>
+    {onShow ? <label className="dara-qr-bg-show"><Switch size="small" checked={shown} onChange={onShow} />Show on plot</label> : null}
+    <Radio.Group size="small" value={manual ? 'manual' : 'auto'} optionType="button" onChange={event => set('method', event.target.value)} aria-label="Background method"
+      options={[{ value: 'auto', label: 'Automatic' }, ...(onManual ? [{ value: 'manual', label: 'Manual points' }] : [])]} />
+    {!manual ? <>
+      <label htmlFor="dara-qr-granularity">Granularity <span className="dara-num">{settings.granularity}</span></label>
+      <Slider id="dara-qr-granularity" min={2} max={200} value={settings.granularity}
+        onChange={value => set('granularity', value)} tooltip={{ formatter: null }} />
+      <label htmlFor="dara-qr-bending">Bending factor <span className="dara-num">{settings.bending_factor}</span></label>
+      <Slider id="dara-qr-bending" min={0} max={50} step={0.5} value={settings.bending_factor}
+        onChange={value => set('bending_factor', value)} tooltip={{ formatter: null }} />
+      {tuned ? <Button type="link" size="small" onClick={() => setSettings(previous => ({ ...previous, granularity: 20, bending_factor: 0 }))}>Default (20, 0)</Button> : null}
+    </> : null}
+    {previewError && !manual ? <p className="dara-qr-bg-error" role="alert">{`Curve preview unavailable: ${previewError}`}</p> : null}
+    {points && !manual ? <p className="dara-qr-bg-note">{`Replaces the ${points} manual points.`}</p> : null}
+    <p className="dara-qr-bg-note">Search-match only; a Rietveld refinement fits its own background.</p>
+    {manual ? <Button type="primary" size="small" onClick={onManual}>Edit points on the plot</Button>
+      : <Button type="primary" size="small" onClick={() => onAccept(chosen)}>Accept and rank again</Button>}
   </div>;
 }
 
@@ -300,6 +308,8 @@ const HELP = {
   rest: 'Share of the intensity the selected phases leave unexplained that this structure explains',
   peaks: 'Strong calculated peaks found in the pattern / strong peaks in range',
   lattice: 'Lattice change that fits best (d scale − 1)',
+  line: 'Relative intensity of this structure\'s line at the peak (% of its strongest line)',
+  height: 'Net intensity left at the peak after the selected phases (counts)',
   flags: 'picked: in the suggestion · weak: small share of the pattern · polymorph: other structures of the formula ranked · theoretical: computed only (MP) · variant of: same structure as a higher row',
 };
 
@@ -308,19 +318,98 @@ const SpaceGroup = ({ row }) => (row.spacegroup_symbol
   ? <><ChemicalFormula formula={row.spacegroup_symbol} />{` (${row.spacegroup})`}</> : String(row.spacegroup ?? '—'));
 
 /**
- * What the selected phases leave: the number of unexplained peaks (the selection's status) and the
- * best matches for the remaining peaks, each with "Add".
+ * The pool's candidates with a strong line at one unexplained peak (the d-spacing lookup of a classical
+ * search-match), inline under the peak's row so the plot and the previewed sticks stay in view.
+ * Hovering or focusing a row previews its sticks; "Add" selects it. Esc, a click outside or the close
+ * button dismisses it with nothing changed.
  */
-function ResidualPanel({ residual, rows, selected, setSelected }) {
+function PeakCandidates({ peak, lookup, rows, selected, onAdd, onPreview, onClose }) {
+  const panel = useRef(null);
+  useEffect(() => {
+    const outside = event => {
+      // a peak row toggles the panel itself; a marker click on the plot selects another peak
+      if (panel.current && !panel.current.contains(event.target) && !event.target.closest?.('.dara-qr-peak-row')) onClose(false);
+    };
+    const escape = event => { if (event.key === 'Escape') onClose(true); };
+    document.addEventListener('mousedown', outside);
+    document.addEventListener('keydown', escape);
+    return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape); };
+  }, [onClose]);
+  // Bring the panel into view inside the side column only (the plot keeps its place).
+  useEffect(() => {
+    const box = panel.current?.closest('aside');
+    if (!box) return;
+    const below = panel.current.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom;
+    if (below > 0) box.scrollTop += below + 8;
+  }, [lookup]);
+  const found = lookup?.data ? peakCandidateRows(lookup.data, rows) : [];
+  const full = selected.length >= MAX_REFINE;
+  let content;
+  if (!lookup) content = <p className="dara-qr-empty is-stale">Looking up candidates…</p>;
+  else if (lookup.error) content = <p className="dara-qr-empty" role="alert">{lookup.error}</p>;
+  else if (!found.length) {
+    content = <><p className="dara-qr-peak-none">No candidate in the pool has a line here</p>
+      <p className="dara-qr-empty">It may be a phase outside the entered elements or missing from COD / MP, a Kβ or tungsten line, or the sample holder.</p></>;
+  } else {
+    content = <ul onMouseLeave={() => onPreview(null)}>
+      <li className="dara-qr-list-head"><span>Phase</span>
+        <Tooltip title={HELP.line}><span className="dara-num">Line</span></Tooltip>
+        <Tooltip title={HELP.peaks}><span className="dara-num">Peaks</span></Tooltip>
+        <Tooltip title={HELP.rest}><span className="dara-num">Explains</span></Tooltip><span /></li>
+      {found.map(row => <li key={row.key} onMouseEnter={() => onPreview(row)} onFocus={() => onPreview(row)}>
+        <div className="dara-qr-phase">
+          <div><ChemicalFormula formula={row.formula} /></div>
+          <div className="meta"><span className="dara-nowrap"><SpaceGroup row={row} /></span>{' · '}<span className="dara-nowrap">{row.sourceLabel}</span></div>
+        </div>
+        <span className="dara-num" aria-label={`Line ${row.lineText} at ${row.line?.two_theta}°`}>{row.lineText}</span>
+        <span className="dara-num" aria-label={`Peaks ${row.peaksText}`}>{row.peaksText}</span>
+        <span className="dara-num" aria-label={`Explains ${row.scoreText} of the rest`}>{row.scoreText}</span>
+        <Tooltip title={!row.inRanking ? 'Not in the ranked list' : full ? `At most ${MAX_REFINE} phases` : null}>
+          <Button size="small" icon={<PlusOutlined />} disabled={!row.inRanking || full}
+            aria-label={`Add ${row.formula} ${row.sourceLabel}`} onClick={() => onAdd(row.key)}>Add</Button>
+        </Tooltip>
+      </li>)}
+    </ul>;
+  }
+  return <div className="dara-qr-peak-panel" ref={panel} id={`dara-qr-peak-${peak.key}`} role="region" aria-label={peakTitle(peak)}
+    aria-busy={!lookup || undefined}>
+    <div className="dara-qr-peak-title"><b>{peakTitle(peak)}</b>
+      <Button type="text" size="small" icon={<CloseOutlined />} aria-label="Close" onClick={() => onClose(true)} /></div>
+    {content}
+  </div>;
+}
+
+/**
+ * What the selected phases leave: the number of unexplained peaks (the selection's status), the
+ * peaks themselves (a click looks up the candidates with a line there) and the best matches for the
+ * remaining peaks, each with "Add".
+ */
+function ResidualPanel({ residual, rows, selected, setSelected, peak, onPeak, peakLookup }) {
   if (!residual) return <section className="dara-qr-left" aria-label="What is left"><p className="dara-qr-left-status is-stale">Checking what is left…</p></section>;
   if (residual.error) return <section className="dara-qr-left" aria-label="What is left"><p className="dara-qr-empty">{residual.error}</p></section>;
   const left = residual.data;
-  const open = (left.unexplained_peaks || []).length > 0;
+  const peaks = unexplainedRows(left);
+  const open = peaks.length > 0;
   const next = nextMatches(left, rows);
   return <section className="dara-qr-left" aria-label="What is left" aria-busy={residual.stale || undefined}>
-    <Tooltip title={open ? `At ${left.unexplained_peaks.map(peak => `${Number(peak[0]).toFixed(2)}°`).join(', ')} (marked on the plot; click a marker to zoom)` : 'Every peak of the pattern is explained by the selected phases'}>
-      <p className={`dara-qr-left-status${open ? ' is-open' : ''}${residual.stale ? ' is-stale' : ''}`} role="status">{unexplainedStatus(left)}</p>
-    </Tooltip>
+    <p className={`dara-qr-left-status${open ? ' is-open' : ''}${residual.stale ? ' is-stale' : ''}`} role="status">{unexplainedStatus(left)}</p>
+    {open ? <ul className="dara-qr-peaks">
+      <li className="dara-qr-list-head"><span className="dara-num">2θ (°)</span><span className="dara-num">d (Å)</span>
+        <Tooltip title={HELP.height}><span className="dara-num">Height</span></Tooltip></li>
+      {peaks.map(item => {
+        const shown = peak?.key === item.key;
+        return <li key={item.key}>
+          <button type="button" className="dara-qr-peak-row" aria-expanded={shown} aria-controls={shown ? `dara-qr-peak-${item.key}` : undefined}
+            data-peak={item.key} title="Candidates with a line at this peak" onClick={() => onPeak(shown ? null : item)}>
+            <span className="dara-num">{item.x.toFixed(2)}</span>
+            <span className="dara-num">{Number.isFinite(item.d) ? item.d.toFixed(3) : '—'}</span>
+            <span className="dara-num">{Math.round(item.height).toLocaleString('en-US')}</span>
+          </button>
+          {shown ? <PeakCandidates peak={item} lookup={peakLookup.state} rows={rows} selected={selected}
+            onAdd={peakLookup.add} onPreview={peakLookup.preview} onClose={peakLookup.close} /> : null}
+        </li>;
+      })}
+    </ul> : null}
     {open && next.length ? <>
       <ul className="dara-qr-next">
         <li className="dara-qr-list-head"><span>Next best match</span><Tooltip title={HELP.peaks}><span className="dara-num">Peaks</span></Tooltip>
@@ -383,7 +472,9 @@ const Workspace = styled.section`
   .dara-qr-wait { display: flex; flex-direction: column; justify-content: center; align-items: flex-start; gap: 12px; padding: 0 24px; }
   .dara-qr-wait .ant-progress { width: min(480px, 100%); }
   .dara-qr-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 340px); gap: 16px; align-items: start; }
-  .dara-qr-body > aside { position: sticky; top: 16px; }
+  /* Sticky beside the table, and scrollable itself so an open peak lookup is never cut off. */
+  .dara-qr-body > aside { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
+  .dara-nowrap { white-space: nowrap; }
   .dara-qr-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 8px; }
   .dara-qr-toolbar label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
   .dara-qr-pool { margin-left: auto; color: var(--dara-text-secondary); font-size: var(--dara-font-12); }
@@ -429,12 +520,34 @@ const Workspace = styled.section`
   .dara-qr-left-status { margin: 0 0 8px; font-weight: 600; }
   .dara-qr-left-status.is-open { color: var(--dara-review); }
   .dara-qr-left-status.is-stale { opacity: 0.6; }
+  /* Unexplained peaks: one button per peak; its candidates open inline under it. */
+  .dara-qr-selected .dara-qr-peaks { margin: 0 0 8px; }
+  .dara-qr-selected .dara-qr-peaks > li { display: block; padding: 0; }
+  .dara-qr-selected .dara-qr-peaks > li.dara-qr-list-head, .dara-qr-peak-row {
+    display: grid; grid-template-columns: 64px 64px minmax(0, 1fr); gap: 0 8px; align-items: center;
+  }
+  .dara-qr-selected .dara-qr-peaks > li.dara-qr-list-head { padding: 0 8px 2px 0; }
+  .dara-qr-peak-row {
+    width: 100%; padding: 3px 8px 3px 0; border: 0; border-radius: var(--dara-radius); background: none;
+    font: inherit; color: inherit; text-align: left; cursor: pointer;
+  }
+  .dara-qr-peak-row:hover { background: var(--dara-surface-sunken); }
+  .dara-qr-peak-row[aria-expanded="true"] { background: var(--dara-accent-bg); color: var(--dara-accent-hover); font-weight: 600; }
+  .dara-qr-peak-row:focus-visible { outline: 2px solid var(--dara-accent); outline-offset: -2px; }
+  .dara-qr-peak-panel { margin: 2px 0 6px; padding: 6px 8px 8px; background: var(--dara-surface-sunken); border-radius: var(--dara-radius); }
+  .dara-qr-peak-title { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 4px; font-size: var(--dara-font-12); }
+  .dara-qr-peak-title b { font-weight: 600; }
+  .dara-qr-selected .dara-qr-peak-panel li { grid-template-columns: minmax(0, 1fr) 36px 40px 40px auto; gap: 0 6px; }
+  .dara-qr-selected .dara-qr-peak-panel li:hover { background: var(--dara-surface); }
+  .dara-qr-peak-panel .dara-qr-empty { font-size: var(--dara-font-12); }
+  .dara-qr-peak-none { margin: 0 0 2px; font-weight: 600; }
+  .dara-qr-empty.is-stale { opacity: 0.6; }
   .dara-qr-plot-tools { display: inline-flex; align-items: center; gap: 12px; }
   .dara-qr-plot-tools label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   .dara-qr-body.single { grid-template-columns: minmax(0, 1fr); }
   @media (max-width: 1079px) {
     .dara-qr-body { grid-template-columns: minmax(0, 1fr); }
-    .dara-qr-body > aside { position: static; }
+    .dara-qr-body > aside { position: static; max-height: none; }
   }
 `;
 
@@ -454,6 +567,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const [zoom, setZoom] = useState({ range: null, revision: 0 }); // a click on an unexplained-peak marker zooms there
   const [points, setPoints] = useState(null); // {anchors, selected} while the base points are edited
   const [pointsPreview, setPointsPreview] = useState(null); // {key, view} | {key, error}: the server's curve through them
+  const [peak, setPeak] = useState(null); // the unexplained peak whose candidates are shown ({x, d, height, key})
+  const [peakLookup, setPeakLookup] = useState(null); // {key, data} | {key, error} of `peak`
+  const [peakPreview, setPeakPreview] = useState(null); // a peak candidate row previewed on the plot
 
   const data = state.status === 'done' ? state.data : null;
   const rows = rankingRows(data);
@@ -572,29 +688,77 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
 
   const canRefine = selected.length > 0 && !over && !!data;
   const left = residual?.data || null;
-  // 2 % of the strongest net intensity: the markers sit just above the axis, inside the plot area.
-  const markerLevel = 0.02 * Math.max(0, ...((data?.profile?.net || []).filter(Number.isFinite)));
   const bounds = data?.profile ? [data.profile.two_theta?.[0], data.profile.two_theta?.slice(-1)[0]] : null;
+  const shownData = showResidual && left ? withResidualProfile(data, left) : data;
+
+  // The candidates with a line at one unexplained peak: looked up when a peak is chosen (a list row or
+  // a marker), from the finished job's pool scored for this selection. A new selection closes it.
+  const jobId = data?.job_id;
+  const selectionKey = selected.join('|');
+  useEffect(() => { setPeak(null); setPeakPreview(null); }, [jobId, selectionKey]);
+  useEffect(() => {
+    if (!peak || !jobId) { setPeakLookup(null); return undefined; }
+    let current = true;
+    setPeakLookup(null);
+    (async () => {
+      try {
+        const response = await fetch(`${URL}/quick-ranking/${jobId}/peak-candidates`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ two_theta: peak.x, selected }),
+        });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(response.status === 404 ? 'This search-match has expired: run it again.' : body.detail || `HTTP ${response.status}`);
+        if (current) setPeakLookup({ key: peak.key, data: body });
+      } catch (error) {
+        if (current) setPeakLookup({ key: peak.key, error: String(error.message || error) });
+      }
+    })();
+    return () => { current = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [peak?.key, jobId]);
+  const zoomTo = x => {
+    const range = zoomWindow(x, bounds);
+    // The intensity axis follows the window, so a small peak fills the plot.
+    const y = windowRange(shownData.profile, range);
+    // ...and keeps the unexplained-peak markers above the data in view
+    const marks = unexplainedMarkers(left?.unexplained_peaks, shownData.profile);
+    const mark = Math.max(0, ...marks.y.filter((_, i) => marks.x[i] >= range[0] && marks.x[i] <= range[1]));
+    setZoom(previous => ({ range, y: y && mark ? [0, Math.max(y[1], mark * 1.06)] : y, revision: previous.revision }));
+  };
+  const choosePeak = item => {
+    setPeakPreview(null);
+    setPeak(item);
+    if (item) zoomTo(item.x);
+  };
+  const lookup = {
+    state: peakLookup && peak && peakLookup.key === peak.key ? peakLookup : null,
+    preview: setPeakPreview,
+    add: key => { setPeak(null); setPeakPreview(null); setSelected([...selected, key]); },
+    close: React.useCallback(restoreFocus => {
+      const key = peak?.key;
+      setPeak(null);
+      setPeakPreview(null);
+      if (restoreFocus && key) requestAnimationFrame(() => document.querySelector(`.dara-qr-peak-row[data-peak="${key}"]`)?.focus());
+    }, [peak?.key]),
+  };
   // The background view (when the server sends the curve) shows the measured pattern with the
   // background the ranking removed; the sticks belong to the net scale and stay in the other views.
   const withBackground = pointTraces || (backgroundPreview ? backgroundTraces(backgroundPreview) : showBackground ? backgroundTraces(data?.background) : null);
   // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
-  const traces = withBackground || !data ? withBackground || [] : [...overlayTraces(showResidual && left ? withResidualProfile(data, left) : data, showResidual && left ? [] : selected, colors, focused),
-    ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, markerLevel)] : [])];
-  // A click on an unexplained-peak marker zooms there. The hovered point can be the pattern's (closest
-  // in 2-D), so a click within 0.3° of a marker, by the 2θ under the mouse, counts as well.
+  // A peak candidate under the mouse previews its sticks (fitted to what is left) in place of the table's preview.
+  const traces = withBackground || !data ? withBackground || [] : [...overlayTraces(withPreviewRow(shownData, peakPreview), showResidual && left ? [] : selected, colors, peakPreview?.key ?? focused),
+    ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, shownData.profile, peak?.x)] : [])];
+  // A click on an unexplained-peak marker zooms there and lists its candidates. The hovered point can be
+  // the pattern's (closest in 2-D), so a click within 0.3° of a marker, by the 2θ under the mouse, counts as well.
   const onPlotClick = event => {
     if (withBackground) return; // no unexplained-peak markers in the background view
     const point = event?.points?.find(item => item.data?.meta === 'unexplained');
-    const near = (left?.unexplained_peaks || []).map(peak => Number(peak[0]))
-      .filter(x => Number.isFinite(event?.cursorX) && Math.abs(x - event.cursorX) <= 0.3)
-      .sort((x, y) => Math.abs(x - event.cursorX) - Math.abs(y - event.cursorX))[0];
-    const x = point ? Number(point.x) : near;
-    if (!Number.isFinite(x)) return;
-    const range = zoomWindow(x, bounds);
-    // The intensity axis follows the window, so a small peak fills the plot.
-    const shownProfile = (showResidual && left ? withResidualProfile(data, left) : data).profile;
-    setZoom(previous => ({ range, y: windowRange(shownProfile, range), revision: previous.revision }));
+    const near = unexplainedRows(left)
+      .filter(item => Number.isFinite(event?.cursorX) && Math.abs(item.x - event.cursorX) <= 0.3)
+      .sort((a, b) => Math.abs(a.x - event.cursorX) - Math.abs(b.x - event.cursorX))[0];
+    const item = point ? unexplainedRows(left).find(row => Math.abs(row.x - Number(point.x)) < 1e-6) : near;
+    if (!item) return;
+    choosePeak(item);
+    requestAnimationFrame(() => document.querySelector(`.dara-qr-peak-row[data-peak="${item.key}"]`)?.scrollIntoView({ block: 'nearest' }));
   };
   let body;
   if (state.status === 'pending') {
@@ -624,29 +788,33 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
         <div>
           <section className="dara-qr-panel dara-qr-plot" aria-label="Measured pattern and reference sticks">
             <div className="dara-qr-plot-head">
-              <span>{focusedRow
-                ? <><span className="dara-qr-preview-mark" />Preview <b><ChemicalFormula formula={focusedRow.formula} /></b>
-                  {` · ${focusedRow.sourceLabel}`}{selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
-                : 'Click a row to preview its sticks'}</span>
+              <span>{peakPreview || focusedRow
+                ? <><span className="dara-qr-preview-mark" />Preview <b><ChemicalFormula formula={(peakPreview || focusedRow).formula} /></b>
+                  {` · ${(peakPreview || focusedRow).sourceLabel}`}{!peakPreview && selected.includes(focusedRow.key) ? ' (selected)' : ''}</>
+                : null}</span>
               <span className="dara-qr-plot-tools">
-                {backgroundTraces(data.background) ? <label><Switch size="small" checked={showBackground || Boolean(backgroundPreview) || Boolean(points)}
-                  onChange={value => { setShowBackground(value); if (!value) setPoints(null); }} aria-label="Show the background" />Background</label> : null}
-                {showBackground && !points && backgroundTraces(data.background) ? <Tooltip title="Set the background by hand: drag, add and remove base points on the curve (search-match only)">
-                  <Button size="small" onClick={startPoints}>Edit points</Button>
-                </Tooltip> : null}
-                {data.background?.settings && !points ? <Popover trigger="click" placement="bottomRight" title="Determine background" open={backgroundOpen}
-                  onOpenChange={value => { setBackgroundOpen(value); if (!value) setBackgroundPreview(null); }} destroyTooltipOnHide
-                  content={<BackgroundForm initial={data.background.settings} jobId={data.job_id} onPreview={setBackgroundPreview} onAccept={settings => {
-                    setBackgroundOpen(false);
-                    setBackgroundPreview(null);
-                    setShowBackground(true);
-                    quick.rankWithBackground(settings);
-                  }} />}>
-                  <Button size="small">Background…</Button>
-                </Popover> : null}
-                <Tooltip title={selected.length ? 'Measured minus the selected phases (the residual net pattern)' : 'Select phases first'}>
-                  <label><Switch size="small" checked={showResidual && Boolean(left)} disabled={!left || Boolean(withBackground)} onChange={setShowResidual} aria-label="Show the residual" />Residual</label>
+                {/* What the plot shows: the net pattern or what the selected phases leave (one choice). */}
+                <Tooltip title={withBackground ? 'The background is shown: turn it off under Background' : null}>
+                  <Radio.Group size="small" optionType="button" aria-label="Plot view" disabled={Boolean(withBackground)}
+                    value={showResidual && left ? 'residual' : 'net'} onChange={event => setShowResidual(event.target.value === 'residual')}
+                    options={[{ value: 'net', label: 'Pattern' },
+                      { value: 'residual', disabled: !left, label: <Tooltip title={left ? 'Measured minus the selected phases' : 'Select phases first'}>Residual</Tooltip> }]} />
                 </Tooltip>
+                {/* One Background control: show the curve, the method (automatic, granularity / bending, manual points), rank again. */}
+                {data.background?.settings ? <Popover trigger="click" placement="bottomRight" title="Background" open={backgroundOpen && !points}
+                  onOpenChange={value => { setBackgroundOpen(value); if (!value) setBackgroundPreview(null); }} destroyTooltipOnHide
+                  content={<BackgroundForm initial={data.background.settings} jobId={data.job_id} onPreview={setBackgroundPreview}
+                    shown={showBackground} onShow={backgroundTraces(data.background) ? setShowBackground : null}
+                    onManual={backgroundTraces(data.background) ? () => { setBackgroundOpen(false); setBackgroundPreview(null); startPoints(); } : null}
+                    onAccept={settings => {
+                      setBackgroundOpen(false);
+                      setBackgroundPreview(null);
+                      setShowBackground(true);
+                      quick.rankWithBackground(settings);
+                    }} />}>
+                  <Button size="small" disabled={Boolean(points)} aria-haspopup="dialog">
+                    {points ? 'Background: editing points' : backgroundLabel(data.background.settings)} <DownOutlined /></Button>
+                </Popover> : null}
                 {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
               </span>
             </div>
@@ -666,7 +834,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
             {pointsEdit ? <BackgroundCurvePanel side anchors={points.anchors} selected={points.selected}
               onChange={pointsEdit.onChange} onSelect={pointsEdit.onSelect} onRemove={pointsEdit.onRemove} error={pointsError}
               warnings={[...pointWarnings, ...(shownCurve?.error ? [`Curve preview unavailable: ${shownCurve.error}`] : [])]}
-              help="Drag a point · click the curve to add one · Alt+click a point or use the list to remove one. The points change the search-match only; a Rietveld refinement fits its own background."
+              help="Drag a point · click the curve to add one · Alt+click a point or use the list to remove one. Search-match only."
               submitText="Accept and rank again" resetText="Back to automatic" canReset={Boolean(bgView.settings?.anchors?.length)}
               resetTitle={bgView.settings?.anchors?.length ? 'Rank again with the automatic background' : 'This ranking already uses the automatic background'}
               onSubmit={() => rankWithPoints(points.anchors)} onReset={() => rankWithPoints([])} onCancel={() => setPoints(null)} /> : null}
@@ -677,7 +845,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
               <label><Switch size="small" checked={quick.theoretical} onChange={quick.toggleTheoretical} />Theoretical structures</label>
             </Tooltip>
             <Button size="small" icon={<ReloadOutlined />} onClick={() => quick.start()}>Run again</Button>
-            <span className="dara-qr-pool">{poolText(data)}</span>
+            <Tooltip title={poolSources(data)}><span className="dara-qr-pool">{poolText(data)}</span></Tooltip>
           </div>
           {caveats.length ? <div className="dara-caution-list" role="note"><ul>
             {caveats.map(text => <li key={text}><WarningOutlined />{text}</li>)}</ul></div> : null}
@@ -721,7 +889,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 onClick={() => quick.refine(onRefine, groups[row.key].map(other => other.key))}>Tell apart with Rietveld</Button>
             </Tooltip></div>
           </li> : null])}</ul>
-            : <p className="dara-qr-empty">No phase selected: tick candidates in the table.</p>}
+            : <p className="dara-qr-empty">No phase selected</p>}
           {weakLeft.length ? <p className="dara-qr-weak">
             {'Weak, not selected: '}
             {/* One click adds the one phase it names. */}
@@ -730,7 +898,8 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 aria-label={`Add ${item.formula}`} onClick={() => setSelected([...selected, item.key])}><ChemicalFormula formula={item.formula} /></Button>
             </React.Fragment>)}
           </p> : null}
-          {chosen.length ? <ResidualPanel residual={residual} rows={rows} selected={selected} setSelected={setSelected} /> : null}
+          {chosen.length ? <ResidualPanel residual={residual} rows={rows} selected={selected} setSelected={setSelected}
+            peak={peak} onPeak={choosePeak} peakLookup={lookup} /> : null}
           {over ? <p className="dara-qr-limit">{`At most ${MAX_REFINE} phases: remove ${selected.length - MAX_REFINE}.`}</p> : null}
           {data.combination?.length ? <div className="dara-qr-suggest">
             <p>Suggested: <Suggestion combination={data.combination} /></p>

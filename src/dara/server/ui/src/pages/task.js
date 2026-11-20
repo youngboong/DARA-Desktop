@@ -555,7 +555,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       </div> : null}
       <div className="dara-toolbar-group">
         <Button size="small" onClick={resetView}>Reset zoom</Button>
-        <Tooltip title={`Left-drag to zoom into a box (2θ only while Auto-Y is on), Shift- or right-drag to pan 2θ, mouse wheel to zoom 2θ at the cursor, double-click or Reset zoom to show the whole pattern. Zoom and pan stop at the measured range. Click a phase in the legend to show its profile and Bragg positions; hover for 2θ, d-spacing and hkl. The lower panel shows observed − calculated.${onPeakClick ? ' Click a missing-peak marker or an observed point to search references for that peak (Shift+click to select several).' : ''}`}>
+        <Tooltip title={`Left-drag to zoom into a box (2θ only while Auto-Y is on), Shift- or right-drag to pan 2θ, mouse wheel to zoom 2θ at the cursor, double-click or Reset zoom to show the whole pattern. Zoom and pan stop at the measured range. Click a phase in the legend to show its profile and Bragg positions; hover for 2θ, d-spacing and hkl. The lower panel shows observed − calculated.${onPeakClick ? ' Click a missing-peak marker or an observed point to search references for that peak (Shift+click to select several).' : ''} Press ? for keyboard shortcuts.`}>
           <InfoCircleOutlined aria-label="Plot navigation help" style={{ color: 'var(--dara-text-hint)' }} />
         </Tooltip>
       </div>
@@ -564,7 +564,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
       {treated?.query === treatment && treated.error ? `The treated pattern could not be loaded (${treated.error}); the measured pattern is shown. ` : ''}
       Display only: the fit, the residual and the tables use the measured data.</Text></div> : null}
     <div ref={readoutRef} className="dara-readout" aria-label="Cursor position">
-      <span className="dara-readout-hint">Hover the plot to read 2θ, d and intensity</span>
+      <span className="dara-readout-hint" />
       <span className="dara-readout-value">2θ <b data-k="x">–</b>°</span>
       {wavelength > 0 ? <span className="dara-readout-value">d <b data-k="d">–</b> Å</span> : null}
       <span className="dara-readout-value"><span data-k="n">I</span> <b data-k="i">–</b></span>
@@ -720,7 +720,7 @@ const STOP_STAGE_LABEL = { screening: 'reference screening', search: 'phase sear
 const PRUNE_REASON = { failed: 'refinement failed', negligible: 'below 0.5 wt%', duplicate: 'same phase as a heavier one', removed_no_peak_evidence: 'removing it left no peak unexplained' };
 
 function SearchSummary({ summary = {} }) {
-  if (!Object.keys(summary).length) return <Text type="secondary">Detailed search counts were not stored for this older result.</Text>;
+  if (!Object.keys(summary).length) return <Text type="secondary">Not stored for this result</Text>;
   return <Space size="small" wrap>
     <Tag>{`${summary.screening_results_retained ?? 0} retained tree result(s)`}</Tag>
     <Tag>{`${summary.combinations_evaluated ?? 0} combinations evaluated`}</Tag>
@@ -1687,7 +1687,9 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
         <Descriptions.Item label="Pattern file">{data.task_label}</Descriptions.Item>
         <Descriptions.Item label="Analysis mode">{ANALYSIS_MODE[data.analysis_mode] || data.analysis_mode || (data.use_rxn_predictor ? "Reaction check" : ANALYSIS_MODE.elemental)}</Descriptions.Item>
         <Descriptions.Item label="Run">
-          {runText(data.start_time, data.runtime)}
+          {/* the run's duration is bookkeeping: in the tooltip */}
+          <Tooltip title={Number.isFinite(Number(data.runtime)) && data.runtime !== null ? `Took ${runText('', data.runtime)}` : null}>
+            <span>{runText(data.start_time, null)}</span></Tooltip>
           {searchSummary.stopped_early ? <Tag color="gold" style={{ marginLeft: 8 }}>{`Stopped at time limit (${STOP_STAGE_LABEL[searchSummary.stopped_at_stage] || 'search'})`}</Tag> : null}
         </Descriptions.Item>
         <Descriptions.Item label="Fit quality">
@@ -1761,7 +1763,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
               menu={{ items: [
                 { key: 'phases', label: 'Select phases…', title: 'Choose the phases to refine as a new version' },
                 { key: 'controls', label: 'Refinement controls…', title: 'Preferred orientation, lattice window and peak broadening of the phases' },
-                { key: 'background', label: 'Background…', title: 'Background polynomial and excluded 2θ intervals' },
+                { key: 'background', label: 'Background…', title: 'Automatic, polynomial terms or manual points; excluded 2θ intervals' },
                 // Specialist and indicative: with "Advanced analysis tools" (Help menu) only.
                 ...(advanced ? [{ type: 'divider' },
                   { key: 'structure', label: 'Structure…', title: 'Free atomic positions, B or occupancies of one phase (indicative)' },
@@ -1818,7 +1820,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
               onClose={event => { event.preventDefault(); onPeakClick(peak, true); }}>{`${peak.toFixed(2)}°`}</Tag>)}
             <Button size="small" type={drawerShown ? 'default' : 'primary'} onClick={() => setDrawerOpen(true)}>Add phase for these peaks</Button>
             <Button size="small" onClick={clearPeaks}>Clear</Button>
-          </> : <Text type="secondary">{plotAnnotating ? ANNOTATING_HINT : 'Click a peak to search references for it (Shift+click adds more) · press ? for shortcuts'}</Text>}
+          </> : <Text type="secondary">{plotAnnotating ? ANNOTATING_HINT : 'Click a peak to search references for it; Shift+click adds more'}</Text>}
         </div> : null}
         {/* While the background curve is edited its anchor table sits beside the plot, so a drag never moves the plot. */}
         <div className={curveEdit ? 'dara-plot-with-side' : undefined}>
@@ -1961,7 +1963,7 @@ function SearchSettingsSummary({ data, taskId }) {
     ['Candidate pre-filter', settings ? (s.candidate_prefilter ? 'On' : 'Off') : null],
     ['2θ range', settings ? range : null],
     ['Instrument / Radiation', settings ? `${s.instrument_profile || '—'} · ${s.wavelength || '—'}` : null],
-    ['Run', data.start_time ? runText(data.start_time, data.runtime_s) : null],
+    ['Run', data.start_time ? runText(data.start_time, null) : null],
   ].filter(([, value]) => value);
   const hints = settings ? noFitHints(s, data) : [];
   return <div style={{ maxWidth: 760, margin: '16px auto 0', textAlign: 'left' }}>
@@ -2099,7 +2101,7 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const refined = refinedTasks(data);
   const downloads = [
     ...(reportReady ? [
-      { key: 'report', label: 'Report (PDF + Word)' }, { key: 'report-html', label: 'Report (HTML)' },
+      { key: 'report-formats', label: 'Report', children: [{ key: 'report', label: 'PDF + Word' }, { key: 'report-html', label: 'HTML' }] },
       { key: 'figure', label: 'Figure', children: FIGURE_FILES.map(file => ({
         key: file.key, label: <a href={figureHref(URL, task_id, file.format, undefined, false, file.widthMm)}>{file.label}</a> })) }] : []),
     { key: 'pattern', label: 'Pattern data', children: patternFiles(display).map(file => ({

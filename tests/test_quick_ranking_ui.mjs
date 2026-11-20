@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   MAX_REFINE, SORTERS, assignColors, combinationText, defaultSelection, flagTags, latticePercent, overlayTraces, percent,
-  pollDelay, poolText, progressText as rankingProgress, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo,
+  pollDelay, poolSources, poolText, progressText as rankingProgress, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo,
   toggleKey,
 } from '../src/dara/server/ui/src/components/quickRanking.mjs';
 import {
@@ -49,7 +49,9 @@ assert.equal(rows[0].scoreText, '34 %');
 assert.deepEqual(rankingRows(null), []);
 
 assert.equal(combinationText(response.combination), 'Y2O3 + YFeO3 (weak)', 'phase names only: a gain is no amount');
-assert.equal(poolText(response), 'Ranked 54 candidates (COD 50, MP 4) in 1.2 s · 2 simulated now · 3 not downloaded');
+assert.equal(poolText(response), '54 candidates', 'no timing or cache counts');
+assert.equal(poolSources(response), 'COD 50, MP 4');
+assert.equal(poolSources({}), null);
 
 // selection: weak picks are not ticked by default; refine keeps ranking order
 assert.deepEqual(defaultSelection(response), ['cod:1513300']);
@@ -83,10 +85,9 @@ assert.equal(preview[2].line.dash, 'dot');
 assert.equal(overlayTraces(response, ['cod:1513300'], {}, 'cod:1513300')[1].line.width, 3);
 assert.equal(overlayTraces(response, [], {}, 'nope').length, 1);
 
-// pool line: new optional counts appear only when > 0
-assert.equal(poolText({ ...response, pool: { ...response.pool, downloaded: 12, unavailable: 3, missing_cif: 0, simulated: 0 } }),
-  'Ranked 54 candidates (COD 50, MP 4) in 1.2 s · 12 downloaded now · 3 unavailable');
-assert.equal(poolText({ pool: { candidates: 0, downloaded: 0, unavailable: 0 } }), 'Ranked 0 candidates');
+// pool line: the count only
+assert.equal(poolText({ ...response, pool: { ...response.pool, downloaded: 12, unavailable: 3 } }), '54 candidates');
+assert.equal(poolText({ pool: { candidates: 1 } }), '1 candidate');
 
 // progress: phase, counts and time are optional (old servers send only elapsed_s)
 assert.equal(rankingProgress({ phase: 'downloading', done: 1200, total: 2000, elapsed_s: 8.4 }), 'Downloading structures · 1,200 of 2,000 · 8 s');
@@ -154,7 +155,10 @@ test('residual helpers: status by unexplained peaks, next matches, residual prof
   assert.deepEqual(withResidualProfile({ profile: 'p' }, null).profile, 'p');
   const markers = unexplainedMarkers([[19.3, 400], [31.5, 1300]]);
   assert.deepEqual([markers.x, markers.y, markers.meta], [[19.3, 31.5], [0, 0], 'unexplained']);
-  assert.deepEqual(unexplainedMarkers([[19.3, 400]], 80).y, [80]);
+  // above the top of the shown data near each peak (5 % of the highest point), the selected one larger
+  const shown = unexplainedMarkers([[19.3, 400], [31.5, 1300]], { two_theta: [19.2, 19.3, 25, 31.5], net: [300, 500, 1000, 1300] }, 31.5);
+  assert.deepEqual(shown.y, [565, 1365]);
+  assert.deepEqual([shown.marker.size, shown.marker.color], [[9, 13], ['#874d00', '#3f6c8f']]);
   assert.deepEqual(zoomWindow(11, [10, 100]), [10, 13]);
   assert.deepEqual(zoomWindow(50, [10, 100], 1), [49, 51]);
 });
@@ -173,7 +177,7 @@ test('suggestion: names only, weak picks offered, routine theoretical note in th
   assert.deepEqual(weakNotSelected(response, ['cod:1513300', 'mp:mp-1']), []);
   const withNote = { ...response, caveats: ['21 computed-only (theoretical) Materials Project structures are hidden; tick it.', 'COD unreachable'] };
   assert.deepEqual(rankingNotes(withNote), ['COD unreachable']);
-  assert.match(poolText(withNote), / · 21 theoretical hidden$/);
+  assert.equal(poolText(withNote), '54 candidates'); // the switch says whether they are in
 });
 
 test('wavelength mismatch of a ranking: anode names from either shape', async () => {
@@ -193,7 +197,7 @@ test('background view: measured and background only when the response carries th
   assert.deepEqual(traces.map(trace => trace.name), ['Measured', 'Background']);
   assert.deepEqual(traces[1].y, [10, 10]);
   assert.equal(backgroundTraces({ two_theta: [10, 20], observed: [1], intensity: [1, 2] }), null);
-  assert.deepEqual(backgroundSettings(null), { method: 'auto', granularity: 20, bending_factor: 1 });
+  assert.deepEqual(backgroundSettings(null), { method: 'auto', granularity: 20, bending_factor: 0 });
   assert.deepEqual(backgroundSettings({ method: 'sonneveld_visser', granularity: 400, bending_factor: -1 }),
     { method: 'sonneveld_visser', granularity: 200, bending_factor: 0 });
   assert.equal(backgroundSettings({ method: 'rolling_minimum' }).method, 'auto', 'the server default is "auto"');
@@ -214,7 +218,7 @@ test('manual background: points seeded on the automatic curve, or the ones in us
   assert.deepEqual(startingPoints(undefined), []);
   assert.deepEqual(withPoints({ method: 'sonneveld_visser', granularity: 30, bending_factor: 2, anchors: [[1, 1]] }, inUse),
     { method: 'sonneveld_visser', granularity: 30, bending_factor: 2, anchors: inUse });
-  assert.deepEqual(withPoints({ method: 'auto', anchors: inUse }, []), { method: 'auto', granularity: 20, bending_factor: 1 },
+  assert.deepEqual(withPoints({ method: 'auto', anchors: inUse }, []), { method: 'auto', granularity: 20, bending_factor: 0 },
     'back to automatic drops the points');
 });
 
@@ -246,3 +250,29 @@ test('stored-pattern ranking: the setup options as typed JSON', async () => {
   assert.deepEqual(alternativeRecords({ ranking }, ['cod:1']), [{ source: 'cod:2', formula: 'Ti0.99O2', spacegroup: 141, of: 'cod:1' }]);
   console.log('alternatives ok');
 }
+
+test('background control label: the method in use', async () => {
+  const { backgroundLabel } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  assert.equal(backgroundLabel(null), 'Background: automatic');
+  assert.equal(backgroundLabel({ method: 'sonneveld_visser', granularity: 35 }), 'Background: granularity 35, bending 0');
+  assert.equal(backgroundLabel({ method: 'sonneveld_visser', granularity: 20, bending_factor: 0 }), 'Background: automatic');
+  assert.equal(backgroundLabel({ method: 'auto', anchors: [[10, 1], [20, 2], [30, 3]] }), 'Background: 3 points');
+});
+
+test('peak lookup: peak rows, title, candidate rows and their preview', async () => {
+  const { unexplainedRows, peakTitle, peakCandidateRows, withPreviewRow } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  const peaks = unexplainedRows({ unexplained_peaks: [[31.718, 618.6, 2.8191], [20.4, 762]] });
+  assert.deepEqual(peaks[0], { x: 31.718, height: 618.6, d: 2.8191, key: '31.718' });
+  assert.equal(peaks[1].d, null);
+  assert.equal(peakTitle(peaks[0]), 'Candidates for 2θ 31.72° (d 2.819 Å)');
+  assert.equal(peakTitle(peaks[1]), 'Candidates for 2θ 20.40°');
+  const rows = peakCandidateRows({ candidates: [
+    { formula: 'V2O5', source: 'cod:1', score: 0.048, matched: 13, expected: 15, lattice_scale: 0.998, line: { two_theta: 31.7, d: 2.82, rel: 0.491 }, sticks: [[31.7, 10]] },
+    { formula: 'VIn2O5', source: 'cod:2', score: 0.028, matched: 14, expected: 15, line: { rel: 1 } }] }, [{ key: 'cod:1' }]);
+  assert.deepEqual(rows.map(row => [row.key, row.lineText, row.peaksText, row.scoreText, row.inRanking]),
+    [['cod:1', '49 %', '13/15', '5 %', true], ['cod:2', '100 %', '14/15', '3 %', false]]);
+  assert.deepEqual(peakCandidateRows(null), []);
+  const response = { ranking: [{ source: 'cod:1', sticks: [[30, 1]] }, { source: 'cod:5' }] };
+  assert.deepEqual(withPreviewRow(response, rows[0]).ranking.map(row => [row.source, row.sticks]), [['cod:5', undefined], ['cod:1', [[31.7, 10]]]]);
+  assert.equal(withPreviewRow(response, null), response);
+});

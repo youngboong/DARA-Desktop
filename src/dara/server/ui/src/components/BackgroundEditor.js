@@ -1,5 +1,5 @@
 import React from 'react';
-import { Alert, Button, Checkbox, InputNumber, message, Modal, Popover, Space, Table, Tooltip, Typography } from 'antd';
+import { Alert, Button, InputNumber, message, Modal, Popover, Radio, Space, Table, Tooltip, Typography } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { backgroundRequest } from './versions.mjs';
 import { MIN_ANCHORS } from './backgroundAnchors.mjs';
@@ -8,10 +8,15 @@ const { Text } = Typography;
 
 export { backgroundRequest };
 
+/**
+ * One Background control (the search-match uses the same words): Automatic, Polynomial terms or
+ * Manual points (drawn on the plot), plus the 2θ intervals excluded from the fit.
+ */
 function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }) {
-  // A fit with an explicit degree keeps it unless the user switches to Auto (which resets it).
+  // A fit with an explicit degree keeps it unless the user switches to Automatic (which resets it).
   const hasBase = baseDegree != null && Number.isFinite(Number(baseDegree));
-  const [auto, setAuto] = React.useState(!hasBase);
+  const [method, setMethod] = React.useState(manual ? 'manual' : hasBase ? 'terms' : 'auto');
+  const auto = method !== 'terms';
   const [degree, setDegree] = React.useState(hasBase ? Number(baseDegree) : 8);
   const [ranges, setRanges] = React.useState([]);
   const setRange = (index, position, value) => setRanges(previous => previous.map((range, i) => (i === index
@@ -26,23 +31,27 @@ function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }
     const [lo, hi] = [Math.min(...view), Math.max(...view)];
     setRanges(previous => [...previous, [Number(lo.toFixed(2)), Number(hi.toFixed(2))]]);
   };
-  const request = backgroundRequest({ auto, degree, ranges, baseDegree: hasBase ? Number(baseDegree) : null, manual });
+  const base = { degree, ranges, baseDegree: hasBase ? Number(baseDegree) : null };
+  // Automatic over a manual curve resets it (as "Back to automatic" of the curve panel does).
+  const kept = backgroundRequest({ ...base, auto: true, manual: true }); // the manual curve with new intervals
+  const request = method === 'manual' ? (manual ? kept : null)
+    : manual && method === 'auto' ? { background: { degree: null, excluded_ranges: kept?.background.excluded_ranges || [] },
+      label: ['Background: automatic', ...(kept?.label ? [kept.label] : [])].join('; ') }
+      : backgroundRequest({ ...base, auto, manual: false });
   const invalid = ranges.some(([lo, hi]) => !(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi));
   return <div style={{ width: 360 }}>
     <Space direction="vertical" size="small" style={{ width: '100%' }}>
       <div>
-        <label htmlFor="bg-terms"><strong>Background polynomial terms</strong></label>
-        <div style={{ marginTop: 4 }}>
-          <Space>
-            <Checkbox checked={auto} onChange={event => setAuto(event.target.checked)}>Auto</Checkbox>
-            <InputNumber id="bg-terms" aria-label="Background polynomial terms" min={2} max={20} precision={0}
-              disabled={auto} value={degree} onChange={value => setDegree(value ?? 8)} />
-          </Space>
-        </div>
+        <Radio.Group size="small" optionType="button" value={method} onChange={event => setMethod(event.target.value)} aria-label="Background method"
+          options={[{ value: 'auto', label: 'Automatic' }, { value: 'terms', label: 'Polynomial terms' },
+            ...(onEditCurve || manual ? [{ value: 'manual', label: 'Manual points' }] : [])]} />
+        {method === 'terms' ? <div style={{ marginTop: 6 }}>
+          <InputNumber id="bg-terms" aria-label="Background polynomial terms" min={2} max={20} precision={0}
+            value={degree} onChange={value => setDegree(value ?? 8)} addonAfter="terms" />
+        </div> : null}
       </div>
       <div>
-        <strong>Exclude a hump</strong>
-        <div><Text type="secondary">2θ intervals excluded from the fit</Text></div>
+        <strong>Excluded 2θ intervals</strong>
         {ranges.map((range, index) => <Space key={index} style={{ marginTop: 6 }}>
           <InputNumber aria-label={`Excluded interval ${index + 1} from`} value={range[0]} step={0.5} onChange={value => setRange(index, 0, value)} />
           <span>–</span>
@@ -60,11 +69,9 @@ function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }
         </div>
       </div>
       <Space wrap>
-        <Button type="primary" disabled={!request || invalid || busy} loading={busy}
-          onClick={() => onSubmit(request.background, request.label)}>Refine as new version</Button>
-        {onEditCurve ? <Tooltip title="Draw the background yourself: drag anchor points of the curve on the plot">
-          <Button disabled={busy} onClick={onEditCurve}>Edit curve</Button>
-        </Tooltip> : null}
+        {method === 'manual' && onEditCurve ? <Button type="primary" disabled={busy} onClick={onEditCurve}>Edit points on the plot</Button> : null}
+        {method !== 'manual' || request ? <Button type={method === 'manual' ? 'default' : 'primary'} disabled={!request || invalid || busy} loading={busy}
+          onClick={() => onSubmit(request.background, request.label)}>Refine as new version</Button> : null}
       </Space>
     </Space>
   </div>;
@@ -104,7 +111,7 @@ export function BackgroundCurvePanel({
   anchors, selected = null, onChange, onSelect, onRemove, warnings = [], error = null, busy = false,
   canReset = false, onSubmit, onReset, onCancel, side = false,
   help = 'Drag a point up or down · click the curve to add a point · Alt+click a point or press Delete to remove the selected one',
-  submitText = 'Refine as new version', resetText = 'Reset to automatic',
+  submitText = 'Refine as new version', resetText = 'Back to automatic',
   resetTitle = canReset ? "Refine with BGMN's automatic background polynomial" : 'This fit already uses the automatic background',
 }) {
   const setY = (index, value) => {
@@ -124,7 +131,7 @@ export function BackgroundCurvePanel({
     border: '1px solid var(--dara-border)', borderRadius: 'var(--dara-radius)', background: 'var(--dara-surface-sunken)' }}>
     <Space align="start" wrap size={side ? 'middle' : 'large'} direction={side ? 'vertical' : 'horizontal'} style={{ width: '100%' }}>
       <div style={{ maxWidth: 420 }}>
-        <Text strong>Edit background curve</Text> <Text type="secondary">({anchors.length} points, PCHIP)</Text>
+        <Text strong>Background: manual points</Text> <Text type="secondary">({anchors.length}, PCHIP)</Text>
         <div><Text type="secondary">{help}</Text></div>
         {error ? <Alert type="error" showIcon message={error} style={{ marginTop: 8 }} /> : null}
         {warnings.map(text => <Alert key={text} type="warning" showIcon message={text} style={{ marginTop: 8 }} />)}

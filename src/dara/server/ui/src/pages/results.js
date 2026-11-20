@@ -414,7 +414,7 @@ function ResultsPage({ location }) {
               onClick={() => (fit.ids.length ? exportIds(fit.ids, fit.skipped.length) : confirmExportAll())}>
               <TableOutlined />
               {exporting ? `Exporting ${exporting.done} / ${exporting.total}…`
-                : `Export table (CSV) · ${fit.ids.length || (total ? `all ${total}` : 0)}`}
+                : `Export table (CSV)${fit.ids.length ? ` · ${fit.ids.length}` : ''}`}
             </Dropdown.Button>
             <Dropdown menu={bulkMenu} disabled={!selected.length || busy || zipping} trigger={['click']}>
               <Button loading={busy || zipping}>{zipping ? 'Preparing ZIP…' : `${selected.length} selected`} <DownOutlined /></Button>

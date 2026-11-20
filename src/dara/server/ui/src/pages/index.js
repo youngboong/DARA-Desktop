@@ -196,15 +196,15 @@ const ESTIMATE_ALERT_TYPE = { ok: 'info', long: 'warning', very_long: 'error', u
 
 function EstimateAlert({ estimate, loading, prefilter }) {
   if (!estimate) return loading ? <Alert type="info" showIcon message="Estimating candidates and run time..." style={{ marginBottom: 16 }} /> : null;
-  const { candidates = {}, runtime_s: runtime, workers, suggestions = [], level } = estimate;
+  const { candidates = {}, runtime_s: runtime, suggestions = [], level } = estimate;
   let message = null;
   if (candidates.expected_after_dedup != null) {
     const parts = [];
     if (candidates.cod != null) parts.push(`${candidates.cod} COD`);
     if (candidates.mp != null) parts.push(`${candidates.mp} MP`);
-    message = `Estimated candidates: about ${candidates.expected_after_dedup}`
-      + (parts.length ? ` (${parts.join(' + ')}${candidates.mp_capped ? ', MP limit reached' : ''})` : '')
-      + (prefilter && candidates.prefilter_expected_after != null ? `, about ${candidates.prefilter_expected_after} after pre-filter` : '');
+    // The per-database split is bookkeeping; a reached MP limit is kept (raising it changes the search).
+    message = `About ${prefilter && candidates.prefilter_expected_after != null ? candidates.prefilter_expected_after : candidates.expected_after_dedup} candidate structures`
+      + (candidates.mp_capped ? ' (Materials Project limit reached)' : '');
   } else {
     message = candidates.note || 'Estimated candidates unavailable';
   }
@@ -220,7 +220,7 @@ function EstimateAlert({ estimate, loading, prefilter }) {
           {candidates.no_cod_formulas?.length ? <div>{`${candidates.no_cod_formulas.join(', ')}: no COD structure; ${
             candidates.no_cod_source === 'mp' ? 'taken from Materials Project.' : 'no structure available (add a CIF or set an MP API key).'}`}</div> : null}
           {runtime ? (
-            <div>Estimated run time {formatDuration(runtime.low)}–{formatDuration(runtime.high)} (typically {formatDuration(runtime.expected)}) on {workers} workers.</div>
+            <div>{`Takes about ${formatDuration(runtime.expected)} (${formatDuration(runtime.low)}–${formatDuration(runtime.high)}).`}</div>
           ) : null}
           {suggestions.length ? <ul style={{ margin: '4px 0 0', paddingLeft: 20 }}>{suggestions.map(item => <li key={item}>{item}</li>)}</ul> : null}
         </div>
@@ -1060,12 +1060,13 @@ function Submission() {
   };
 
   const searchOnly = analysisMode === 'search_match';
-  const modeMessage = searchOnly ? 'Peak matching against the database · seconds · not verified by a fit'
+  // One plain sentence per mode: what it does, then the time and what it gives (the Run card's time words).
+  const modeMessage = searchOnly ? 'Matches the pattern against reference structures. Takes seconds; the result is not checked by a fit.'
     : analysisMode === 'reaction'
-    ? 'Predict products from precursors, temperature, and atmosphere, then fit the XRD pattern.'
+    ? 'Predicts the products of the precursors at this temperature and atmosphere and refines them with Rietveld. Takes minutes; gives wt%.'
     : analysisMode === 'known_mixture'
-      ? 'Every listed phase is refined together; DARA picks the best database structure for each. Unlisted impurities or products are not searched.'
-      : 'Phases found and verified by Rietveld fits, automatically · minutes · wt%';
+      ? 'Refines the listed phases together with Rietveld. Takes minutes; gives wt% of those phases only.'
+      : 'Searches phase combinations and refines each with Rietveld. Takes minutes; gives wt%.';
 
   const instrumentLabel = name => (instrumentDetails[name]
     ? `${instrumentDetails[name].label} — ${instrumentDetails[name].verified ? 'operator verified' : 'unverified'}`
@@ -1120,7 +1121,7 @@ function Submission() {
     : (watchedWavelengthLab || 'Cu');
   const rangeSummary = watchedThetaMin != null || watchedThetaMax != null
     ? `2θ ${watchedThetaMin ?? 'start'}–${watchedThetaMax ?? 'end'}°`
-    : 'measured 2θ range';
+    : null; // the measured range is the default: not restated
   const selected = instrumentDetails[selectedInstrument];
   const hasChemistry = elementCheck.symbols.length > 0 || splitList(watchedPrecursors).length > 0;
   const unreadable = Boolean(!seriesMode && watchedPattern && patternInspection?.error);
@@ -1129,7 +1130,7 @@ function Submission() {
     : unreadable ? 'The pattern could not be read'
     : elementCheck.error ? `Fix the elements: ${elementCheck.error}`
       : !hasChemistry ? 'Needs the elements or expected formulas'
-        : quick.ranked ? 'Ranked: open to pick the phases' : 'Ranks reference structures; you pick the phases';
+        : null;
   const runtimeText = estimate?.runtime_s?.expected ? `about ${formatDuration(estimate.runtime_s.expected)}${seriesMode ? ' per file' : ''}` : null;
   const identifyReady = seriesCount >= 2 && !batch?.running && !elementCheck.error && (hasChemistry || perFileChemistry);
   const msgAlert = msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null;
@@ -1139,7 +1140,7 @@ function Submission() {
       {/* The workspace replaces the setup on screen; the form stays mounted with its file and values. */}
       {quick.shown ? <QuickRankingWorkspace quick={quick} onRefine={refineRanked} onIdentify={saveIdentification} alert={msgAlert}
         mismatch={wavelengthWarning} onUseRecorded={useRecorded}
-        context={[watchedPattern?.name || (cloneSource ? `${cloneSource.filename} (stored with Task ${cloneSource.source_task_id})` : null),
+        context={[watchedPattern?.name || cloneSource?.filename || null,
           elementSummary && `Elements ${elementSummary}`, formulaSummary && `${FORMULA_LABELS[analysisMode]} ${formulaSummary}`,
           <>Radiation {wavelengthSummary}</>, rangeSummary]} /> : null}
       <Container hidden={quick.shown}>
@@ -1290,8 +1291,8 @@ function Submission() {
                         return Upload.LIST_IGNORE;
                       }}>
                       <p className="ant-upload-drag-icon"><UploadOutlined /></p>
-                      <p className="ant-upload-text">{cloneSource ? 'Select a replacement file (optional)' : 'Start by selecting the measured XRD file'}</p>
-                      <p className="ant-upload-hint">xrdml (metadata-aware) / xy(e) / txt / csv / dat / asc / ras / rasx / brml / raw · several files at once for a batch</p>
+                      <p className="ant-upload-text">{cloneSource ? 'Select a replacement file (optional)' : 'Drop or select the XRD pattern'}</p>
+                      <p className="ant-upload-hint">xrdml, xy, xye, txt, csv, dat, asc, ras, rasx, brml, raw</p>
                     </Dragger>
                   )}
                 </Form.Item>
@@ -1540,7 +1541,7 @@ function Submission() {
                   : elementSummary || missing(formulaSummary || !SEARCH_MODES.includes(analysisMode) ? 'From the formulas' : 'Not entered')}</dd>
                 {formulaSummary ? <><dt>{FORMULA_LABELS[analysisMode] || 'Formulas'}</dt><dd>{formulaSummary}</dd></> : null}
                 <dt>Instrument</dt><dd>{selectedInstrument ? instrumentLabel(selectedInstrument) : missing('Not selected')}</dd>
-                <dt>Radiation</dt><dd>{wavelengthSummary} · {rangeSummary}</dd>
+                <dt>Radiation</dt><dd>{wavelengthSummary}{rangeSummary ? ` · ${rangeSummary}` : ''}</dd>
               </dl>
               {searchOnly ? null : estimate || estimating
                 ? <EstimateAlert estimate={estimate} loading={estimating} prefilter={watchedPrefilter !== false} />
@@ -1565,14 +1566,14 @@ function Submission() {
                   <Button type="primary" size="large" block onClick={openSearchMatch} disabled={!quickReady}>
                     {quick.ranked ? 'Open search-match' : <>Search-match<span className="cost">· seconds</span></>}
                   </Button>
-                  <p className="dara-run-action-note">{quickNote}</p>
+                  {quickNote ? <p className="dara-run-action-note">{quickNote}</p> : null}
                 </div>}
               </div> : <div className={`dara-run-actions${seriesMode ? ' single' : ''}`}>
                 {seriesMode ? null : <div>
                   <Button size="large" block onClick={openSearchMatch} disabled={!quickReady}>
                     {quick.ranked ? 'Open search-match' : <>Check candidates first<span className="cost">· seconds</span></>}
                   </Button>
-                  <p className="dara-run-action-note">{quickNote}</p>
+                  {quickNote ? <p className="dara-run-action-note">{quickNote}</p> : null}
                 </div>}
                 <div>
                   <Button type="primary" size="large" block onClick={() => onSubmit()} loading={spinning}
@@ -1581,7 +1582,6 @@ function Submission() {
                     {seriesMode ? `Run series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Run analysis'}
                     {runtimeText ? <span className="cost">{`· ${runtimeText}`}</span> : null}
                   </Button>
-                  <p className="dara-run-action-note">{MODE_LABELS[analysisMode]}, automatic</p>
                 </div>
               </div>}
               {submittedTasks.length ? <ul className="dara-run-submitted" aria-label="Submitted from this page">
