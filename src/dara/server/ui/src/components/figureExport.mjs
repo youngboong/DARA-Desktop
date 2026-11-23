@@ -120,3 +120,43 @@ export function publicationFigure(data, layout, { widthMm = FIGURE_WIDTHS.double
 export function exportOptions(figure, format, filename) {
   return { format, width: figure.width, height: figure.height, filename, scale: format === 'png' ? 600 / 96 : 1 };
 }
+
+/**
+ * Look of a saved phase-identification figure (the server's `peaks`, `names`, `bars`) with its file
+ * (`widthMm`, `format`); the defaults are the report figure's.
+ */
+export const FIGURE_STYLE_DEFAULT = { peaks: 'hkl', names: 'legend', bars: true, widthMm: 170, format: 'png' };
+const FIGURE_STYLE_CHOICES = {
+  peaks: ['hkl', 'symbols', 'none'], names: ['legend', 'strips'], bars: [true, false], widthMm: [170, 85], format: ['png', 'svg', 'pdf'],
+};
+export const FIGURE_STYLE_KEY = 'dara-figure-style';
+
+/** `value` with every unknown or missing choice replaced by its default. */
+export function figureStyle(value) {
+  const style = { ...FIGURE_STYLE_DEFAULT };
+  Object.keys(FIGURE_STYLE_CHOICES).forEach(key => {
+    if (FIGURE_STYLE_CHOICES[key].includes(value?.[key])) style[key] = value[key];
+  });
+  return style;
+}
+
+/** The last choice of this browser (`storage`: localStorage, or null when blocked). */
+export function readFigureStyle(storage) {
+  try {
+    return figureStyle(JSON.parse(storage?.getItem(FIGURE_STYLE_KEY) || 'null'));
+  } catch (e) {
+    return { ...FIGURE_STYLE_DEFAULT };
+  }
+}
+
+export function writeFigureStyle(storage, style) {
+  try {
+    storage?.setItem(FIGURE_STYLE_KEY, JSON.stringify(figureStyle(style)));
+  } catch (e) { /* private mode: the choice is not remembered */ }
+}
+
+/** `[name, value]` query pairs of the look, only where it differs from the server default. */
+export function figureStylePairs(style) {
+  const { peaks, names, bars } = figureStyle(style);
+  return [...(peaks !== 'hkl' ? [['peaks', peaks]] : []), ...(names !== 'legend' ? [['names', names]] : []), ...(bars ? [] : [['bars', '0']])];
+}

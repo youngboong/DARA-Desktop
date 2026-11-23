@@ -30,6 +30,69 @@ def spacegroup_symbol(number) -> str:
     return cached_spacegroup(int(number)).symbol
 
 
+def spacegroup_tokens(symbol) -> list[tuple[str, str]]:
+    """Hermann-Mauguin symbol as International Tables print it, in ``(kind, text)`` pieces: ``italic``
+    (lattice, mirror and glide letters), ``digit`` (upright), ``bar`` (rotoinversion digit, overbar),
+    ``screw`` (subscript of the preceding digit) and ``slash``. Accepts ``Fd-3m``, ``P6_3/mmc``,
+    ``P63/mmc``, ``R-3m:H``; full monoclinic ``C12/c1`` is shortened to ``C2/c``."""
+    text = re.sub(r"[\s:].*$", "", str(symbol or "").strip())
+    if "_" not in text:  # "P63/mmc": which digits are screw components only the symbol table knows (P312 ≠ P3₁2)
+        table = _screw_symbols()
+        text = table.get(text) or table.get(f"{text[:1]}1{text[1:]}1", text)  # P21/c: as P121/c1
+    text = re.sub(r"^([A-Z])1(.+)1$", r"\1\2", text)
+    pieces: list[tuple[str, str]] = []
+    index = 0
+    while index < len(text):
+        char, following = text[index], text[index + 1] if index + 1 < len(text) else ""
+        if char in "-_" and following.isdigit():
+            pieces.append(("bar" if char == "-" else "screw", following))
+            index += 2
+            continue
+        if char.isdigit():
+            pieces.append(("digit", char))
+        elif char == "/":
+            pieces.append(("slash", "/"))
+        elif char.isalpha():
+            if pieces and pieces[-1][0] == "italic":
+                pieces[-1] = ("italic", pieces[-1][1] + char)
+            else:
+                pieces.append(("italic", char))
+        index += 1
+    return pieces
+
+
+@lru_cache(maxsize=1)
+def _screw_symbols() -> dict[str, str]:
+    """``{"P63/mmc": "P6_3/mmc", ...}`` from pymatgen's symbol table."""
+    try:
+        from pymatgen.symmetry.groups import SpaceGroup
+
+        return {symbol.replace("_", ""): symbol for symbol in SpaceGroup.SG_SYMBOLS if "_" in symbol}
+    except Exception:  # noqa: BLE001 - digits stay upright
+        return {}
+
+
+def spacegroup_html(symbol) -> str:
+    """Space-group symbol as HTML: italic letters, ``<sub>`` screw components, overbar digits."""
+    out = []
+    for kind, text in spacegroup_tokens(symbol):
+        text = escape(text)
+        out.append({"italic": f"<i>{text}</i>", "screw": f"<sub>{text}</sub>",
+                    "bar": f'<span style="text-decoration:overline">{text}</span>'}.get(kind, text))
+    return "".join(out)
+
+
+def spacegroup_mathtext(symbol) -> str:
+    """Space-group symbol as matplotlib mathtext (``$...$``): ``\\mathit`` letters, upright digits,
+    subscript screw components, ``\\overline`` rotoinversions (a rule: SVG keeps it over its digit,
+    a ``\\bar`` accent glyph drifts in browsers)."""
+    out = []
+    for kind, text in spacegroup_tokens(symbol):
+        out.append({"italic": rf"\mathit{{{text}}}", "screw": rf"_{{\mathrm{{{text}}}}}",
+                    "bar": rf"\overline{{\mathrm{{{text}}}}}", "slash": r"\mathrm{/}"}.get(kind, rf"\mathrm{{{text}}}"))
+    return f"${''.join(out)}$" if out else ""
+
+
 #: Reference name -> conventional formula from its CIF (``NH4H2PO4`` for ``PH6NO4_19_(...)``),
 #: set by ``display_formulas_scope`` for the document being summarized or exported.
 #: Display only: identities and every computation keep the name's formula.
@@ -63,6 +126,19 @@ def display_formula_of(reference) -> str | None:
     return known.get(str(reference)) or known.get(_variant_free(reference))
 
 
+#: (formula in the reference name, space-group number) -> mineral or common name
+COMMON_PHASE_NAMES = {
+    ("Al2O3", "167"): "Corundum", ("CaCO3", "62"): "Aragonite",
+    ("CaCO3", "167"): "Calcite", ("CaF2", "225"): "Fluorite",
+    ("Cr2O3", "167"): "Eskolaite", ("Fe2O3", "167"): "Hematite",
+    ("Fe3O4", "227"): "Magnetite", ("Fe", "225"): "Austenite (γ-Fe)",
+    ("Fe", "229"): "Ferrite (α-Fe)", ("In2O3", "206"): "Bixbyite-type",
+    ("Mg(OH)2", "164"): "Brucite", ("TiO2", "61"): "Brookite",
+    ("TiO2", "136"): "Rutile", ("TiO2", "141"): "Anatase",
+    ("ZnO", "186"): "Zincite",
+}
+
+
 def phase_display_name(reference: str) -> str:
     """Readable phase names, with the database reference retained in hover."""
     match = re.match(r"^(.+?)_(\d+)_\(", reference)
@@ -70,16 +146,7 @@ def phase_display_name(reference: str) -> str:
         return escape(reference)
     formula, group = match.groups()
     shown = display_formula_of(reference)
-    common = {
-        ("Al2O3", "167"): "Corundum", ("CaCO3", "62"): "Aragonite",
-        ("CaCO3", "167"): "Calcite", ("CaF2", "225"): "Fluorite",
-        ("Cr2O3", "167"): "Eskolaite", ("Fe2O3", "167"): "Hematite",
-        ("Fe3O4", "227"): "Magnetite", ("Fe", "225"): "Austenite (γ-Fe)",
-        ("Fe", "229"): "Ferrite (α-Fe)", ("In2O3", "206"): "Bixbyite-type",
-        ("Mg(OH)2", "164"): "Brucite", ("TiO2", "61"): "Brookite",
-        ("TiO2", "136"): "Rutile", ("TiO2", "141"): "Anatase",
-        ("ZnO", "186"): "Zincite",
-    }.get((formula, group))
+    common = COMMON_PHASE_NAMES.get((formula, group))
     formula = re.sub(r"(\d+(?:\.\d+)?)", r"<sub>\1</sub>", escape(shown or formula))
     if common:
         return f"{common} · {formula}"

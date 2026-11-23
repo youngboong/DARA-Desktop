@@ -1,3 +1,4 @@
+import pytest
 from types import SimpleNamespace
 
 import numpy as np
@@ -55,3 +56,24 @@ def test_peak_range_boundaries_empty_and_nonfinite():
     assert peaks_in_fit_range(None, [10., 30.]) is None
     assert peaks_in_fit_range([], [10., 30.]).shape == (0, 2)
     assert peaks_in_fit_range(peaks, []).shape == (0, 2)
+
+
+@pytest.mark.parametrize("symbol,html,mathtext", [
+    ("P6_3mc", "<i>P</i>6<sub>3</sub><i>mc</i>", r"$\mathit{P}\mathrm{6}_{\mathrm{3}}\mathit{mc}$"),
+    ("Fd-3m", '<i>Fd</i><span style="text-decoration:overline">3</span><i>m</i>', r"$\mathit{Fd}\overline{\mathrm{3}}\mathit{m}$"),
+    ("P2_1/c", "<i>P</i>2<sub>1</sub>/<i>c</i>", None),
+    ("P21/c", "<i>P</i>2<sub>1</sub>/<i>c</i>", None),
+    ("Ia-3", '<i>Ia</i><span style="text-decoration:overline">3</span>', None),
+    ("R-3m:H", '<i>R</i><span style="text-decoration:overline">3</span><i>m</i>', None),
+    ("Pmn2_1", "<i>Pmn</i>2<sub>1</sub>", None),
+    ("P63/mmc", "<i>P</i>6<sub>3</sub>/<i>mmc</i>", r"$\mathit{P}\mathrm{6}_{\mathrm{3}}\mathrm{/}\mathit{mmc}$"),
+    ("C12/c1", "<i>C</i>2/<i>c</i>", None),
+    ("P312", "<i>P</i>312", None),  # not P3₁2: the symbol table decides
+    ("P-421m", '<i>P</i><span style="text-decoration:overline">4</span>2<sub>1</sub><i>m</i>', None),
+])
+def test_space_group_symbols_follow_international_tables(symbol, html, mathtext):
+    from dara.plot import spacegroup_html, spacegroup_mathtext
+
+    assert spacegroup_html(symbol) == html
+    if mathtext:
+        assert spacegroup_mathtext(symbol) == mathtext

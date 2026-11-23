@@ -552,6 +552,9 @@ def test_internal_standard_and_structure_sections(monkeypatch):
     assert "0.2000 (at limit)" in html and "0.3000 (fixed)" in html
 
 
+R3C_HTML = '<i>R</i><span style="text-decoration:overline">3</span><i>c</i>'
+
+
 def test_spacegroup_cell_names_the_refined_subgroup():
     from dara.server.report import builder
 
@@ -559,7 +562,7 @@ def test_spacegroup_cell_names_the_refined_subgroup():
         "spacegroup_number": 15, "spacegroup_symbol": "C2/c",
         "database_spacegroup_number": 167, "database_spacegroup_symbol": "R-3c",
     })
-    assert "R-3c" in cell and "No. 167" in cell and "(refined as C2/c)" in cell
+    assert R3C_HTML in cell and "No. 167" in cell and "(refined as <i>C</i>2/<i>c</i>)" in cell
 
 
 def test_lattice_cell_leads_with_the_database_setting():
@@ -574,7 +577,7 @@ def test_lattice_cell_leads_with_the_database_setting():
                              "alpha": {"value": 89.97}, "beta": {"value": 90.03}, "gamma": {"value": 120.01}},
     })
     assert cell.index("setting:") < cell.index("13.75") < cell.index("refined cell:") < cell.index("8.729")
-    assert "R-3c" in cell
+    assert R3C_HTML in cell
     assert cell.count("5.03") == 1  # b equal to a is not repeated; angles at 90/120 are left out
 
 

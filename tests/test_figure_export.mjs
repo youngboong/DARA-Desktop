@@ -60,3 +60,31 @@ assert.equal(radiationLabel({}), null);
   assert.equal(figure.layout.xaxis.title.text, '2θ (°)');
 }
 console.log('figure export passed.');
+
+{
+  const { FIGURE_STYLE_DEFAULT, FIGURE_STYLE_KEY, figureStyle, figureStylePairs, readFigureStyle, writeFigureStyle } =
+    await import('../src/dara/server/ui/src/components/figureExport.mjs');
+  const { figureHref } = await import('../src/dara/server/ui/src/components/confidence.mjs');
+  const { seriesFigureHref } = await import('../src/dara/server/ui/src/components/seriesTrends.mjs');
+  // unknown or damaged choices fall back to the report figure's defaults
+  assert.deepEqual(figureStyle({ peaks: 'dots', names: 'strips', bars: 'no', widthMm: 85, format: 'gif' }),
+    { ...FIGURE_STYLE_DEFAULT, names: 'strips', widthMm: 85 });
+  const store = new Map();
+  const storage = { getItem: key => store.get(key) ?? null, setItem: (key, value) => store.set(key, value) };
+  assert.deepEqual(readFigureStyle(storage), FIGURE_STYLE_DEFAULT);
+  writeFigureStyle(storage, { peaks: 'symbols', bars: false, format: 'pdf' });
+  assert.deepEqual(readFigureStyle(storage), { ...FIGURE_STYLE_DEFAULT, peaks: 'symbols', bars: false, format: 'pdf' });
+  store.set(FIGURE_STYLE_KEY, '{broken');
+  assert.deepEqual(readFigureStyle(storage), FIGURE_STYLE_DEFAULT);
+  const blocked = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
+  assert.deepEqual(readFigureStyle(blocked), FIGURE_STYLE_DEFAULT);
+  writeFigureStyle(blocked, FIGURE_STYLE_DEFAULT); // no throw
+  assert.deepEqual(readFigureStyle(null), FIGURE_STYLE_DEFAULT);
+  // only what differs from the server default goes in the URL
+  assert.deepEqual(figureStylePairs(FIGURE_STYLE_DEFAULT), []);
+  assert.deepEqual(figureStylePairs({ peaks: 'none', names: 'strips', bars: false }), [['peaks', 'none'], ['names', 'strips'], ['bars', '0']]);
+  assert.equal(figureHref('/api', 7, 'svg', undefined, false, 170, FIGURE_STYLE_DEFAULT), '/api/task/7/figure.svg');
+  assert.equal(figureHref('/api', 7, 'png', 2, false, 85, { peaks: 'symbols' }), '/api/task/7/figure.png?idx=2&width_mm=85&peaks=symbols');
+  assert.equal(seriesFigureHref('/api', 's', { format: 'svg', style: { bars: false } }), '/api/series/s/figure.svg?bars=0');
+  console.log('figure style ok');
+}

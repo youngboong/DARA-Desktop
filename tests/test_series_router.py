@@ -388,12 +388,24 @@ def test_series_figure_renders_the_selection(figure_series, client):
     assert svg.status_code == 200 and svg.headers["content-type"] == "image/svg+xml"
     assert 'inline; filename="dara_series_Anneal_patterns_170mm.svg"' in svg.headers["content-disposition"]
     text = svg.content.decode()
-    assert "a_300C" in text and "a_500C" in text and "COD 1" in text and "Intensity (a.u.)" in text
+    assert "a_300C" in text and "a_500C" in text and "Zincite" in text and "Intensity (a.u.)" in text
+    assert "COD" not in text  # the database record is never in the figure
     one = client.get("/api/series/s1/figure.svg?tasks=1&phases=&download=true")
     assert one.status_code == 200 and "attachment" in one.headers["content-disposition"]
-    assert "a_300C" not in one.content.decode() and "COD 1" not in one.content.decode()
+    assert "a_300C" not in one.content.decode() and "Zincite" not in one.content.decode()
     png = client.get("/api/series/s1/figure.png?width_mm=85&dpi=100&normalize=true")
     assert png.status_code == 200 and png.content.startswith(b"\x89PNG")
     assert client.get("/api/series/s1/figure.pdf").content.startswith(b"%PDF")
     assert client.get("/api/series/s1/figure.gif").status_code == 404
     assert client.get("/api/series/s1/figure.svg?tasks=99").status_code == 422
+
+
+def test_series_figure_styles(figure_series, client):
+    base = client.get("/api/series/s1/figure.svg").content
+    drawn = {query: client.get(f"/api/series/s1/figure.svg?{query}").content
+             for query in ("peaks=symbols", "peaks=none", "names=strips", "bars=0", "names=strips&bars=0")}
+    assert all(content.startswith(b"<?xml") or b"<svg" in content for content in drawn.values())
+    assert drawn["peaks=symbols"] != base and drawn["names=strips"] != base and drawn["bars=0"] != base
+    assert drawn["names=strips&bars=0"] == drawn["bars=0"]  # without strips the names stay in the legend
+    for bad in ("peaks=dots", "names=below", "bars=maybe"):
+        assert client.get(f"/api/series/s1/figure.svg?{bad}").status_code == 422

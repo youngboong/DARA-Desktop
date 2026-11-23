@@ -202,8 +202,8 @@ def _identification(two_phases=True):
 
 
 def test_identification_figure_is_the_paper_style_one():
-    """Measured line (raw), no background, no y numbers, one labelled strip per phase with its
-    reference bars, per-phase symbols on the peaks, Miller indices of the main phase."""
+    """Measured line (raw), no background, no y numbers, one strip per phase with its reference bars,
+    the phases named in a legend, Miller indices of every phase in its colour."""
     import matplotlib
 
     from dara.server.report import figures
@@ -219,29 +219,41 @@ def test_identification_figure_is_the_paper_style_one():
 
     figures.pattern_figure = spy
     try:
-        svg = fit_figure(_identification(), fmt="svg", hkl_labels=True, references=references).decode("utf-8")
+        svg = fit_figure(_identification(), fmt="svg", references=references).decode("utf-8")
+        default = dict(captured)
+        fit_figure(_identification(), fmt="svg", references=references, peaks="symbols")
+        symbols = dict(captured)
     finally:
         figures.pattern_figure = original
     assert "Intensity (a.u.)" in svg and "Background" not in svg and "Observed" not in svg
     assert "(101)" in svg and "(200)" not in svg  # 0.05° from the strongest: left out
-    assert "(311)" not in svg  # Miller indices of the main (first) phase only
-    assert "COD" in svg  # the strip label names the database record
-    pattern, (strip_a, strip_b) = captured["patterns"][0], captured["phases"]
+    assert "(311)" in svg  # the second phase is labelled too, in its colour
+    assert "COD" not in svg  # the database record is in the report, never in the figure
+    pattern, (strip_a, strip_b) = default["patterns"][0], default["phases"]
     assert list(strip_a["two_theta"]) == [29.9, 44.0]  # the reference pattern, not the matched lines
     assert list(strip_b["two_theta"]) == [50.0] and list(strip_b["intensity"]) == [100.0]  # fallback: the result
-    # marks: lines of at least 10 % of the phase's strongest, one per 0.3°
-    assert list(pattern["marks"][0]) == [30.0] and list(pattern["marks"][1]) == [50.0]
+    assert default["kwargs"]["names"] == "legend" and default["kwargs"]["bars"] is True
+    assert not pattern["marks"] and not default["kwargs"]["symbols"]
     assert np.allclose(pattern["y"], _identification().plot_data.y_obs)  # raw: no background subtracted
+    # symbols: lines of at least 10 % of the phase's strongest, one per 0.3°, and no Miller indices
+    marks = symbols["patterns"][0]["marks"]
+    assert list(marks[0]) == [30.0] and list(marks[1]) == [50.0]
+    assert symbols["kwargs"]["symbols"] is True and symbols["kwargs"]["hkl"] is None
 
 
-def test_pattern_figure_marks_only_with_several_phases_and_stays_deterministic():
-    from dara.server.report.figures import PHASE_COLORS, pattern_figure
-
+def _stacked():
     x = np.linspace(20, 60, 400)
     one = {"x": x, "y": 10 + np.exp(-0.5 * ((x - 30) / 0.2) ** 2), "label": "S1 $", "marks": {0: [30.0], 1: [30.0]}}
     two = {"x": x, "y": 50 + 9 * np.exp(-0.5 * ((x - 40) / 0.2) ** 2), "label": "S2", "marks": {1: [40.0]}}
     strips = [{"label": "P1", "two_theta": [30.0], "intensity": [100.0]},
               {"label": "P2", "two_theta": [40.0], "intensity": [60.0]}]
+    return one, two, strips
+
+
+def test_pattern_figure_styles_and_stays_deterministic():
+    from dara.server.report.figures import PHASE_COLORS, pattern_figure
+
+    one, two, strips = _stacked()
     first = pattern_figure([one, two], strips, fmt="svg", normalize=True)
     assert first == pattern_figure([one, two], strips, fmt="svg", normalize=True)
     svg = first.decode("utf-8")
@@ -251,7 +263,56 @@ def test_pattern_figure_marks_only_with_several_phases_and_stays_deterministic()
     assert PHASE_COLORS[0].lower() in single.lower()  # the strip
     width, height = _png_size(pattern_figure([one, two], strips, fmt="png", dpi=100, width_mm=85))
     assert width == pytest.approx(85 / 25.4 * 100, abs=2) and height > width * 0.5
+    # every style draws, and each changes the figure
+    styles = [{}, {"symbols": True}, {"names": "strips"}, {"bars": False}, {"names": "strips", "bars": False},
+              {"symbols": True, "names": "strips"}]
+    drawn = [pattern_figure([one, two], strips, fmt="svg", **style) for style in styles]
+    assert len(set(drawn[:4])) == 4 and drawn[3] == drawn[4]  # without strips the names stay in the legend
+    _, no_bars = _png_size(pattern_figure([one, two], strips, fmt="png", dpi=100, bars=False))
+    _, with_bars = _png_size(pattern_figure([one, two], strips, fmt="png", dpi=100))
+    assert no_bars < with_bars
     with pytest.raises(ValueError):
         pattern_figure([{"x": [1.0], "y": [1.0]}], [], fmt="svg")
     with pytest.raises(ValueError):
         pattern_figure([one], [], fmt="gif")
+
+
+def test_legend_clears_the_curves_and_labels_under_it():
+    """A strong peak and its Miller index under the upper-right legend: the top is raised above them."""
+    import matplotlib
+
+    from dara.server.report import figures
+
+    matplotlib.use("Agg")
+    x = np.linspace(20, 60, 800)
+    pattern = {"x": x, "y": 10 + 100 * np.exp(-0.5 * ((x - 58) / 0.1) ** 2), "label": None}
+    strips = [{"label": "A long phase name · COD 1234567", "two_theta": [58.0], "intensity": [100.0]},
+              {"label": "Second phase · COD 7654321", "two_theta": [30.0], "intensity": [100.0]}]
+    seen = {}
+    original = figures._clear_legend
+
+    def spy(figure, ax, legend, texts, points, bottom, top):
+        original(figure, ax, legend, texts, points, bottom, top)
+        renderer = figure.canvas.get_renderer()
+        figure.canvas.draw()
+        box = legend.get_window_extent(renderer)
+        peak = ax.transData.transform((58.0, float(np.max(pattern["y"]) - 10) / 100))
+        seen["peak_below"] = peak[1] < box.y0
+        seen["texts_off"] = not any(text.get_window_extent(renderer).overlaps(box) for text in texts)
+        seen["texts"] = len(texts)
+
+    figures._clear_legend = spy
+    try:
+        figures.pattern_figure([pattern], strips, fmt="png", dpi=100, hkl=[(58.0, "(311)", 0)])
+    finally:
+        figures._clear_legend = original
+    assert seen == {"peak_below": True, "texts_off": True, "texts": 1}
+
+
+def test_figure_phase_label_is_name_formula_and_space_group_without_the_record():
+    from dara.server.report.figures import phase_strip_label
+
+    assert phase_strip_label("ZnO_186_(cod_9004178)-0") == r"Zincite, ZnO ($\mathit{P}\mathrm{6}_{\mathrm{3}}\mathit{mc}$)"
+    assert phase_strip_label("NiO_225_(cod_1010093)-0") == r"NiO ($\mathit{Fm}\overline{\mathrm{3}}\mathit{m}$)"
+    assert "mp-" not in phase_strip_label("La(HO)3_176_(mp_mp-625394)-0")
+    assert phase_strip_label("ZnO_186_(cod_9004178)-0", "My $label") == r"My \$label"

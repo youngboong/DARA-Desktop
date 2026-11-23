@@ -3,6 +3,7 @@
 // missing input because tasks stored before these features carry none of these keys.
 
 import { levelTone, toneColor } from './statusTone.mjs';
+import { figureStylePairs } from './figureExport.mjs';
 
 const finite = value => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value));
 const fixed = (value, digits) => Number(value).toFixed(digits);
@@ -189,10 +190,13 @@ export function selectionQuery(selection) {
 /** `query` plus the option that writes Miller indices on the figure. */
 export const withHkl = (query, hkl) => (hkl ? `${query}${query ? '&' : '?'}hkl=true` : query);
 
-/** Journal-style figure file: `widthMm` 170 (double column, the server's default) or 85 (single). */
-export const figureHref = (api, taskId, format, selection, hkl = false, widthMm = 170) => {
+/** Journal-style figure file: `widthMm` 170 (double column, the server's default) or 85 (single);
+ *  `style` the identification figure's look (`figureStyle` of figureExport.mjs). */
+export const figureHref = (api, taskId, format, selection, hkl = false, widthMm = 170, style = null) => {
+  const extra = [...(widthMm === 170 ? [] : [['width_mm', widthMm]]), ...(style ? figureStylePairs(style) : [])]
+    .map(([name, value]) => `${name}=${value}`).join('&');
   const query = withHkl(selectionQuery(selection), hkl);
-  return `${api}/task/${taskId}/figure.${format}${widthMm === 170 ? query : `${query}${query ? '&' : '?'}width_mm=${widthMm}`}`;
+  return `${api}/task/${taskId}/figure.${format}${query}${extra ? `${query ? '&' : '?'}${extra}` : ''}`;
 };
 
 /** The figure files of the Download menus: each format at double- and single-column width. */

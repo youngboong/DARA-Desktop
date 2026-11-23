@@ -603,3 +603,24 @@ import { databaseIdOf, distinctPhaseLabel, formatSpaceGroup, formatSymbolsInText
     { phases: [], remove: [zro2[4], zro2[3], zro2[0]], origin: 'remove', label: 'Remove LiO8, ZrO2 (Pbcm), ZrO2 (P2₁/c · COD 1010912)' });
   console.log('space-group format and phase identity ok');
 }
+
+{
+  const { spaceGroupParts } = await import('../src/dara/server/ui/src/components/versions.mjs');
+  // *italic*, _screw, ~overbar: International Tables typography, same rules as dara/plot.py
+  const show = symbol => spaceGroupParts(symbol).map(part => ({ italic: `*${part.text}*`, screw: `_${part.text}`, bar: `~${part.text}` }[part.kind] ?? part.text)).join('');
+  assert.equal(show('P6_3mc'), '*P*6_3*mc*');
+  assert.equal(show('Fd-3m'), '*Fd*~3*m*');
+  assert.equal(show('P2_1/c'), '*P*2_1/*c*');
+  assert.equal(show('P21/c'), '*P*2_1/*c*');
+  assert.equal(show('P2₁/c'), '*P*2_1/*c*');
+  assert.equal(show('Ia-3'), '*Ia*~3');
+  assert.equal(show('R-3m:H'), '*R*~3*m*');
+  assert.equal(show('Pmn2_1'), '*Pmn*2_1');
+  assert.equal(show('P63/mmc'), '*P*6_3/*mmc*');
+  assert.equal(show('C12/c1'), '*C*2/*c*');
+  assert.equal(show('P212121'), '*P*2_12_12_1');
+  assert.equal(show('P312'), '*P*312');
+  assert.equal(show('P3121'), '*P*3_121');
+  assert.equal(show('P-421m'), '*P*~42_1*m*');
+  console.log('space-group typography ok');
+}

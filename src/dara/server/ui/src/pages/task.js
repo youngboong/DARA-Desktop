@@ -16,11 +16,12 @@ import { knownPhaseNotes, mpFallbackNotes, phaseSetUrl } from '../components/kno
 import StatusTag from '../components/StatusTag';
 import { PhaseSelectionButton, RefinementControlsDialog, ReviewPanel, TaskFailurePanel, downloadReport, useTaskReview } from '../components/ResultWorkflows';
 import { TaskProgress } from '../components/PracticalControls';
-import ChemicalFormula from '../components/ChemicalFormula';
+import ChemicalFormula, { SpaceGroupSymbol } from '../components/ChemicalFormula';
+import FigureExportDialog, { useFigureStyle } from '../components/FigureExportDialog';
 import FitCautions from '../components/FitCautionsPanel';
 import { cautionDisplay, cautionRemedies, cautionSortValue, cautionTagColor, cautionTooltip, countCautions } from '../components/fitCautions.mjs';
 import { listContext, positionText, resultsHref, seriesOf, taskHref } from '../components/sampleNav.mjs';
-import { FIGURE_FILES, SMOOTH_WINDOWS, figureHref, levelRank, missingCell, patternFiles, patternHref, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
+import { SMOOTH_WINDOWS, figureHref, levelRank, missingCell, patternFiles, patternHref, treatedObservedName, treatmentQuery, unexplainedSummary, unexplainedTooltipLines, reasonsText } from '../components/confidence.mjs';
 import { NOT_VERIFIED, agreementText, isIdentification, peakStatusText, phasesFoundText, refinedTasks, rirText, scherrerByPhase, sizeText } from '../components/identification.mjs';
 import { latticePercent, sourceInfo } from '../components/quickRanking.mjs';
 import { ConfidenceBanner, DisplacementTag, DownloadMenu, OverallTag, ScreeningTags, StateTag, VerdictTag } from '../components/ConfidenceViews';
@@ -626,10 +627,6 @@ function parsePhaseReference(reference = '') {
   };
 }
 
-/** Short Hermann–Mauguin symbol (C12/c1 -> C2/c, P12_1/c1 -> P2₁/c), the one format of the page. */
-function SpaceGroupSymbol({ symbol }) {
-  return <>{formatSpaceGroup(symbol)}</>;
-}
 
 /** "COD 9007583" for `cod_9007583`; other database ids are shown as stored. */
 function databaseLabel(databaseId) {
@@ -671,7 +668,7 @@ function PhaseIdentity({ reference, formulaHtml, metadata, compact = false, show
       <span className="phase-identity-primary" style={{ fontWeight: 600 }}><span className="phase-identity-formula">{primary}</span>
         {/* Compact rows still name the space group: candidates often differ only by polymorph. In a
             narrow tray compartment it wraps out of sight as a whole instead of being cut. */}
-        {compact && phase.spaceGroup ? <span className="phase-identity-sg" style={{ fontWeight: 400, color: 'var(--dara-text-secondary)' }}>{' · '}{formatSpaceGroup(metadata?.database_spacegroup_symbol || metadata?.spacegroup_symbol, phase.spaceGroup)}{showDatabaseId && parsedPhase.databaseId ? ` · ${databaseLabel(parsedPhase.databaseId)}` : ''}</span> : null}</span>
+        {compact && phase.spaceGroup ? <span className="phase-identity-sg" style={{ fontWeight: 400, color: 'var(--dara-text-secondary)' }}>{' · '}{metadata?.database_spacegroup_symbol || metadata?.spacegroup_symbol ? <SpaceGroupSymbol symbol={metadata.database_spacegroup_symbol || metadata.spacegroup_symbol} /> : formatSpaceGroup(null, phase.spaceGroup)}{showDatabaseId && parsedPhase.databaseId ? ` · ${databaseLabel(parsedPhase.databaseId)}` : ''}</span> : null}</span>
       {!compact && secondary ? <span className="phase-identity-secondary" style={{ fontSize: '0.86em', color: 'var(--dara-text-secondary)' }}>{secondary}</span> : null}
     </span>
   );
@@ -2031,7 +2028,7 @@ function IdentificationPhaseTable({ phases, sizes, rirComplete, onTellApart, bus
         const { label, url } = sourceInfo(row.source);
         return <>
           {/* The symbol may come without underscores ("P63mc"): written as given, never as a formula. */}
-          <div><Text strong><ChemicalFormula formula={row.formula} />{row.spacegroup_symbol ? ` · ${formatSpaceGroup(row.spacegroup_symbol)}` : ''}</Text></div>
+          <div><Text strong><ChemicalFormula formula={row.formula} />{row.spacegroup_symbol ? <>{' · '}<SpaceGroupSymbol symbol={row.spacegroup_symbol} /></> : ''}</Text></div>
           <Text type="secondary" style={{ fontSize: 'var(--dara-font-12)' }}>
             {url ? <a href={url} target="_blank" rel="noreferrer">{label}</a> : label}{row.spacegroup ? ` · No. ${row.spacegroup}` : ''}</Text>
           {row.alternatives?.length ? <div className="dara-ident-alt">
@@ -2079,6 +2076,8 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const [sizes, setSizes] = React.useState(null); // {byPhase, corrected}
   const [reportReady, setReportReady] = React.useState(false);
   const [refining, setRefining] = React.useState(false);
+  const [figureOpen, setFigureOpen] = React.useState(false);
+  const [figureStyle, setFigureStyle] = useFigureStyle();
   React.useEffect(() => {
     let current = true;
     requestJson(`/task/${task_id}/observed-peaks?sel=best`)
@@ -2105,8 +2104,7 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const downloads = [
     ...(reportReady ? [
       { key: 'report-formats', label: 'Report', children: [{ key: 'report', label: 'PDF + Word' }, { key: 'report-html', label: 'HTML' }] },
-      { key: 'figure', label: 'Figure', children: FIGURE_FILES.map(file => ({
-        key: file.key, label: <a href={figureHref(URL, task_id, file.format, undefined, false, file.widthMm)}>{file.label}</a> })) }] : []),
+      { key: 'figure', label: 'Figure…' }] : []),
     { key: 'pattern', label: 'Pattern data', children: patternFiles(display).map(file => ({
       key: `pattern:${file.key}`, label: <a href={patternHref(URL, task_id, file.path, 'best')}>{file.label}</a> })) },
     { key: 'peaks', label: <a href={`${URL}/task/${task_id}/peaks.csv?sel=best`}>Reference reflections (CSV)</a> },
@@ -2116,8 +2114,11 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const onDownload = ({ key }) => {
     if (key === 'report') downloadReport(task_id, undefined, 'bundle');
     if (key === 'report-html') downloadReport(task_id, undefined, 'html');
+    if (key === 'figure') setFigureOpen(true);
   };
   return <>
+    <FigureExportDialog open={figureOpen} onClose={() => setFigureOpen(false)} style={figureStyle} onStyle={setFigureStyle}
+      hrefOf={style => figureHref(URL, task_id, style.format, undefined, false, style.widthMm, style)} />
     <TaskTitle taskId={task_id} name={data.sample || data.task_label} series={data.series} context={sampleList}>
       <Dropdown trigger={['click']} menu={{ items: downloads, onClick: onDownload }}>
         <Button icon={<DownloadOutlined />}>Download <DownOutlined /></Button>

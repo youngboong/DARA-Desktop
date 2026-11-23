@@ -470,9 +470,14 @@ async def download_figure(
     width_mm: float = 170,
     sel: str | None = Query(None),
     hkl: bool = False,
+    peaks: Literal["hkl", "symbols", "none"] = "hkl",
+    names: Literal["legend", "strips"] = "legend",
+    bars: bool = True,
 ):
     """Publication-style fit figure (PNG, SVG or PDF) of the selected refinement; ``width_mm`` about
-    85 for a single journal column, 170 for a double one."""
+    85 for a single journal column, 170 for a double one. An identification's figure takes its style
+    from ``peaks`` (hkl, symbols or none), ``names`` (legend or strips) and ``bars`` (reference strips);
+    a fit's from ``hkl``."""
     if fmt not in _FIGURE_MEDIA:
         raise HTTPException(404, "Unsupported figure format; use png, svg or pdf")
     if idx is not None and best:
@@ -490,6 +495,7 @@ async def download_figure(
             refinement, fmt=fmt, dpi=dpi, width_mm=width_mm, excluded_ranges=excluded,
             counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
             radiation=figure_radiation(document), references=_identification_references(document, refinement),
+            peaks=peaks, names=names, bars=bars,
         )
     except Exception as exc:
         raise HTTPException(500, f"Figure rendering failed: {exc}") from exc

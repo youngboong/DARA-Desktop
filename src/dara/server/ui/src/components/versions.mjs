@@ -312,6 +312,51 @@ export function formatSpaceGroup(symbol, number) {
   return finite(number) ? `SG ${Number(number)}` : '?';
 }
 
+// Symbols without underscores whose digit pairs are not (or not all) screw axes: P312, not P3₁2.
+const SCREW_FREE_FORMS = {
+  P422: 'P422', P4212: 'P42_12', I422: 'I422', P312: 'P312', P321: 'P321', P3121: 'P3_121', P3221: 'P3_221',
+  R32: 'R32', P31m: 'P31m', P31c: 'P31c', P622: 'P622', P432: 'P432', P4232: 'P4_232', F432: 'F432',
+  F4132: 'F4_132', I432: 'I432', P4332: 'P4_332', P4132: 'P4_132', I4132: 'I4_132',
+};
+
+/**
+ * A space-group symbol as International Tables print it, in `{kind, text}` pieces: `italic` (lattice,
+ * mirror and glide letters), `digit` (upright), `bar` (rotoinversion, overbar), `screw` (subscript of the
+ * digit before it) and `slash`. Takes `Fd-3m`, `P6_3/mmc`, `P63/mmc`, `P2₁/c`, `R-3m:H`; `C12/c1` -> C2/c.
+ * Same rules as `spacegroup_tokens` in dara/plot.py.
+ */
+export function spaceGroupParts(symbol) {
+  let text = String(symbol || '').trim().replace(/[\s:].*$/, '')
+    .replace(/[₀-₉]/g, digit => `_${SUBSCRIPT_DIGITS.indexOf(digit)}`)
+    .replace(/^([A-Z])1(\S+)1$/, '$1$2');
+  if (!text.includes('_') && SCREW_FREE_FORMS[text]) text = SCREW_FREE_FORMS[text];
+  else if (!text.includes('_')) {
+    // a digit right after a larger axis digit is its screw component (63 -> 6₃); never after an overbar
+    let axis = null;
+    text = [...text].map((char, index, chars) => {
+      if (!/\d/.test(char)) { axis = null; return char; }
+      if (axis !== null && Number(char) < Number(axis)) { axis = null; return `_${char}`; }
+      axis = chars[index - 1] === '-' ? null : char;
+      return char;
+    }).join('');
+  }
+  const parts = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    const next = text[index + 1] || '';
+    if ((char === '-' || char === '_') && /\d/.test(next)) {
+      parts.push({ kind: char === '-' ? 'bar' : 'screw', text: next });
+      index += 1;
+    } else if (/\d/.test(char)) parts.push({ kind: 'digit', text: char });
+    else if (char === '/') parts.push({ kind: 'slash', text: '/' });
+    else if (/[A-Za-z]/.test(char)) {
+      const last = parts[parts.length - 1];
+      if (last?.kind === 'italic') last.text += char; else parts.push({ kind: 'italic', text: char });
+    }
+  }
+  return parts;
+}
+
 /** Older name of `formatSpaceGroup`. */
 export const formatSpacegroup = formatSpaceGroup;
 

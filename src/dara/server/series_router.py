@@ -6,7 +6,7 @@ import logging
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -479,16 +479,23 @@ async def series_figure(
     width_mm: float = 170,
     dpi: int = 600,
     download: bool = False,
+    peaks: Literal["hkl", "symbols", "none"] = "hkl",
+    names: Literal["legend", "strips"] = "legend",
+    bars: bool = True,
 ):
     """Stacked measured patterns of the series (first task at the bottom) with one reference strip
     per phase and each phase's peaks marked where it was found. ``tasks``: comma-separated task ids
     (default: all completed); ``phases``: comma-separated phase keys of ``figure-options`` (default:
-    its default selection; empty: none); ``normalize``: each pattern scaled to its own maximum."""
+    its default selection; empty: none); ``normalize``: each pattern scaled to its own maximum;
+    ``peaks`` (hkl over the top pattern, symbols on every pattern, none), ``names`` (legend or strips)
+    and ``bars`` (reference strips): the style."""
     import numpy as np
     from starlette.concurrency import run_in_threadpool
 
     from dara.server import review_router
-    from dara.server.report.figures import pattern_figure, peak_marks, phase_strip_label, result_lines
+    from dara.server.report.figures import (
+        hkl_candidates, interleaved_hkl, pattern_figure, peak_marks, phase_strip_label, result_lines,
+    )
     from dara.server.utils import safe_download_stem
 
     if fmt not in _FIGURE_MEDIA:
@@ -524,11 +531,17 @@ async def series_figure(
         for item in chosen:
             refinement = item["refinement"]
             marks = {index: peak_marks(refinement, group["names"][item["task_id"]], low, high)
-                     for index, group in enumerate(groups) if item["task_id"] in group["names"]}
+                     for index, group in enumerate(groups) if item["task_id"] in group["names"]} if peaks == "symbols" else {}
             patterns.append({"x": refinement.plot_data.x, "y": refinement.plot_data.y_obs,
                              "label": item["label"], "marks": marks})
+        # hkl over the top pattern (the last task), for the phases present in it, in their strip colours
+        last = chosen[-1]
+        hkl = interleaved_hkl([
+            hkl_candidates(last["refinement"], group["names"][last["task_id"]], low, high)
+            if last["task_id"] in group["names"] else [] for group in groups]) if peaks == "hkl" else None
         return pattern_figure(patterns, strips, fmt=fmt, dpi=dpi, width_mm=width_mm, normalize=normalize,
-                              radiation=review_router.figure_radiation(chosen[0]["document"]))
+                              radiation=review_router.figure_radiation(chosen[0]["document"]), hkl=hkl or None,
+                              symbols=peaks == "symbols", names=names, bars=bars)
 
     try:
         content = await run_in_threadpool(render)

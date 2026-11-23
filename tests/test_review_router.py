@@ -209,3 +209,18 @@ def test_adoption_keeps_who_when_and_the_replaced_selection(context):
     for index in range(25):
         client.put("/api/task/9/review", json={"selection": index % 2})
     assert len(client.get("/api/task/9/review").json()["history"]) == review_router.ADOPTION_HISTORY_MAX
+
+
+def test_figure_style_parameters_reach_the_figure_and_are_validated(context, monkeypatch):
+    import dara.server.report.figures as figures
+
+    client, _, _ = context
+    seen = []
+    monkeypatch.setattr(figures, "fit_figure", lambda refinement, **kwargs: seen.append(kwargs) or b"<svg/>")
+    assert client.get("/api/task/9/figure.svg").status_code == 200
+    assert {key: seen[-1][key] for key in ("peaks", "names", "bars")} == {"peaks": "hkl", "names": "legend", "bars": True}
+    assert client.get("/api/task/9/figure.svg?peaks=symbols&names=strips&bars=0").status_code == 200
+    assert {key: seen[-1][key] for key in ("peaks", "names", "bars")} == {"peaks": "symbols", "names": "strips", "bars": False}
+    assert client.get("/api/task/9/figure.svg?peaks=none").status_code == 200 and seen[-1]["peaks"] == "none"
+    for bad in ("peaks=dots", "names=below", "bars=maybe"):
+        assert client.get(f"/api/task/9/figure.svg?{bad}").status_code == 422

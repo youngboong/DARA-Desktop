@@ -1,6 +1,8 @@
 // Pure helpers that turn the series detail payload into plot-ready arrays. Missing
 // values stay ``null`` so Plotly draws a gap instead of a misleading zero.
 
+import { figureStylePairs } from './figureExport.mjs';
+
 export const LATTICE_PARAMETERS = ['a', 'b', 'c', 'alpha', 'beta', 'gamma'];
 const ACTIVE_STATES = new Set(['READY', 'RUNNING', 'CANCELLING']);
 
@@ -118,14 +120,16 @@ export function seriesPreviewRows(preview) {
 /**
  * URL of the series' stacked-pattern figure (`format` png/svg/pdf, `widthMm` 170 or 85). `tasks`:
  * the selected task ids, left out when all `allTasks` are selected; `phases`: the selected phase
- * keys (always sent, so an empty selection draws no strips); `download` asks for an attachment.
+ * keys (always sent, so an empty selection draws no strips); `download` asks for an attachment;
+ * `style` the figure's look (`figureStyle` of figureExport.mjs).
  */
-export function seriesFigureHref(api, seriesId, { tasks, allTasks, phases, normalize = false, format = 'svg', widthMm = 170, download = false }) {
+export function seriesFigureHref(api, seriesId, { tasks, allTasks, phases, normalize = false, format = 'svg', widthMm = 170, download = false, style = null }) {
   const query = new URLSearchParams();
   if (tasks && allTasks && tasks.length !== allTasks.length) query.set('tasks', tasks.join(','));
   if (phases) query.set('phases', phases.join(','));
   if (normalize) query.set('normalize', 'true');
   if (widthMm !== 170) query.set('width_mm', String(widthMm));
+  if (style) figureStylePairs(style).forEach(([name, value]) => query.set(name, value));
   if (download) query.set('download', 'true');
   const text = query.toString().replace(/%2C/g, ',');
   return `${api}/series/${encodeURIComponent(seriesId)}/figure.${format}${text ? `?${text}` : ''}`;

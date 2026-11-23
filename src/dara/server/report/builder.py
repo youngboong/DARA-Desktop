@@ -331,7 +331,7 @@ def _methods_paragraph(
     sources, user_cifs, e_hull = _database_sources(document, task, _phase_sources(phase_names))
     items = []
     if "cod" in sources:
-        items.append(f"the Crystallography Open Database (COD) {citations.cite('cod')}")
+        items.append(f"the Crystallography Open Database (COD) {citations.cite('cod2009')}, {citations.cite('cod')}")
     if "mp" in sources:
         item = f"the Materials Project {citations.cite('mp')}"
         if e_hull is not None:
@@ -473,9 +473,10 @@ def _name_html(phase: str) -> str:
 
 
 def _symbol_html(symbol) -> str:
-    # Monoclinic full symbols read better in short form: C12/c1 -> C2/c, P12_1/c1 -> P2_1/c.
-    short = re.sub(r"^([A-Z])1(.+)1$", r"\1\2", str(symbol))
-    return re.sub(r"_(\d)", r"<sub>\1</sub>", escape(short))
+    """International Tables typography (italic letters, screw subscripts, overbars; C12/c1 -> C2/c)."""
+    from dara.plot import spacegroup_html
+
+    return spacegroup_html(symbol)
 
 
 def _spacegroup_cell(meta: dict) -> str:
@@ -635,8 +636,11 @@ def _reference_cell(phase: str) -> str:
     if mp:
         record = mp.group(1)
         return (
-            f'<a href="https://materialsproject.org/materials/mp-{record}">MP mp-{record}</a>'
+            f'<a href="https://materialsproject.org/materials/mp-{record}">mp-{record}</a>'
         )
+    icsd = re.search(r"icsd[_-]?(\d+)", phase, re.I)
+    if icsd:
+        return f"ICSD&nbsp;{icsd.group(1)}"
     return "User CIF"
 
 
@@ -1359,10 +1363,11 @@ def _build_report_html(
 IDENTIFICATION_FIGURE_CAPTION = (
     "Figure 1. Measured pattern (black line; raw data, background not subtracted) and, below it, the "
     "reference pattern of each identified phase (vertical bars, heights = relative intensities, calculated "
-    "from the database structure named on the strip). No pattern was refined. Shaded intervals were excluded."
+    "from the database structure whose record is given in the phase table; the databases are cited in the "
+    "references). No pattern was refined. Shaded intervals were excluded."
 )
-IDENTIFICATION_SYMBOL_CAPTION = (
-    " Symbols mark the strongest reflections of each phase at their matched positions."
+IDENTIFICATION_HKL_CAPTION = (
+    " Miller indices (hkl) of the strongest reflections are written over the pattern in the colour of their phase."
 )
 SCHERRER_CORRECTION = {
     "curve": "after removing the instrument FWHM of the profile's FWHM curve{standard}",
@@ -1481,7 +1486,7 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
     sources, user_cifs, _ = _database_sources(document, task, _phase_sources([p["name"] for p in phases]))
     databases = []
     if "cod" in sources:
-        databases.append(f"the Crystallography Open Database (COD) {citations.cite('cod')}")
+        databases.append(f"the Crystallography Open Database (COD) {citations.cite('cod2009')}, {citations.cite('cod')}")
     if "mp" in sources:
         databases.append(f"the Materials Project {citations.cite('mp')}")
     if user_cifs:
@@ -1531,8 +1536,7 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
             ),
             "Measured pattern with the reference patterns of the identified phases",
         )
-        caption = (IDENTIFICATION_FIGURE_CAPTION + (IDENTIFICATION_SYMBOL_CAPTION if len(phases) > 1 else "")
-                   + (HKL_CAPTION.replace("the strongest", "the strongest main-phase") if hkl_labels else ""))
+        caption = IDENTIFICATION_FIGURE_CAPTION + IDENTIFICATION_HKL_CAPTION
         parts.append(f"<figure>{figure}<figcaption>{escape(caption)}</figcaption></figure>")
     except Exception:  # noqa: BLE001 - the report is written without the figure
         logger.warning("Identification figure failed", exc_info=True)

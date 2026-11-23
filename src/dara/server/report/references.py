@@ -25,6 +25,13 @@ REFERENCES: dict[str, dict] = {
         ),
         "doi": None,
     },
+    "cod2009": {
+        "text": (
+            "S. Gražulis et al., \"Crystallography Open Database – an open-access collection of "
+            "crystal structures\", J. Appl. Cryst. 42 (2009) 726–729."
+        ),
+        "doi": "10.1107/S0021889809016690",
+    },
     "cod": {
         "text": (
             "S. Gražulis et al., \"Crystallography Open Database (COD): an open-access "

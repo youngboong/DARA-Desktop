@@ -730,6 +730,36 @@ code {
   height: auto;
 }
 
+/* Figure… dialog: the figure as it will be saved, its choices in one column beside it. */
+.dara-figure-export {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 232px;
+  gap: var(--dara-space-4);
+  align-items: start;
+}
+
+.dara-figure-export .dara-figure-preview img {
+  max-height: calc(100vh - 230px);
+  object-fit: contain;
+}
+
+.dara-figure-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dara-space-3);
+}
+
+.dara-figure-choice {
+  display: flex;
+  flex-direction: column;
+  gap: var(--dara-space-1);
+}
+
+.dara-figure-choice-label {
+  font-size: var(--dara-font-12);
+  color: var(--dara-text-secondary);
+}
+
 .dara-figure-preview-wait {
   position: absolute;
   inset: 0;

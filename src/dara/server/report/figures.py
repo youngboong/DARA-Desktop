@@ -10,13 +10,15 @@ A fit without a calculated curve (an identification result) and a series of patt
 phase-identification figure of materials papers instead (:func:`pattern_figure`): the measured
 pattern(s) as thin black lines, raw (background neither drawn nor subtracted), stacked with a
 constant offset and labelled at the right end; under them one strip per phase with its reference
-pattern as vertical bars, labelled with phase, formula and database record; each phase's peaks
-marked on the patterns with its own filled symbol (colour and shape, readable in greyscale).
+pattern as vertical bars in the phase's colour; a legend at the upper right names each phase with
+formula and space group (the database record is in the report's phase table); the Miller indices of the strongest lines are written over the top
+pattern in the colour of their phase (materials papers label peaks by hkl far more often than by symbol).
 """
 
 from __future__ import annotations
 
 import io
+import re
 import threading
 from typing import Literal
 
@@ -32,16 +34,26 @@ EXCLUDED_LABEL = "Excluded from refinement"
 
 
 def _default_label(name: str) -> str:
-    """Readable phase label; formula subscripts as mathtext subscripts in the text font (Arial has
-    no Unicode subscript digits)."""
+    """Figure label of a phase: name, formula and space group ("Zincite, ZnO (*P*6₃*mc*)"; the name
+    left out when it is the formula), in mathtext with the text font (Arial has no Unicode subscript
+    digits). Never the database record: that is in the report's phase table."""
     try:
-        import re
-        from html import unescape
+        from dara.plot import COMMON_PHASE_NAMES, display_formula_of, spacegroup_mathtext, spacegroup_symbol
 
-        from dara.plot import phase_display_name
-        html = phase_display_name(name).replace("$", "")
-        html = re.sub(r"<sub>([^<]*)</sub>", lambda match: r"$\mathregular{_{%s}}$" % match.group(1), html)
-        return unescape(re.sub(r"<[^>]+>", "", html))
+        match = re.match(r"^(.+?)_(\d+)_\(", str(name))
+        if not match:
+            return str(name).replace("$", r"\$")
+        formula, group = match.groups()
+        common = COMMON_PHASE_NAMES.get((formula, group))
+        shown = (display_formula_of(name) or formula).replace("$", r"\$")
+        text = re.sub(r"(\d+(?:\.\d+)?)", lambda found: r"$\mathregular{_{%s}}$" % found.group(1), shown)
+        if common and common != shown:
+            text = f"{common}, {text}"
+        try:
+            text += f" ({spacegroup_mathtext(spacegroup_symbol(group))})"
+        except ValueError:
+            pass
+        return text
     except Exception:
         return str(name).replace("$", r"\$")
 
@@ -81,7 +93,7 @@ FONT_FAMILY = ["Arial", "Helvetica", "DejaVu Sans"]
 
 def _hkl_text(indices: list[int]) -> str:
     """Miller indices as printed in papers: (110); a negative index gets an overbar."""
-    parts = [rf"\bar{{{-value}}}" if value < 0 else str(value) for value in indices]
+    parts = [rf"\overline{{{-value}}}" if value < 0 else str(value) for value in indices]
     joiner = r"\," if any(abs(value) > 9 for value in indices) else ""
     body = joiner.join(parts)
     return f"$({body})$" if "\\" in body else f"({body})"
@@ -180,7 +192,7 @@ def _save(figure, fmt: str, dpi: int) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# phase-identification figure (measured patterns, reference strips, peak symbols)
+# phase-identification figure (measured patterns, reference strips, hkl in phase colours)
 # ---------------------------------------------------------------------------
 
 # Filled ●, ▼, ◆, ■, ▲ in the phase colours: shape and colour both name the phase.
@@ -205,10 +217,8 @@ def phase_card(name: str) -> str | None:
 
 
 def phase_strip_label(name: str, label: str | None = None) -> str:
-    """"Zincite · ZnO · COD 9004178": the readable phase name and its database record."""
-    text = str(label).replace("$", r"\$") if label else _default_label(name)
-    card = phase_card(name)
-    return f"{text} · {card}" if card and card not in text else text
+    """"Zincite, ZnO (P6₃mc)": the phase's label in the identification figure (no database record)."""
+    return str(label).replace("$", r"\$") if label else _default_label(name)
 
 
 def reference_lines(structure, wavelength_a: float, low: float, high: float) -> tuple[np.ndarray, np.ndarray]:
@@ -284,16 +294,78 @@ def hkl_candidates(refinement, name: str, low: float, high: float) -> list[tuple
     if rows.empty or not {"h", "k", "l"}.issubset(rows.columns):
         return []
     rows = rows[rows["intensity"] >= float(rows["intensity"].max()) * MARK_MIN_RELATIVE / 100]
-    return [(float(position), _hkl_text([int(h), int(k), int(l)]))
+    try:
+        lattice = refinement.lst_data.phases_results[name].get_structure().lattice
+    except Exception:  # noqa: BLE001 - an identification has no refined structure: indices as listed
+        lattice = None
+    found = re.search(r"_(\d{1,3})_\(", name)
+    number = int(found.group(1)) if found else 0
+    return [(float(position), _hkl_text(list(_usual_hkl((int(h), int(k), int(l)), number, lattice))))
             for position, h, k, l in zip(rows["2theta"], rows["h"], rows["k"], rows["l"])]
 
 
+def _laue_generators(number: int) -> list[np.ndarray]:
+    """Generators of the Laue group of space group ``number`` acting on (h, k, l), standard setting
+    (monoclinic b unique, hexagonal axes); trigonal groups keep Friedel pairs only (their axes vary)."""
+    ops = [-np.eye(3, dtype=int)]
+    two_b, two_a = np.diag([-1, 1, -1]), np.diag([1, -1, -1])
+    four, six = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]), np.array([[0, -1, 0], [1, 1, 0], [0, 0, 1]])
+    swap = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]])
+    three = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]])
+    if 3 <= number <= 15:
+        ops.append(two_b)
+    elif 16 <= number <= 74:
+        ops += [two_a, two_b]
+    elif 75 <= number <= 142:
+        ops += [four] + ([two_a] if number >= 89 else [])
+    elif 168 <= number <= 194:
+        ops += [six] + ([swap] if number >= 177 else [])
+    elif 195 <= number <= 230:
+        ops += [three, np.diag([-1, -1, 1])] + ([swap] if number >= 207 else [])
+    return ops
+
+
+def _usual_hkl(hkl: tuple[int, int, int], number: int, lattice) -> tuple[int, int, int]:
+    """The symmetry-equivalent indices a paper writes: (100) rather than (1-10) for ZnO, preferring
+    non-negative and then larger leading indices. Kept as listed unless the refined lattice confirms
+    the same d-spacing (a phase refined in another setting is left alone)."""
+    if lattice is None or not number:
+        return hkl
+    seen, todo = {hkl}, [hkl]
+    generators = _laue_generators(number)
+    while todo:
+        current = np.array(todo.pop())
+        for op in generators:
+            image = tuple(int(value) for value in op @ current)
+            if image not in seen:
+                seen.add(image)
+                todo.append(image)
+    best = max(seen, key=lambda item: (sum(value >= 0 for value in item), item))
+    try:
+        same = abs(float(lattice.d_hkl(best)) - float(lattice.d_hkl(hkl))) <= 1e-4 * float(lattice.d_hkl(hkl))
+    except Exception:  # noqa: BLE001
+        same = False
+    return best if same else hkl
+
+
 STACK_STEP = 1.0  # vertical offset between stacked patterns, in units of one pattern's height
-STRIP_MM = 7.5  # one reference strip: a label row and the bars
-STRIP_LABEL_MM = 3.2
-GAP_MM = 1.2  # between the lowest pattern and the first strip
-HEAD_MM = 5.0  # above the top pattern: its peak symbols and label
+STRIP_MM = 8.0  # one reference strip (its bars); the phase is named in the legend
+STRIP_LABEL_MM = 3.2  # the strip's own name row when the phases are named on the strips
+GAP_MM = 2.0  # between the lowest pattern and the first strip
+HEAD_MM = 6.0  # above the top pattern, besides the legend rows
+LEGEND_ROW_MM = 3.4  # one legend row at 7 pt
 MARGIN_MM = 13.0  # axis labels, tick labels and the frame outside the plotting area
+
+
+def interleaved_hkl(per_phase: list[list[tuple[float, str]]]) -> list[tuple[float, str, int]]:
+    """``(2θ, "(hkl)", phase index)`` taking each phase's next strongest line in turn (main phase first),
+    so a minor phase still gets its strongest lines labelled."""
+    out, depth = [], max((len(lines) for lines in per_phase), default=0)
+    for rank in range(depth):
+        for index, lines in enumerate(per_phase):
+            if rank < len(lines):
+                out.append((lines[rank][0], lines[rank][1], index))
+    return out
 
 
 def pattern_figure(
@@ -305,21 +377,26 @@ def pattern_figure(
     width_mm: float = 170.0,
     normalize: bool = False,
     radiation: str | None = None,
-    hkl: list[tuple[float, str]] | None = None,
+    hkl: list[tuple[float, str, int]] | None = None,
     excluded_ranges=None,
     annotations=None,
+    symbols: bool = False,
+    names: str = "legend",
+    bars: bool = True,
 ) -> bytes:
     """Phase-identification figure as PNG, SVG or PDF bytes (deterministic for equal input).
 
     ``patterns``: in series order, the first at the bottom; each ``{x, y, label, marks}`` with the
     measured 2θ and intensities, the name written at its right end (``None``: none) and ``marks``
-    ``{phase index: 2θ array}`` of the peaks to mark with that phase's symbol. ``phases``: one
-    reference strip each, top to bottom, ``{label, two_theta, intensity}`` (relative intensities).
+    ``{phase index: 2θ array}`` of the peaks marked with that phase's symbol when ``symbols``.
+    ``phases``: one reference strip each, top to bottom, ``{label, two_theta, intensity}`` (relative
+    intensities), drawn when ``bars``; ``names`` ``legend`` names them in a legend at the upper right,
+    ``strips`` on their strips (without strips: in the legend).
     Without ``normalize`` all patterns share one intensity scale; with it each spans its own
     minimum to maximum. Every pattern is shifted by a constant only, never background-subtracted.
-    ``hkl``: ``(2θ, "(hkl)")`` candidates, strongest first, written over the top pattern where they
-    do not collide. ``annotations``: the analyst's labels (``{two_theta, intensity, text}``) on a
-    single pattern, as plain text.
+    ``hkl``: ``(2θ, "(hkl)", phase index)`` candidates, strongest first, written over the top pattern
+    in the colour of their phase where they do not collide. ``annotations``: the analyst's labels
+    (``{two_theta, intensity, text}``) on a single pattern, as plain text.
     """
     if fmt not in {"png", "svg", "pdf"}:
         raise ValueError(f"Unsupported figure format: {fmt}")
@@ -346,17 +423,20 @@ def pattern_figure(
         scale = float(y.max() - y.min()) if normalize else common
         shown.append((x, (y - y.min()) / (scale or 1.0) + index * STACK_STEP, float(y.min()), scale or 1.0, pattern))
 
-    n_strips = len(phases)
-    symbols = n_strips > 1  # one phase needs no symbol to tell it apart
-    stack_mm = width_mm * 0.42 * min(1 + 0.25 * (len(shown) - 1), 2.6)
+    n_phases = len(phases)
+    n_strips = n_phases if bars else 0
+    legend_rows = n_phases if n_phases and (names != "strips" or not bars) else 0  # strip names need the strips
+    strip_mm = STRIP_MM + (0.0 if legend_rows else STRIP_LABEL_MM)
+    head_mm = HEAD_MM + LEGEND_ROW_MM * legend_rows  # the legend sits above the top pattern
+    stack_mm = width_mm * 0.55 * min(1 + 0.35 * (len(shown) - 1), 3.0) + LEGEND_ROW_MM * legend_rows
     stack_units = (len(shown) - 1) * STACK_STEP + 1
-    unit_mm = (stack_mm - HEAD_MM) / stack_units  # mm per unit of intensity
-    axes_mm = stack_mm + (GAP_MM + n_strips * STRIP_MM if n_strips else 0)
+    unit_mm = (stack_mm - head_mm) / stack_units  # mm per unit of intensity
+    axes_mm = stack_mm + (GAP_MM + n_strips * strip_mm if n_strips else 0)
     height_mm = axes_mm + MARGIN_MM
     units = lambda mm: mm / unit_mm  # noqa: E731
     deg_per_mm = (high - low) / max(width_mm - 14.0, 10.0)
-    bottom = -units(GAP_MM + n_strips * STRIP_MM + 0.8) if n_strips else -units(1.0)
-    top = stack_units + units(HEAD_MM)
+    bottom = -units(GAP_MM + n_strips * strip_mm + 0.8) if n_strips else -units(1.0)
+    top = stack_units + units(head_mm)
 
     import matplotlib
 
@@ -366,22 +446,25 @@ def pattern_figure(
         pass
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.figure import Figure
+    from matplotlib.lines import Line2D
     from matplotlib.ticker import AutoMinorLocator
 
-    colors = [PHASE_COLORS[i % len(PHASE_COLORS)] for i in range(max(n_strips, 1))]
-    markers = [PHASE_MARKERS[i % len(PHASE_MARKERS)] for i in range(max(n_strips, 1))]
+    colors = [PHASE_COLORS[i % len(PHASE_COLORS)] for i in range(max(n_phases, 1))]
+    markers = [PHASE_MARKERS[i % len(PHASE_MARKERS)] for i in range(max(n_phases, 1))]
     with _RENDER_LOCK, matplotlib.rc_context(_rc()):
         figure = Figure(figsize=(width_mm / 25.4, height_mm / 25.4), layout="constrained")
         FigureCanvasAgg(figure)
         ax = figure.add_subplot()
 
-        tops = []  # the highest mark above each pattern point: (x, y) per pattern
+        texts = []  # labels the legend must clear
+        points = []  # curves and symbols the legend must clear: (x, y) arrays
         for x, y, _, _, pattern in shown:
             ax.plot(x, y, color=OBSERVED_COLOR, lw=0.6, zorder=3)
+            points.append((x, y))
             placed: list[tuple[float, float]] = []
             if symbols:
                 for phase_index, positions in sorted((pattern.get("marks") or {}).items()):
-                    if not 0 <= phase_index < n_strips:
+                    if not 0 <= phase_index < n_phases:
                         continue
                     xs, ys = [], []
                     for position in np.asarray(positions, float):
@@ -397,33 +480,43 @@ def pattern_figure(
                         ys.append(level)
                     ax.plot(xs, ys, linestyle="none", marker=markers[phase_index], markersize=3.2,
                             markeredgewidth=0, color=colors[phase_index], zorder=4)
-            tops.append(placed)
+                    points.append((np.asarray(xs, float), np.asarray(ys, float) + units(0.6)))
             if pattern.get("label"):
                 # above the curve and the marks under the whole label (7 pt Arial: about 0.55 em per character)
                 start = high - (len(str(pattern["label"])) * 0.55 * (FONT_SIZE - 1) / 72 * 25.4 + 2.0) * deg_per_mm
                 tail = x >= start
                 level = float(y[tail].max()) if tail.any() else float(y[-1])
                 level = max([level] + [height + units(1.0) for px, height in placed if px >= start])
-                ax.annotate(str(pattern["label"]).replace("$", r"\$"), (high, level), xytext=(-3, 2),
-                            textcoords="offset points", ha="right", va="bottom", fontsize=FONT_SIZE - 1, zorder=5)
+                texts.append(ax.annotate(
+                    str(pattern["label"]).replace("$", r"\$"), (high, level), xytext=(-3, 2),
+                    textcoords="offset points", ha="right", va="bottom", fontsize=FONT_SIZE - 1, zorder=5))
 
-        for index, phase in enumerate(phases):
-            strip_top = -units(GAP_MM + index * STRIP_MM)
-            base = strip_top - units(STRIP_MM - 0.4)
-            bar = units(STRIP_MM - STRIP_LABEL_MM - 0.8)
+        for index, phase in enumerate(phases[:n_strips]):
+            strip_top = -units(GAP_MM + index * strip_mm)
+            base = strip_top - units(strip_mm - 0.4)
+            bar = units(STRIP_MM - 1.2)
             tt, relative = np.asarray(phase["two_theta"], float), np.asarray(phase["intensity"], float)
             inside = (tt >= low) & (tt <= high) & np.isfinite(relative)
             ax.hlines(base, low, high, color=colors[index], lw=0.4, zorder=2)
             ax.vlines(tt[inside], base, base + bar * np.clip(relative[inside], 0, 100) / 100,
                       color=colors[index], lw=0.7, zorder=3)
-            label_y = strip_top - units(0.3)
-            offset = -3 - (6 if symbols else 0)
-            ax.annotate(phase["label"], (high, label_y), xytext=(offset, 0), textcoords="offset points",
-                        ha="right", va="top", fontsize=FONT_SIZE - 1, zorder=5)
-            if symbols:
-                ax.plot([high - 5.5 / 72 * 25.4 * deg_per_mm], [label_y - units(1.25)], linestyle="none",
-                        marker=markers[index], markersize=3.2, markeredgewidth=0, color=colors[index],
-                        clip_on=False, zorder=5)
+            if not legend_rows:
+                label_y = strip_top - units(0.3)
+                ax.annotate(phase["label"], (high, label_y), xytext=(-3 - (6 if symbols else 0), 0),
+                            textcoords="offset points", ha="right", va="top", fontsize=FONT_SIZE - 1, zorder=5)
+                if symbols:
+                    ax.plot([high - 5.5 / 72 * 25.4 * deg_per_mm], [label_y - units(1.25)], linestyle="none",
+                            marker=markers[index], markersize=3.2, markeredgewidth=0, color=colors[index],
+                            clip_on=False, zorder=5)
+        legend = None
+        if legend_rows:
+            handles = [Line2D([], [], linestyle="none", marker=markers[index], markersize=3.2, markeredgewidth=0,
+                              color=colors[index]) if symbols else
+                       Line2D([], [], linestyle="none", marker="|", markersize=7, markeredgewidth=1.2,
+                              color=colors[index]) for index in range(n_phases)]
+            legend = ax.legend(handles, [phase["label"] for phase in phases], loc="upper right", frameon=False,
+                               fontsize=FONT_SIZE - 1, handlelength=0.8, handletextpad=0.5, borderaxespad=0.4,
+                               labelspacing=0.3)
 
         for start, end in _clean_ranges(excluded_ranges, low, high):
             ax.axvspan(start, end, color="#d9d9d9", alpha=0.6, lw=0, zorder=0)
@@ -436,12 +529,12 @@ def pattern_figure(
                     position = (float(note["two_theta"]), (float(note["intensity"]) - minimum) / scale)
                 except (KeyError, TypeError, ValueError):
                     continue
-                ax.annotate(
+                texts.append(ax.annotate(
                     text.replace("$", r"\$"), position, xytext=(0, 3), textcoords="offset points", ha="center",
                     va="bottom", fontsize=FONT_SIZE - 1, color="black", annotation_clip=True,
                     bbox={"boxstyle": "square,pad=0.2", "fc": "white", "ec": "#c9cdc6", "lw": 0.4, "alpha": 0.85},
                     zorder=6,
-                )
+                ))
 
         ax.set_xlim(low, high)
         ax.set_ylim(bottom, top)
@@ -450,41 +543,102 @@ def pattern_figure(
         ax.set_ylabel("Intensity (a.u.)")
         ax.set_xlabel(f"2θ (°, {radiation})" if radiation else "2θ (°)")
         if hkl:
-            _pattern_hkl(figure, ax, shown[-1], tops[-1], hkl, (low, high), deg_per_mm, bottom, top,
-                         HKL_PATTERN_MAX if width_mm >= 120 else HKL_PATTERN_MAX // 2)
+            top, written = _pattern_hkl(figure, ax, shown[-1], hkl, colors, (low, high), deg_per_mm, bottom, top,
+                                        HKL_PATTERN_MAX if width_mm >= 120 else HKL_PATTERN_MAX // 2,
+                                        obstacles=list(texts), curves=points)
+            texts.extend(written)
+        if legend is not None:
+            _clear_legend(figure, ax, legend, texts, points, bottom, top)
         return _save(figure, fmt, dpi)
 
 
-HKL_PATTERN_MAX = 10
+HKL_PATTERN_MAX = 14
 
 
-def _pattern_hkl(figure, ax, curve, marks, candidates, window, deg_per_mm, bottom, top, most) -> None:
-    """Miller indices over the top pattern's peaks (strongest first, at least one label width apart),
-    above the peak symbols; the axis top is raised until every label fits inside the frame."""
+def _pattern_hkl(figure, ax, curve, candidates, colors, window, deg_per_mm, bottom, top, most,
+                 obstacles=(), curves=()):
+    """Miller indices over the top pattern's peaks, strongest first, at most ``most``: a label that
+    would cross another label, an ``obstacles`` text or a curve of ``curves`` (``(x, y)`` arrays) is
+    left out; the axis top is raised until every label fits inside the frame. Returns the new top
+    and the labels."""
     x, y = curve[0], curve[1]
     low, high = window
-    gap = 3.2 * deg_per_mm  # a vertical 7 pt label is about 3 mm wide
-    picked: list[tuple[float, float, str]] = []
-    for position, text in candidates:
-        if not low <= position <= high or any(abs(position - other) < gap for other, _, _ in picked):
+    same = 0.8 * deg_per_mm  # lines this close sit on one peak: its first (strongest) line only
+    picked: list[tuple[float, float, str, int]] = []
+    for position, text, phase in candidates:
+        if not low <= position <= high or any(abs(position - other) < same for other, _, _, _ in picked):
             continue
         near = np.abs(x - position) <= 0.15
         height = float(y[near].max()) if near.any() else float(np.interp(position, x, y))
-        height = max([height] + [level for px, level in marks if abs(px - position) < 1.6 * deg_per_mm])
-        picked.append((position, height, text))
-        if len(picked) == most:
+        picked.append((position, height, text, phase))
+        if len(picked) == 3 * most:
             break
     artists = [ax.annotate(text, (position, height), xytext=(0, 3), textcoords="offset points", rotation=90,
-                           ha="center", va="bottom", fontsize=FONT_SIZE - 1, zorder=5)
-               for position, height, text in picked]
+                           ha="center", va="bottom", fontsize=FONT_SIZE - 1, zorder=5,
+                           color=colors[phase % len(colors)])
+               for position, height, text, phase in picked]
     renderer = figure.canvas.get_renderer()
-    for _ in range(3):  # the axes height settles with the layout: measure, raise the top, measure again
+
+    def settle(top, labels):
+        for _ in range(3):  # the axes height settles with the layout: measure, raise the top, measure again
+            figure.canvas.draw()
+            inverse = ax.transData.inverted()
+            needed = max([top] + [inverse.transform((0, label.get_window_extent(renderer).y1))[1] for label in labels])
+            if needed <= top * 1.0001:
+                break
+            top = needed + (needed - bottom) * 0.01
+            ax.set_ylim(bottom, top)
+        return top
+
+    def prune(labels):
         figure.canvas.draw()
-        inverse = ax.transData.inverted()
-        needed = max([top] + [inverse.transform((0, artist.get_window_extent(renderer).y1))[1] for artist in artists])
-        if needed <= top * 1.0001:
-            break
-        top = needed + (needed - bottom) * 0.01
+        taken = [text.get_window_extent(renderer) for text in obstacles]
+        points = [ax.transData.transform(np.column_stack([cx, cy])) for cx, cy in curves if len(cx)]
+        points = np.vstack(points) if points else np.empty((0, 2))
+        kept = []
+        for label in labels:
+            box = label.get_window_extent(renderer).padded(1.0)
+            crossed = ((points[:, 0] > box.x0) & (points[:, 0] < box.x1)
+                       & (points[:, 1] > box.y0) & (points[:, 1] < box.y1)).any()
+            if len(kept) < most and not crossed and not any(box.overlaps(other) for other in taken):
+                kept.append(label)
+                taken.append(box)
+            else:
+                label.remove()
+        return kept
+
+    start = top
+    top = settle(top, artists)
+    artists = prune(artists)
+    ax.set_ylim(bottom, start)  # room for the labels kept only
+    top = settle(start, artists)
+    return top, prune(artists)
+
+
+def _clear_legend(figure, ax, legend, texts, points, bottom, top) -> None:
+    """Raise the axis top until the legend at the upper right sits above every curve, symbol and
+    label under it (it never covers a peak)."""
+    renderer = figure.canvas.get_renderer()
+    pad = 1.5 * figure.dpi / 72
+    for _ in range(5):  # the layout settles with each new top: measure again
+        figure.canvas.draw()
+        box, frame = legend.get_window_extent(renderer), ax.get_window_extent(renderer)
+        highest = frame.y0
+        for xs, ys in points:
+            if not len(xs):
+                continue
+            px = ax.transData.transform(np.column_stack([xs, ys]))
+            under = (px[:, 0] >= box.x0) & (px[:, 0] <= box.x1)
+            if under.any():
+                highest = max(highest, float(px[under, 1].max()))
+        for text in texts:
+            extent = text.get_window_extent(renderer)
+            if extent.x1 >= box.x0 and extent.x0 <= box.x1:
+                highest = max(highest, float(extent.y1))
+        if highest + pad <= box.y0:
+            return
+        # data scale with the span, labels do not: a slight overshoot, settled by the next pass
+        top = bottom + (top - bottom) * (highest + pad - frame.y0) / max(box.y0 - frame.y0, 1.0)
         ax.set_ylim(bottom, top)
 
 
@@ -501,6 +655,9 @@ def fit_figure(
     annotations=None,
     radiation: str | None = None,
     references: dict | None = None,
+    peaks: str = "hkl",
+    names: str = "legend",
+    bars: bool = True,
 ) -> bytes:
     """Render the refinement fit as PNG, SVG or PDF bytes (deterministic for equal input).
 
@@ -510,13 +667,14 @@ def fit_figure(
     the 2θ axis title. ``annotations``: the analyst's plot labels (``{two_theta, intensity,
     text}``), written as plain text. An identification (no calculated curve) is drawn as a
     phase-identification figure (:func:`identification_figure`); ``references`` ``{phase: (2θ,
-    relative intensity)}`` are its reference strips.
+    relative intensity)}`` are its reference strips and ``peaks``, ``names``, ``bars`` its style
+    (unused for a fit).
     """
     if getattr(refinement.plot_data, "y_calc", None) is None:
         return identification_figure(
             refinement, fmt=fmt, dpi=dpi, width_mm=width_mm, excluded_ranges=excluded_ranges,
-            phase_labels=phase_labels, hkl_labels=hkl_labels, annotations=annotations, radiation=radiation,
-            references=references,
+            phase_labels=phase_labels, annotations=annotations, radiation=radiation,
+            references=references, peaks=peaks, names=names, bars=bars,
         )
     if fmt not in {"png", "svg", "pdf"}:
         raise ValueError(f"Unsupported figure format: {fmt}")
@@ -689,31 +847,35 @@ def identification_figure(
     width_mm: float = 170.0,
     excluded_ranges=None,
     phase_labels: dict[str, str] | None = None,
-    hkl_labels: bool = False,
     annotations=None,
     radiation: str | None = None,
     references: dict | None = None,
+    peaks: str = "hkl",
+    names: str = "legend",
+    bars: bool = True,
 ) -> bytes:
     """Phase-identification figure of one result: the measured pattern (raw), one reference strip per
     phase (``references`` ``{phase: (2θ, relative intensity)}``; without one, the phase's reflections
-    in the result) and its peaks marked. ``hkl_labels``: Miller indices of the strongest lines of the
-    first (main) phase."""
+    in the result) and its peaks labelled. ``peaks``: ``hkl`` (Miller indices of the strongest lines of
+    every phase, in its colour), ``symbols`` (one filled symbol per phase) or ``none``; ``names``:
+    ``legend`` or ``strips``; ``bars``: the reference strips drawn (see :func:`pattern_figure`)."""
     data = refinement.plot_data
     x = np.asarray(data.x, dtype=float)
     finite_x = x[np.isfinite(x)]
     if finite_x.size < 2 or float(finite_x.max()) <= float(finite_x.min()):
         raise ValueError("The refinement has no usable 2θ range to plot")
     low, high = float(finite_x.min()), float(finite_x.max())
-    names = list(refinement.lst_data.phases_results)
+    phase_names = list(refinement.lst_data.phases_results)
     phases = []
-    for name in names:
+    for name in phase_names:
         tt, relative = (references or {}).get(name) or result_lines(refinement, name, low, high)
         phases.append({"label": phase_strip_label(name, (phase_labels or {}).get(name)),
                        "two_theta": tt, "intensity": relative})
-    marks = {index: peak_marks(refinement, name, low, high) for index, name in enumerate(names)}
-    hkl = hkl_candidates(refinement, names[0], low, high) if hkl_labels and names else None
+    hkl = interleaved_hkl([hkl_candidates(refinement, name, low, high) for name in phase_names]) if peaks == "hkl" else None
+    marks = ({index: peak_marks(refinement, name, low, high) for index, name in enumerate(phase_names)}
+             if peaks == "symbols" else {})
     return pattern_figure(
         [{"x": x, "y": data.y_obs, "label": None, "marks": marks}], phases, fmt=fmt, dpi=dpi,
         width_mm=width_mm, radiation=radiation, hkl=hkl, excluded_ranges=excluded_ranges,
-        annotations=annotations,
+        annotations=annotations, symbols=peaks == "symbols", names=names, bars=bars,
     )
