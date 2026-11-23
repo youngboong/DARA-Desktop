@@ -19,9 +19,9 @@ logger = logging.getLogger("dara.server.report")
 
 NOT_RECORDED = "not recorded"
 FIGURE_CAPTION = (
-    "Figure 1. Observed (red circles), calculated (black line) and background (grey) intensities, "
-    "reflection positions of each phase (vertical bars) and the difference curve (blue). "
-    "Shaded intervals were excluded from refinement."
+    "Figure 1. Observed (black circles), calculated (red line) and background (grey line) intensities, "
+    "reflection positions of each phase (vertical bars) and the difference curve (observed − calculated, "
+    "grey). Shaded intervals were excluded from refinement."
 )
 HKL_CAPTION = " Miller indices (hkl) label the strongest reflections."
 NOT_VERIFIED = "Peak matching only · not verified by a fit"  # the status of an identification (also on its page)
@@ -1357,9 +1357,12 @@ def _build_report_html(
 # ---------------------------------------------------------------------------
 
 IDENTIFICATION_FIGURE_CAPTION = (
-    "Figure 1. Observed (red circles) and background (grey) intensities with the calculated reflections "
-    "of each identified phase as sticks at their matched positions and heights, and their positions "
-    "(vertical bars). No calculated pattern was refined. Shaded intervals were excluded."
+    "Figure 1. Measured pattern (black line; raw data, background not subtracted) and, below it, the "
+    "reference pattern of each identified phase (vertical bars, heights = relative intensities, calculated "
+    "from the database structure named on the strip). No pattern was refined. Shaded intervals were excluded."
+)
+IDENTIFICATION_SYMBOL_CAPTION = (
+    " Symbols mark the strongest reflections of each phase at their matched positions."
 )
 SCHERRER_CORRECTION = {
     "curve": "after removing the instrument FWHM of the profile's FWHM curve{standard}",
@@ -1524,10 +1527,12 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
                 fit, fmt="svg", width_mm=170, excluded_ranges=excluded_ranges,
                 counts_like=_counts_like(document), hkl_labels=hkl_labels, annotations=task.get("annotations"),
                 radiation=review_router.figure_radiation(document),
+                references=review_router.figure_references(document, fit),
             ),
-            "Observed pattern and background with the reference lines of the identified phases",
+            "Measured pattern with the reference patterns of the identified phases",
         )
-        caption = IDENTIFICATION_FIGURE_CAPTION + (HKL_CAPTION if hkl_labels else "")
+        caption = (IDENTIFICATION_FIGURE_CAPTION + (IDENTIFICATION_SYMBOL_CAPTION if len(phases) > 1 else "")
+                   + (HKL_CAPTION.replace("the strongest", "the strongest main-phase") if hkl_labels else ""))
         parts.append(f"<figure>{figure}<figcaption>{escape(caption)}</figcaption></figure>")
     except Exception:  # noqa: BLE001 - the report is written without the figure
         logger.warning("Identification figure failed", exc_info=True)

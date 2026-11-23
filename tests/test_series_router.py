@@ -39,7 +39,9 @@ class ASGIClient:
             }, receive, send)
             start = next(item for item in messages if item["type"] == "http.response.start")
             raw = b"".join(item.get("body", b"") for item in messages if item["type"] == "http.response.body")
-            return SimpleNamespace(status_code=start["status"], json=lambda: json.loads(raw))
+            headers = {key.decode(): value.decode() for key, value in start.get("headers", [])}
+            return SimpleNamespace(status_code=start["status"], json=lambda: json.loads(raw), content=raw,
+                                   headers=headers)
 
         return asyncio.run(run())
 
@@ -319,3 +321,79 @@ def test_detail_items_carry_the_list_row_fields(populated, client, monkeypatch):
     assert items[1]["sample"] == "Anneal 500" and items[1]["user"] == "amy" and items[1]["adopted"] == "version:2"
     assert items[1]["created_on"].startswith("2026-05-01") and items[1]["error_summary"] is None
     assert items[2]["sample"] is None and items[3]["progress"] is None
+
+
+# --- stacked-pattern figure -----------------------------------------------------------------
+
+
+def test_group_phases_merges_one_phase_across_tasks_and_keeps_polymorphs_apart():
+    groups = series_router.group_phases([
+        (2, ["ZnO_186_(cod_1)-0", "TiO2_136_(cod_5)-0", "Fe2O3_167_(cod_2)-0"],
+         {"ZnO_186_(cod_1)-0": 0.6, "TiO2_136_(cod_5)-0": 0.395, "Fe2O3_167_(cod_2)-0": 0.005}),
+        (1, ["ZnO_186_(cod_3)-0", "TiO2_141_(cod_4)-0"], {"ZnO_186_(cod_3)-0": 0.7, "TiO2_141_(cod_4)-0": 0.3}),
+    ])
+    assert [group["key"] for group in groups] == [
+        "ZnO_186_(cod_1)-0", "TiO2_136_(cod_5)-0", "TiO2_141_(cod_4)-0", "Fe2O3_167_(cod_2)-0"]
+    assert groups[0]["names"] == {2: "ZnO_186_(cod_1)-0", 1: "ZnO_186_(cod_3)-0"}  # another record, one phase
+    assert groups[0]["max_weight"] == pytest.approx(70.0)
+    assert not series_router._default_phase(groups[3]) and series_router._default_phase(groups[2])
+    # identifications carry no amounts: every phase is in the default selection, in order of appearance
+    found = series_router.group_phases([(7, ["B_2_(cod_2)", "A_1_(cod_1)"], {})])
+    assert [group["key"] for group in found] == ["B_2_(cod_2)", "A_1_(cod_1)"]
+    assert all(series_router._default_phase(group) for group in found)
+
+
+@pytest.fixture
+def figure_series(populated, monkeypatch):
+    import numpy as np
+    import pandas as pd
+
+    from dara.server import review_router
+
+    monkeypatch.setattr("dara.server.task_summary.summarize_stored_result", lambda uuid, runtime_s: None)
+    x = np.linspace(20, 60, 400)
+    phases = {2: {"ZnO_186_(cod_1)-0": 0.9, "Fe2O3_167_(cod_2)-0": 0.1}, 1: {"ZnO_186_(cod_3)-0": 1.0}}
+
+    def refinement(task_id):
+        names = list(phases[task_id])
+        return SimpleNamespace(
+            plot_data=SimpleNamespace(x=x, y_obs=10 + task_id + np.exp(-0.5 * ((x - 34.4) / 0.2) ** 2), y_calc=x * 0),
+            lst_data=SimpleNamespace(phases_results={name: object() for name in names}),
+            peak_data=pd.DataFrame({"2theta": [34.4, 33.2], "intensity": [100.0, 50.0], "phase": names[:1] + names[-1:]}),
+            get_phase_weights=lambda: phases[task_id],
+        )
+
+    async def load(task_id):
+        return {"index": task_id, "review": {}, "job": {}}, SimpleNamespace(search_kwargs={"wavelength": "Cu"})
+
+    monkeypatch.setattr(review_router, "_load_completed_task", load)
+    monkeypatch.setattr(review_router, "_resolve", lambda document, selection, task: (refinement(task["index"]), {}))
+    monkeypatch.setattr(review_router, "figure_references",
+                        lambda document, fit, names=None: {"ZnO_186_(cod_1)-0": (np.array([34.0]), np.array([100.0]))})
+    return populated
+
+
+def test_figure_options_list_completed_tasks_in_order_and_the_phase_union(figure_series, client):
+    body = client.get("/api/series/s1/figure-options").json()
+    assert [task["task_id"] for task in body["tasks"]] == [2, 1]  # series order; the running task 3 is left out
+    assert [task["label"] for task in body["tasks"]] == ["a_300C", "a_500C"]  # file names without extension
+    assert [phase["key"] for phase in body["phases"]] == ["ZnO_186_(cod_1)-0", "Fe2O3_167_(cod_2)-0"]
+    assert body["phases"][0]["tasks"] == [2, 1] and body["phases"][1]["max_weight_percent"] == 10.0
+    assert body["phases"][0]["label"].endswith("COD 1") and all(phase["default"] for phase in body["phases"])
+    assert client.get("/api/series/nope/figure-options").status_code == 404
+
+
+def test_series_figure_renders_the_selection(figure_series, client):
+    svg = client.get("/api/series/s1/figure.svg")
+    assert svg.status_code == 200 and svg.headers["content-type"] == "image/svg+xml"
+    assert 'inline; filename="dara_series_Anneal_patterns_170mm.svg"' in svg.headers["content-disposition"]
+    text = svg.content.decode()
+    assert "a_300C" in text and "a_500C" in text and "COD 1" in text and "Intensity (a.u.)" in text
+    one = client.get("/api/series/s1/figure.svg?tasks=1&phases=&download=true")
+    assert one.status_code == 200 and "attachment" in one.headers["content-disposition"]
+    assert "a_300C" not in one.content.decode() and "COD 1" not in one.content.decode()
+    png = client.get("/api/series/s1/figure.png?width_mm=85&dpi=100&normalize=true")
+    assert png.status_code == 200 and png.content.startswith(b"\x89PNG")
+    assert client.get("/api/series/s1/figure.pdf").content.startswith(b"%PDF")
+    assert client.get("/api/series/s1/figure.gif").status_code == 404
+    assert client.get("/api/series/s1/figure.svg?tasks=99").status_code == 422

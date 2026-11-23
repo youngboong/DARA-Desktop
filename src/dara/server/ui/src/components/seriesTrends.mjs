@@ -114,3 +114,19 @@ export function seriesPreviewRows(preview) {
       variableText: item.variable ? `${item.variable.value} ${item.variable.unit}` : '—',
     }));
 }
+
+/**
+ * URL of the series' stacked-pattern figure (`format` png/svg/pdf, `widthMm` 170 or 85). `tasks`:
+ * the selected task ids, left out when all `allTasks` are selected; `phases`: the selected phase
+ * keys (always sent, so an empty selection draws no strips); `download` asks for an attachment.
+ */
+export function seriesFigureHref(api, seriesId, { tasks, allTasks, phases, normalize = false, format = 'svg', widthMm = 170, download = false }) {
+  const query = new URLSearchParams();
+  if (tasks && allTasks && tasks.length !== allTasks.length) query.set('tasks', tasks.join(','));
+  if (phases) query.set('phases', phases.join(','));
+  if (normalize) query.set('normalize', 'true');
+  if (widthMm !== 170) query.set('width_mm', String(widthMm));
+  if (download) query.set('download', 'true');
+  const text = query.toString().replace(/%2C/g, ',');
+  return `${api}/series/${encodeURIComponent(seriesId)}/figure.${format}${text ? `?${text}` : ''}`;
+}

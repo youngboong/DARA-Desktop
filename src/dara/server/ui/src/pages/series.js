@@ -1,15 +1,16 @@
 import React from 'react';
 import Loadable from 'react-loadable';
-import { Alert, Button, Progress, Select, Space, Spin, Table, Tag, Typography, message } from 'antd';
-import { LineChartOutlined, ReloadOutlined, TableOutlined } from '@ant-design/icons';
+import { Alert, Button, Dropdown, Progress, Select, Space, Spin, Switch, Table, Tag, Typography, message } from 'antd';
+import { DownOutlined, DownloadOutlined, LineChartOutlined, ReloadOutlined } from '@ant-design/icons';
 import Layout from '../components/Layout';
 import { resultColumns } from '../components/ResultColumns';
 import { downloadTable, errorText } from '../components/exportTable';
 import { taskHref } from '../components/sampleNav.mjs';
 import { formatDate } from '../components/resultsList.mjs';
+import { FIGURE_FILES } from '../components/confidence.mjs';
 import {
   LATTICE_PARAMETERS, fitTraces, hasActiveItems, latticeTraces, phaseLabels, phaseTraces, progress,
-  taskIds, xAxis,
+  seriesFigureHref, taskIds, xAxis,
 } from '../components/seriesTrends.mjs';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
@@ -96,6 +97,46 @@ function FitChart({ items, axis }) {
     config={config('dara-series-fit')} style={{ width: '100%' }} useResizeHandler />;
 }
 
+/**
+ * The series' measured patterns stacked (first task at the bottom) over one reference strip per
+ * phase, as the journal figure itself: the preview is the SVG the Download menu saves.
+ */
+function StackedPatterns({ options, figure, onChange, href }) {
+  const src = href('svg', 170);
+  const [shown, setShown] = React.useState({ src: null, failed: false });
+  if (!options.tasks.length) return null;
+  const loading = shown.src !== src;
+  const weight = phase => (phase.max_weight_percent === null ? '' : ` (max ${phase.max_weight_percent.toFixed(1)} wt%)`);
+  return <ChartBlock title="Stacked patterns">
+    <div className="dara-toolbar">
+      <div className="dara-toolbar-group">
+        <label className="dara-toolbar-item"><span>Tasks</span>
+          <Select mode="multiple" size="small" aria-label="Tasks in the figure" style={{ width: 150 }} maxTagCount={0}
+            maxTagPlaceholder={() => `${figure.tasks.length} of ${options.tasks.length}`}
+            value={figure.tasks} onChange={tasks => onChange({ ...figure, tasks })} dropdownMatchSelectWidth={false} placeholder="None"
+            options={options.tasks.map(task => ({ value: task.task_id, label: `#${task.task_id} ${task.label}` }))} /></label>
+        <label className="dara-toolbar-item"><span>Phases</span>
+          <Select mode="multiple" size="small" aria-label="Phases in the figure" style={{ width: 150 }} maxTagCount={0}
+            maxTagPlaceholder={() => `${figure.phases.length} of ${options.phases.length}`}
+            value={figure.phases} onChange={phases => onChange({ ...figure, phases })} dropdownMatchSelectWidth={false} placeholder="None"
+            options={options.phases.map(phase => ({ value: phase.key, label: `${phase.label}${weight(phase)}` }))} /></label>
+      </div>
+      <div className="dara-toolbar-group">
+        <label className="dara-toolbar-item"><span>Normalize each to its max</span>
+          <Switch size="small" checked={figure.normalize} onChange={normalize => onChange({ ...figure, normalize })} aria-label="Normalize each pattern" /></label>
+      </div>
+    </div>
+    {!figure.tasks.length ? <Alert type="info" showIcon message="Select at least one task." /> : <>
+      {shown.src === src && shown.failed ? <Alert type="error" showIcon message="The figure could not be drawn." /> : null}
+      <div className="dara-figure-preview" aria-busy={loading}>
+        <img key={src} src={src} alt="Stacked measured patterns with the reference patterns of the phases"
+          onLoad={() => setShown({ src, failed: false })} onError={() => setShown({ src, failed: true })} />
+        {loading ? <div className="dara-figure-preview-wait"><Spin /></div> : null}
+      </div>
+    </>}
+  </ChartBlock>;
+}
+
 // "300 °C" (value, a space, the unit); the token from the file name when it has no value.
 const variableText = variable => (variable?.value !== null && variable?.value !== undefined
   ? `${variable.value}${variable.unit ? ` ${variable.unit}` : ''}` : variable?.raw ?? '—');
@@ -105,6 +146,26 @@ function SeriesDetail({ id, onName }) {
   const [error, setError] = React.useState(null); // {text, notFound, retryIn}
   const [attempt, setAttempt] = React.useState(0);
   const [exporting, setExporting] = React.useState(false);
+  const [figureOptions, setFigureOptions] = React.useState(null); // {tasks, phases} or {error}
+  const [figure, setFigure] = React.useState({ tasks: [], phases: [], normalize: false });
+  const completedCount = (data?.items || []).filter(item => item.state === 'COMPLETED').length;
+
+  // Tasks and phases of the stacked figure: reloaded when another task completes, then all tasks
+  // and the default phases are selected.
+  React.useEffect(() => {
+    if (!completedCount) return undefined;
+    let active = true;
+    fetch(`${URL}/series/${encodeURIComponent(id)}/figure-options`)
+      .then(response => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
+      .then(body => {
+        if (!active) return;
+        setFigureOptions(body);
+        setFigure(previous => ({ ...previous, tasks: body.tasks.map(task => task.task_id),
+          phases: body.phases.filter(phase => phase.default).map(phase => phase.key) }));
+      })
+      .catch(e => { if (active) setFigureOptions({ error: errorText(e) }); });
+    return () => { active = false; };
+  }, [id, completedCount]);
 
   // Polls while tasks are queued or running; a failed refresh retries with a growing delay
   // (10 s, 20 s, 40 s, then every minute) instead of stopping.
@@ -173,6 +234,15 @@ function SeriesDetail({ id, onName }) {
   const back = `from=series&id=${encodeURIComponent(id)}`;
   const columns = resultColumns({ hrefOf: row => taskHref(row.fw_id, { ids: seriesIds, back }), sourceHref: task => taskHref(task, { back }) });
   const rows = items.map(item => ({ ...item, fw_id: item.task_id, adopted: item.adopted ?? item.summary?.adopted }));
+  const figureReady = Boolean(figureOptions?.tasks?.length) && figure.tasks.length > 0;
+  const figureHref = (format, widthMm, download = false) => seriesFigureHref(URL, id, {
+    tasks: figure.tasks, allTasks: figureOptions?.tasks || [], phases: figure.phases, normalize: figure.normalize,
+    format, widthMm, download });
+  const downloads = [
+    { key: 'table', label: 'Results table (CSV)' },
+    { key: 'figure', label: 'Stacked patterns figure', disabled: !figureReady, children: FIGURE_FILES.map(file => ({
+      key: file.key, label: <a href={figureHref(file.format, file.widthMm, true)}>{file.label}</a> })) },
+  ];
   const exportTable = async () => {
     setExporting(true);
     try {
@@ -197,7 +267,9 @@ function SeriesDetail({ id, onName }) {
       <div className="dara-page-actions">
         <Button icon={<LineChartOutlined />} disabled={completedIds.length < 2}
           href={completedIds.length >= 2 ? `/compare/?tasks=${compareIds.join(',')}${compareValues}&from=series&id=${encodeURIComponent(id)}` : undefined}>Compare patterns</Button>
-        <Button icon={<TableOutlined />} loading={exporting} onClick={exportTable}>{exporting ? 'Exporting…' : 'Export table (CSV)'}</Button>
+        <Dropdown trigger={['click']} menu={{ items: downloads, onClick: ({ key }) => { if (key === 'table') exportTable(); } }}>
+          <Button icon={<DownloadOutlined />} loading={exporting}>{exporting ? 'Exporting…' : 'Download'} <DownOutlined /></Button>
+        </Dropdown>
       </div>
     </div>
     <div>
@@ -214,6 +286,8 @@ function SeriesDetail({ id, onName }) {
         { title: 'Variable', key: 'variable', width: 100, className: 'dara-num', render: (_, row) => variableText(row.variable) },
         columns.name, columns.verdict, columns.rwp, columns.gof, columns.phases,
       ]} />
+    {figureOptions?.error ? <Alert type="warning" showIcon message={`The stacked patterns could not be loaded: ${figureOptions.error}`} /> : null}
+    {figureOptions?.tasks ? <StackedPatterns options={figureOptions} figure={figure} onChange={setFigure} href={figureHref} /> : null}
     {identifiedOnly ? <Alert type="info" showIcon message="Identifications: peak matching only, not verified by a fit"
       description="No refined wt%, lattice parameters or Rwp to plot. Refine with Rietveld on a task page verifies its phases." /> : <>
     {done < 2 ? <Alert type="info" showIcon message="Trend charts need at least two completed tasks."

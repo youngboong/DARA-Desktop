@@ -453,8 +453,11 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   };
   // Ranges are React state: Plotly's own reset/autoscale buttons would only
   // restore the state they were last given, so Reset zoom replaces them.
-  const config = React.useMemo(() => ({ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG }), []);
-  const figureName = `dara_${task_id}_${String(plot_id ?? 'best').replace(':', '_')}_figure`;
+  // An identification's figure is the phase-identification figure of its Download menu (one export
+  // control): no screen-view image buttons here.
+  const config = React.useMemo(() => ({ responsive: true, displaylogo: false, ...NAVIGATION_CONFIG,
+    ...(identification ? { modeBarButtonsToRemove: [...NAVIGATION_CONFIG.modeBarButtonsToRemove, 'toImage'] } : {}) }), [identification]);
+  const figureName = identification ? null : `dara_${task_id}_${String(plot_id ?? 'best').replace(':', '_')}_figure`;
   // Plotly keeps the handlers of its last redraw; these stable ones always call the current render's.
   const handlers = React.useRef({});
   const plotHandlers = React.useMemo(() => Object.fromEntries(['onLegendClick', 'onLegendDoubleClick', 'onDoubleClick', 'onClick', 'onHover', 'onRelayout']

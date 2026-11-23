@@ -145,7 +145,7 @@ def test_headings_present_in_order(plain):
     assert [text for _, text in captions][:3] == [
         "Analysis conditions.", "Fit statistics.", "Phase quantification.",
     ]
-    assert "<figure>" in html and "Figure 1. Observed (red circles), calculated (black line)" in html
+    assert "<figure>" in html and "Figure 1. Observed (black circles), calculated (red line)" in html
     # no adopted/non-default selection: no "Result shown" line, no old status wording
     assert "Result shown" not in html and "Minimum-Rwp" not in html
     assert "Recorded settings" not in html and "<pre>" not in html

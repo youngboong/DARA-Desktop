@@ -382,7 +382,7 @@ async def download_report_bundle(
             refinement, fmt="png", dpi=300, width_mm=170,
             excluded_ranges=(meta.get("refinement_params") or {}).get("excluded_ranges"),
             counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
-            radiation=figure_radiation(document),
+            radiation=figure_radiation(document), references=_identification_references(document, refinement),
         )
     except Exception:  # noqa: BLE001 - the Word file is written without the figure
         figure_png = None
@@ -419,6 +419,47 @@ def figure_radiation(document) -> str | None:
     return radiation_text((getattr(document, "search_kwargs", None) or {}).get("wavelength"))
 
 
+def _identification_references(document, refinement) -> dict | None:
+    """Reference strips of an identification's figure; ``None`` for a Rietveld fit."""
+    if getattr(refinement.plot_data, "y_calc", None) is not None:
+        return None
+    return figure_references(document, refinement)
+
+
+def figure_references(document, refinement, names=None) -> dict:
+    """``{phase: (2θ, relative intensity)}`` of the reference strips of an identification figure: the
+    calculated pattern of each phase's database structure at the task's Kα1 wavelength. A phase whose
+    structure is not at hand is left out (its strip then shows the reflections of the result)."""
+    import logging
+
+    from dara.server.api_router import _reference_pool
+    from dara.server.report.figures import reference_lines
+
+    try:
+        from dara.search.candidate_cost import wavelength_angstrom
+
+        wavelength = wavelength_angstrom((getattr(document, "search_kwargs", None) or {}).get("wavelength", "Cu"))
+        x = np.asarray(refinement.plot_data.x, dtype=float)
+        low, high = float(np.nanmin(x)), float(np.nanmax(x))
+        from pathlib import Path
+
+        pool = {Path(str(getattr(cif, "filename", "") or "")).name.removesuffix(".cif"): cif
+                for cif in _reference_pool(document, refinement)}
+    except Exception:  # noqa: BLE001 - the figure is drawn with the result's reflections
+        logging.getLogger(__name__).debug("Reference strips unavailable", exc_info=True)
+        return {}
+    out = {}
+    for name in names if names is not None else list(refinement.lst_data.phases_results):
+        cif = pool.get(str(name))
+        if cif is None:
+            continue
+        try:
+            out[name] = reference_lines(cif.to_structure(), wavelength, low, high)
+        except Exception:  # noqa: BLE001
+            logging.getLogger(__name__).debug("Reference pattern of %s failed", name, exc_info=True)
+    return out
+
+
 @router.get("/task/{task_id}/figure.{fmt}")
 async def download_figure(
     task_id: int,
@@ -448,7 +489,7 @@ async def download_figure(
         content = fit_figure(
             refinement, fmt=fmt, dpi=dpi, width_mm=width_mm, excluded_ranges=excluded,
             counts_like=_counts_like(document), hkl_labels=hkl is True, annotations=task.get("annotations"),
-            radiation=figure_radiation(document),
+            radiation=figure_radiation(document), references=_identification_references(document, refinement),
         )
     except Exception as exc:
         raise HTTPException(500, f"Figure rendering failed: {exc}") from exc

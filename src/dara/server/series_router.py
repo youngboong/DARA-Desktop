@@ -10,6 +10,7 @@ from typing import Annotated, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from dara.cif import Cif
@@ -361,3 +362,183 @@ async def get_series(series_id: str):
         "created_on": _stamp(min(times)) if times else None,
         "items": entries,
     }
+
+
+# ---------------------------------------------------------------------------
+# stacked-pattern figure of a series
+# ---------------------------------------------------------------------------
+
+DEFAULT_MIN_WEIGHT_PERCENT = 1.0  # refined phases below this in every task start unselected
+_FIGURE_MEDIA = {"png": "image/png", "svg": "image/svg+xml", "pdf": "application/pdf"}
+
+
+def _one_phase(a: tuple, b: tuple) -> bool:
+    """Same phase across tasks: the same-phase rule of the confidence checks, and, when both
+    database space groups are known, the same one (anatase and rutile stay two strips)."""
+    from dara.server.confidence import same_phase
+
+    return same_phase(a, b) and (a[1] is None or b[1] is None or a[1] == b[1])
+
+
+def _plain_phase_label(name: str) -> str:
+    import re
+    from html import unescape
+
+    from dara.plot import phase_display_name
+    from dara.server.report.figures import phase_card
+
+    text = unescape(re.sub(r"<[^>]+>", "", phase_display_name(name)))
+    card = phase_card(name)
+    return f"{text} · {card}" if card else text
+
+
+def group_phases(tasks: list[tuple[int, list[str], dict]]) -> list[dict]:
+    """One entry per phase across ``tasks`` (``(task id, phase names, {name: weight fraction})`` in
+    series order): ``{key, identity, names: {task id: name}, max_weight, first}``, the largest amount
+    first, otherwise in order of appearance. Two phases of one task are never merged."""
+    from dara.server.confidence import phase_identity
+
+    groups: list[dict] = []
+    for task_id, names, weights in tasks:
+        for name in names:
+            identity = phase_identity(name)
+            group = next((group for group in groups if task_id not in group["names"]
+                          and _one_phase(identity, group["identity"])), None)
+            if group is None:
+                group = {"key": name, "identity": identity, "names": {}, "max_weight": None, "first": len(groups)}
+                groups.append(group)
+            group["names"][task_id] = name
+            if name in weights:
+                group["max_weight"] = max(group["max_weight"] or 0.0, 100.0 * float(weights[name]))
+    groups.sort(key=lambda group: (-(group["max_weight"] or 0.0), group["first"]))
+    return groups
+
+
+async def _series_figure_data(series_id: str) -> dict:
+    """Completed tasks of a series in series order with their adopted result (or identification),
+    and the union of their phases grouped into one entry per phase."""
+    from dara.server import review_router
+    from dara.server.api_router import list_row
+
+    records = _query_series(_DETAIL_PROPERTIES, series_id)
+    if not records:
+        raise HTTPException(status_code=404, detail="Series not found")
+    records.sort(key=lambda record: (_series_of(record).get("order", 0), record["index"]))
+    tasks, phase_lists = [], []
+    for record in records:
+        if record.get("status") != "COMPLETED":
+            continue
+        try:
+            task, document = await review_router._load_completed_task(record["index"])
+            selection = review_router._report_selection(None, False, review_router._review_metadata(task), None)
+            refinement, _ = review_router._resolve(document, selection, task)
+            names = list(refinement.lst_data.phases_results)
+        except Exception:  # noqa: BLE001 - a task without a usable result is left out of the figure
+            logger.info("Series figure: task %s has no usable result", record.get("index"), exc_info=True)
+            continue
+        try:
+            weights = refinement.get_phase_weights()
+        except Exception:  # noqa: BLE001 - an identification has no weight fractions
+            weights = {}
+        file_name = (record.get("job") or {}).get("name") or f"Task {record['index']}"
+        sample = list_row(record, _refreshed_summary(record)).get("sample")
+        tasks.append({"task_id": record["index"], "label": sample or Path(str(file_name)).stem,
+                      "document": document, "refinement": refinement})
+        phase_lists.append((record["index"], names, weights))
+    groups = group_phases(phase_lists)
+    for group in groups:
+        group["label"] = _plain_phase_label(group["key"])
+    return {"tasks": tasks, "groups": groups}
+
+
+def _default_phase(group: dict) -> bool:
+    return group["max_weight"] is None or group["max_weight"] >= DEFAULT_MIN_WEIGHT_PERCENT
+
+
+@router.get("/series/{series_id}/figure-options")
+async def series_figure_options(series_id: str):
+    """Tasks and phases a series figure can show, with the default selection."""
+    data = await _series_figure_data(series_id)
+    return {
+        "tasks": [{"task_id": item["task_id"], "label": item["label"]} for item in data["tasks"]],
+        "phases": [{
+            "key": group["key"], "label": group["label"], "tasks": list(group["names"]),
+            "max_weight_percent": None if group["max_weight"] is None else round(group["max_weight"], 2),
+            "default": _default_phase(group),
+        } for group in data["groups"]],
+    }
+
+
+@router.get("/series/{series_id}/figure.{fmt}")
+async def series_figure(
+    series_id: str,
+    fmt: str,
+    tasks: Optional[str] = None,
+    phases: Optional[str] = None,
+    normalize: bool = False,
+    width_mm: float = 170,
+    dpi: int = 600,
+    download: bool = False,
+):
+    """Stacked measured patterns of the series (first task at the bottom) with one reference strip
+    per phase and each phase's peaks marked where it was found. ``tasks``: comma-separated task ids
+    (default: all completed); ``phases``: comma-separated phase keys of ``figure-options`` (default:
+    its default selection; empty: none); ``normalize``: each pattern scaled to its own maximum."""
+    import numpy as np
+    from starlette.concurrency import run_in_threadpool
+
+    from dara.server import review_router
+    from dara.server.report.figures import pattern_figure, peak_marks, phase_strip_label, result_lines
+    from dara.server.utils import safe_download_stem
+
+    if fmt not in _FIGURE_MEDIA:
+        raise HTTPException(404, "Unsupported figure format; use png, svg or pdf")
+    data = await _series_figure_data(series_id)
+    chosen = data["tasks"]
+    if tasks is not None:
+        wanted = {part.strip() for part in tasks.split(",") if part.strip()}
+        chosen = [item for item in chosen if str(item["task_id"]) in wanted]
+    if not chosen:
+        raise HTTPException(422, "No completed task of this series is selected")
+    if phases is None:
+        groups = [group for group in data["groups"] if _default_phase(group)]
+    else:
+        # shortcut: keys are phase names joined by commas; a name with a comma would need a list parameter
+        wanted = {part for part in phases.split(",") if part}
+        groups = [group for group in data["groups"] if group["key"] in wanted]
+
+    def render() -> bytes:
+        low = min(float(np.nanmin(item["refinement"].plot_data.x)) for item in chosen)
+        high = max(float(np.nanmax(item["refinement"].plot_data.x)) for item in chosen)
+        strips = []
+        for group in groups:
+            # the reference of the first shown task that has the phase
+            task_id = next((item["task_id"] for item in chosen if item["task_id"] in group["names"]),
+                           next(iter(group["names"])))
+            item = next(entry for entry in data["tasks"] if entry["task_id"] == task_id)
+            name = group["names"][task_id]
+            lines = review_router.figure_references(item["document"], item["refinement"], [name]).get(name)
+            tt, relative = lines if lines is not None else result_lines(item["refinement"], name, low, high)
+            strips.append({"label": phase_strip_label(name), "two_theta": tt, "intensity": relative})
+        patterns = []
+        for item in chosen:
+            refinement = item["refinement"]
+            marks = {index: peak_marks(refinement, group["names"][item["task_id"]], low, high)
+                     for index, group in enumerate(groups) if item["task_id"] in group["names"]}
+            patterns.append({"x": refinement.plot_data.x, "y": refinement.plot_data.y_obs,
+                             "label": item["label"], "marks": marks})
+        return pattern_figure(patterns, strips, fmt=fmt, dpi=dpi, width_mm=width_mm, normalize=normalize,
+                              radiation=review_router.figure_radiation(chosen[0]["document"]))
+
+    try:
+        content = await run_in_threadpool(render)
+    except Exception as exc:
+        raise HTTPException(500, f"Figure rendering failed: {exc}") from exc
+    series = _series_of(_query_series(_LIST_PROPERTIES, series_id)[0]) or {}
+    filename = f"dara_series_{safe_download_stem(series.get('name') or series_id)}_patterns_{round(float(width_mm))}mm.{fmt}"
+    disposition = "attachment" if download else "inline"
+    return Response(
+        content,
+        media_type=_FIGURE_MEDIA[fmt],
+        headers={"Content-Disposition": f'{disposition}; filename="{filename}"', "X-Content-Type-Options": "nosniff"},
+    )

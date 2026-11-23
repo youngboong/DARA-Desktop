@@ -147,8 +147,8 @@ def test_journal_style_axes_fonts_and_formats():
 
 
 def test_hkl_labels_stay_inside_the_frame_and_off_the_legend():
-    """An identification: the reference line stands above the observed points; its label sits on
-    the line and inside the frame, and the strongest label wins a collision."""
+    """A Rietveld fit: each label sits on the curve and inside the frame, and the strongest label
+    wins a collision."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -157,10 +157,10 @@ def test_hkl_labels_stay_inside_the_frame_and_off_the_legend():
     peaks = pd.DataFrame({"2theta": [30.0, 30.05, 78.0], "phase": [A, A, B], "intensity": [950.0, 100.0, 280.0],
                           "h": [1, 2, 3], "k": [0, 0, 1], "l": [1, 0, 1]})
     refinement = SimpleNamespace(
-        plot_data=SimpleNamespace(x=x, y_obs=obs, y_calc=None, y_bkg=np.full_like(x, 20.0)),
+        plot_data=SimpleNamespace(x=x, y_obs=obs, y_calc=obs * 0.98, y_bkg=np.full_like(x, 20.0)),
         lst_data=SimpleNamespace(phases_results={A: object(), B: object()}), peak_data=peaks,
     )
-    svg = fit_figure(refinement, fmt="svg", hkl_labels=True, width_mm=85).decode("utf-8")
+    svg = fit_figure(refinement, fmt="svg", hkl_labels=True).decode("utf-8")
     assert "(101)" in svg  # the strongest line
     assert "(200)" not in svg  # 0.05° from the strongest: left out
     # (311) sits under the legend at the top right only if it fits; never drawn across it
@@ -184,3 +184,74 @@ def test_hkl_labels_stay_inside_the_frame_and_off_the_legend():
     finally:
         figures._draw_hkl_labels = original
     assert seen == {"inside": True, "off_legend": True, "count": seen["count"]} and seen["count"] >= 1
+
+
+# --- phase-identification figure ------------------------------------------------------
+
+def _identification(two_phases=True):
+    x = np.linspace(10, 80, 1400)
+    obs = 300 + 2 * x + 800 * np.exp(-0.5 * ((x - 30) / 0.1) ** 2) + 300 * np.exp(-0.5 * ((x - 50) / 0.1) ** 2)
+    peaks = pd.DataFrame({"2theta": [30.0, 30.05, 44.0, 50.0], "phase": [A, A, A, B],
+                          "intensity": [950.0, 100.0, 20.0, 280.0],
+                          "h": [1, 2, 1, 3], "k": [0, 0, 1, 1], "l": [1, 0, 1, 1]})
+    phases = {A: object(), B: object()} if two_phases else {A: object()}
+    return SimpleNamespace(
+        plot_data=SimpleNamespace(x=x, y_obs=obs, y_calc=None, y_bkg=np.full_like(x, 300.0)),
+        lst_data=SimpleNamespace(phases_results=phases), peak_data=peaks[peaks["phase"].isin(phases)],
+    )
+
+
+def test_identification_figure_is_the_paper_style_one():
+    """Measured line (raw), no background, no y numbers, one labelled strip per phase with its
+    reference bars, per-phase symbols on the peaks, Miller indices of the main phase."""
+    import matplotlib
+
+    from dara.server.report import figures
+
+    matplotlib.use("Agg")
+    references = {A: (np.array([29.9, 44.0]), np.array([100.0, 40.0]))}
+    captured = {}
+    original = figures.pattern_figure
+
+    def spy(patterns, phases, **kwargs):
+        captured.update(patterns=patterns, phases=phases, kwargs=kwargs)
+        return original(patterns, phases, **kwargs)
+
+    figures.pattern_figure = spy
+    try:
+        svg = fit_figure(_identification(), fmt="svg", hkl_labels=True, references=references).decode("utf-8")
+    finally:
+        figures.pattern_figure = original
+    assert "Intensity (a.u.)" in svg and "Background" not in svg and "Observed" not in svg
+    assert "(101)" in svg and "(200)" not in svg  # 0.05° from the strongest: left out
+    assert "(311)" not in svg  # Miller indices of the main (first) phase only
+    assert "COD" in svg  # the strip label names the database record
+    pattern, (strip_a, strip_b) = captured["patterns"][0], captured["phases"]
+    assert list(strip_a["two_theta"]) == [29.9, 44.0]  # the reference pattern, not the matched lines
+    assert list(strip_b["two_theta"]) == [50.0] and list(strip_b["intensity"]) == [100.0]  # fallback: the result
+    # marks: lines of at least 10 % of the phase's strongest, one per 0.3°
+    assert list(pattern["marks"][0]) == [30.0] and list(pattern["marks"][1]) == [50.0]
+    assert np.allclose(pattern["y"], _identification().plot_data.y_obs)  # raw: no background subtracted
+
+
+def test_pattern_figure_marks_only_with_several_phases_and_stays_deterministic():
+    from dara.server.report.figures import PHASE_COLORS, pattern_figure
+
+    x = np.linspace(20, 60, 400)
+    one = {"x": x, "y": 10 + np.exp(-0.5 * ((x - 30) / 0.2) ** 2), "label": "S1 $", "marks": {0: [30.0], 1: [30.0]}}
+    two = {"x": x, "y": 50 + 9 * np.exp(-0.5 * ((x - 40) / 0.2) ** 2), "label": "S2", "marks": {1: [40.0]}}
+    strips = [{"label": "P1", "two_theta": [30.0], "intensity": [100.0]},
+              {"label": "P2", "two_theta": [40.0], "intensity": [60.0]}]
+    first = pattern_figure([one, two], strips, fmt="svg", normalize=True)
+    assert first == pattern_figure([one, two], strips, fmt="svg", normalize=True)
+    svg = first.decode("utf-8")
+    assert "S1 $" in svg and "S2" in svg and "P1" in svg and "P2" in svg
+    assert PHASE_COLORS[0].lower() in svg.lower() and PHASE_COLORS[1].lower() in svg.lower()
+    single = pattern_figure([one], strips[:1], fmt="svg").decode("utf-8")
+    assert PHASE_COLORS[0].lower() in single.lower()  # the strip
+    width, height = _png_size(pattern_figure([one, two], strips, fmt="png", dpi=100, width_mm=85))
+    assert width == pytest.approx(85 / 25.4 * 100, abs=2) and height > width * 0.5
+    with pytest.raises(ValueError):
+        pattern_figure([{"x": [1.0], "y": [1.0]}], [], fmt="svg")
+    with pytest.raises(ValueError):
+        pattern_figure([one], [], fmt="gif")

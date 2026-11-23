@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   MAX_SERIES_FILES, fitTraces, hasActiveItems, latticeTraces, phaseLabels, phaseTraces, progress,
-  seriesPreviewRows, taskIds, xAxis,
+  seriesFigureHref, seriesPreviewRows, taskIds, xAxis,
 } from '../src/dara/server/ui/src/components/seriesTrends.mjs';
 
 const lattice = (a, esd) => ({ a: { value: a, esd }, c: { value: a * 1.6, esd: esd * 2 } });
@@ -83,5 +83,12 @@ assert.deepEqual(seriesPreviewRows({ unit: '°C', items: [
   { filename: 'c.xy', order: 3, variableText: '—' },
 ]);
 assert.deepEqual(seriesPreviewRows(null), []);
+
+// The stacked-pattern figure: all tasks need no list; the phases are always explicit.
+assert.equal(seriesFigureHref('/api', 'ab c', { tasks: [1, 2], allTasks: [1, 2], phases: ['X_1_(cod_1)', 'Y_2'] }),
+  '/api/series/ab%20c/figure.svg?phases=X_1_%28cod_1%29,Y_2');
+assert.equal(seriesFigureHref('/api', 's', { tasks: [2], allTasks: [1, 2], phases: [], normalize: true, format: 'png', widthMm: 85, download: true }),
+  '/api/series/s/figure.png?tasks=2&phases=&normalize=true&width_mm=85&download=true');
+assert.equal(seriesFigureHref('/api', 's', { format: 'pdf' }), '/api/series/s/figure.pdf');
 
 console.log('series trend tests passed');
