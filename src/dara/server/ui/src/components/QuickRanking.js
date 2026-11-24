@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Loadable from 'react-loadable';
 import styled from 'styled-components';
-import { Alert, Button, Popover, Progress, Radio, Slider, Spin, Switch, Table, Tag, Tooltip } from 'antd';
+import { Alert, Button, message, Popover, Progress, Radio, Slider, Spin, Switch, Table, Tag, Tooltip } from 'antd';
 import { ArrowLeftOutlined, CloseOutlined, DownOutlined, PlusOutlined, ReloadOutlined, WarningOutlined } from '@ant-design/icons';
 import ChemicalFormula from './ChemicalFormula';
 import { progressPercent } from './structureLibrary.mjs';
 import {
-  MAX_REFINE, SORTERS, assignColors, backgroundLabel, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
+  MAX_REFINE, SORTERS, assignColors, backgroundLabel, backgroundSettings as automaticBackground, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
   progressText, rankingNotes, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, suggestedKeys, toggleKey,
   mismatchView, poolSources, startingPoints, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withPoints, withResidualProfile, zoomWindow,
   alternativeGroups, alternativeOf, alternativeRecords, unexplainedRows, peakTitle, peakCandidateRows, withPreviewRow, zoomAfterRelayout,
@@ -20,7 +20,18 @@ const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8
 const DOUBLE_CLICK_MS = 300; // Plotly's default doubleClickDelay
 
 // A cancelled job stops on the server; older servers have no DELETE, so its errors are ignored.
-const cancelJob = id => { if (id) fetch(`${URL}/quick-ranking/${id}`, { method: 'DELETE' }).catch(() => {}); };
+// Each job is cancelled once (a Cancel and the poll loop noticing it would send two DELETEs).
+const cancelled = new Set();
+const cancelJob = (id, keepalive = false) => {
+  if (!id || cancelled.has(id)) return;
+  cancelled.add(id);
+  fetch(`${URL}/quick-ranking/${id}`, { method: 'DELETE', keepalive }).catch(() => {});
+};
+// The pattern a request ranks: the uploaded file, or the stored pattern of a task.
+const patternOf = body => {
+  const file = body.get('pattern_file');
+  return file && typeof file === 'object' ? `${file.name}|${file.size}|${file.lastModified}` : `task:${body.get('source_task_id')}`;
+};
 
 /**
  * State of the quick ranking (search-match) of the submission page; it lives with the page, so the
@@ -31,6 +42,8 @@ const cancelJob = id => { if (id) fetch(`${URL}/quick-ranking/${id}`, { method: 
  */
 export function useQuickRanking(buildRequest) {
   const [shown, setShown] = useState(false);
+  const shownRef = useRef(shown);
+  shownRef.current = shown;
   const [state, setState] = useState({ status: 'idle' }); // + key, data | error | progress
   const [selected, setSelectedKeys] = useState([]);
   const [colors, setColors] = useState({});
@@ -46,6 +59,7 @@ export function useQuickRanking(buildRequest) {
   status.current = state.status;
   const ownBack = useRef(false); // a history.back() of close(): its popstate is not the user's Back
   const background = useRef(null); // accepted "Background…" settings, sent with every ranking request
+  const backgroundFor = useRef(null); // the pattern they were set on: another pattern ranks with the automatic background
   const preselect = useRef(null); // reference ids to select when the next ranking finishes (a reopened identification)
 
   const setSelected = keys => {
@@ -55,18 +69,25 @@ export function useQuickRanking(buildRequest) {
   const request = includeTheoretical => {
     const body = buildRequest();
     body.set('include_theoretical', String(includeTheoretical));
-    if (background.current) body.set('background', JSON.stringify(background.current));
+    const settings = backgroundOf(body);
+    if (settings) body.set('background', JSON.stringify(settings));
     return body;
+  };
+  // The accepted background settings when they were set on the pattern of `body`, else none.
+  const backgroundOf = body => (background.current && backgroundFor.current === patternOf(body) ? background.current : null);
+  const setBackground = settings => {
+    background.current = settings;
+    try { backgroundFor.current = patternOf(buildRequest()); } catch (error) { backgroundFor.current = null; }
   };
   let currentKey = null;
   try { currentKey = requestKey(request(theoretical).entries()); } catch (error) { /* no pattern yet */ }
 
-  const start = async (includeTheoretical = theoretical) => {
-    const sequence = ++run.current;
-    cancelJob(job.current);
-    job.current = null;
-    setSelected([]); // a ticked row of an earlier ranking must not be refined with this one
-    setFocused(null);
+  /**
+   * Ranks with the setup's inputs. `keepSelection` (Run again, Theoretical structures, a new
+   * background) ticks the selected structures again where the new ranking has them; otherwise the
+   * new ranking starts from its suggestion (a ticked row of an earlier ranking is not refined with it).
+   */
+  const start = async (includeTheoretical = theoretical, { keepSelection = false } = {}) => {
     let body;
     try {
       body = request(includeTheoretical);
@@ -74,8 +95,14 @@ export function useQuickRanking(buildRequest) {
       setState({ status: 'error', error: String(error.message || error) });
       return;
     }
+    const sequence = ++run.current;
+    cancelJob(job.current);
+    job.current = null;
+    if (keepSelection && selected.length && !preselect.current) preselect.current = [...selected];
+    setSelected([]);
+    setFocused(null);
     const key = requestKey(body.entries());
-    setState({ status: 'pending', key, progress: {} });
+    setState({ status: 'pending', key, progress: { phase: 'listing' } });
     const storedTask = body.get('source_task_id');
     try {
       let response = await fetch(storedTask ? `${URL}/task/${storedTask}/quick-ranking` : `${URL}/quick-ranking`, storedTask
@@ -96,8 +123,14 @@ export function useQuickRanking(buildRequest) {
       if (!response.ok) throw new Error(data.detail || 'The search-match failed.');
       if (data.status === 'error') throw new Error(data.error || 'The search-match failed.');
       setState({ status: 'done', key, data });
-      const wanted = (preselect.current || []).filter(source => (data.ranking || []).some(row => row.source === source));
+      const asked = preselect.current || [];
+      const wanted = asked.filter(source => (data.ranking || []).some(row => row.source === source));
       preselect.current = null;
+      if (asked.length > wanted.length) {
+        const missing = asked.length - wanted.length;
+        message.warning(`${missing} of the ${asked.length} selected phases ${missing === 1 ? 'is' : 'are'} not in this ranking${
+          wanted.length ? '' : ': the suggestion is selected instead'}.`, 8);
+      }
       setSelected(wanted.length ? wanted : defaultSelection(data));
     } catch (error) {
       if (sequence === run.current) setState({ status: 'error', key, error: String(error.message || error) });
@@ -110,18 +143,24 @@ export function useQuickRanking(buildRequest) {
     setState({ status: 'idle' });
   };
 
-  useEffect(() => () => { run.current += 1; cancelJob(job.current); }, []);
+  useEffect(() => {
+    // A reload or a closed tab stops a running ranking too: it would hold the server's one ranking slot.
+    const stop = () => cancelJob(job.current, true);
+    window.addEventListener('pagehide', stop);
+    return () => { window.removeEventListener('pagehide', stop); run.current += 1; cancelJob(job.current); };
+  }, []);
 
   const closeView = restoreScroll => {
     if (status.current === 'pending') cancel();
     setShown(false);
     if (restoreScroll) requestAnimationFrame(() => window.scrollTo(0, scroll.current));
   };
-  // Browser Back from the workspace: back to the setup, as "Back to setup".
+  // Browser Back from the workspace: back to the setup, as "Back to setup"; Forward shows it again.
   useEffect(() => {
     const onPop = event => {
       if (ownBack.current) { ownBack.current = false; return; }
       if (!event.state?.daraQuick) closeView(true);
+      else if (!shownRef.current) { scroll.current = window.scrollY; setShown(true); window.scrollTo(0, 0); }
     };
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
@@ -172,7 +211,7 @@ export function useQuickRanking(buildRequest) {
       if (!window.history.state?.daraQuick) window.history.pushState({ ...(window.history.state || {}), daraQuick: true }, '');
       window.scrollTo(0, 0);
       if (stored) {
-        background.current = stored.background || null;
+        setBackground(stored.background || null);
         preselect.current = stored.selected?.length ? [...stored.selected] : null;
         const withTheoretical = Boolean(stored.theoretical);
         setTheoretical(withTheoretical);
@@ -188,12 +227,12 @@ export function useQuickRanking(buildRequest) {
     },
     toggleTheoretical(checked) {
       setTheoretical(checked);
-      start(checked);
+      start(checked, { keepSelection: true });
     },
     /** Ranks again with HighScore-style background settings ({method, granularity, bending_factor, anchors}). */
     rankWithBackground(settings) {
-      background.current = settings;
-      start(theoretical);
+      setBackground(settings);
+      start(theoretical, { keepSelection: true });
     },
     /**
      * `onRefine({referenceIds, formulas})` resolves to whether a refinement was submitted; `extra`
@@ -216,7 +255,12 @@ export function useQuickRanking(buildRequest) {
     async identify(onIdentify) {
       setIdentifying(true);
       try {
-        await onIdentify({ referenceIds: [...selected], background: background.current, alternatives: alternativeRecords(state.data, selected) });
+        // In ranking order, as a refinement takes them; the theoretical switch is stored so a reopened
+        // identification ranks the same pool (an MP-only phase stays selectable).
+        let settings = null;
+        try { settings = backgroundOf(buildRequest()); } catch (error) { /* no pattern: none */ }
+        await onIdentify({ referenceIds: refineSelection(state.data, selected).referenceIds, background: settings,
+          alternatives: alternativeRecords(state.data, selected), theoretical });
       } finally {
         setIdentifying(false);
       }
@@ -259,18 +303,28 @@ async function backgroundView(jobId, settings) {
  * the sliders move, the curve is drawn on the pattern (`onPreview(view)`, debounced, from the finished
  * job's pattern); "Accept and rank again" ranks with it; Manual points opens the point editor (`onManual`).
  */
-function BackgroundForm({ initial, jobId, onAccept, onPreview, shown, onShow, onManual }) {
+function BackgroundForm({ initial, jobId, open, onAccept, onPreview, shown, onShow, onManual, onClose }) {
   const points = initial?.anchors?.length || 0;
+  // Kept while the popover is closed (it is not destroyed): sliders moved and not accepted come back as left.
   const [settings, setSettings] = useState(() => ({ ...backgroundSettings(initial), ...(points ? { method: 'manual' } : {}) }));
   const [previewError, setPreviewError] = useState('');
-  const set = (key, value) => setSettings(previous => ({ ...previous, [key]: value }));
+  const set = (key, value) => {
+    setSettings(previous => ({ ...previous, [key]: value }));
+    if (key !== 'method' && onShow) onShow(true); // a moved slider shows its curve
+  };
+  useEffect(() => {
+    if (!open) return undefined;
+    const escape = event => { if (event.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', escape);
+    return () => document.removeEventListener('keydown', escape);
+  }, [open, onClose]);
   const manual = settings.method === 'manual';
   // One automatic method (Sonneveld & Visser); default values are sent as "auto".
   const tuned = !manual && (settings.granularity !== 20 || settings.bending_factor !== 0);
   const chosen = tuned ? { ...settings, method: 'sonneveld_visser' } : { method: 'auto' };
   const chosenKey = JSON.stringify(chosen);
   useEffect(() => {
-    if (!jobId || manual) return undefined;
+    if (!jobId || manual || !open) return undefined;
     let current = true;
     const timer = setTimeout(async () => {
       try {
@@ -282,7 +336,7 @@ function BackgroundForm({ initial, jobId, onAccept, onPreview, shown, onShow, on
     }, 300);
     return () => { current = false; clearTimeout(timer); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobId, chosenKey, manual]);
+  }, [jobId, chosenKey, manual, open]);
   return <div className="dara-qr-bg-form">
     {onShow ? <label className="dara-qr-bg-show"><Switch size="small" checked={shown} onChange={onShow} />Show on plot</label> : null}
     <Radio.Group size="small" value={manual ? 'manual' : 'auto'} optionType="button" onChange={event => set('method', event.target.value)} aria-label="Background method"
@@ -309,6 +363,7 @@ const HELP = {
   explains: 'Share of the measured net intensity this structure explains on its own (lattice-penalised). Not an amount: refine for wt%.',
   rest: 'Share of the intensity the selected phases leave unexplained that this structure explains',
   peaks: 'Strong calculated peaks found in the pattern / strong peaks in range',
+  peaksRest: 'Strong calculated peaks found in what the selected phases leave / strong peaks in range (peaks they cover do not count)',
   lattice: 'Lattice change that fits best (d scale − 1)',
   line: 'Relative intensity of this structure\'s line at the peak (% of its strongest line)',
   height: 'Net intensity left at the peak after the selected phases (counts)',
@@ -337,13 +392,8 @@ function PeakCandidates({ peak, lookup, rows, selected, onAdd, onPreview, onClos
     document.addEventListener('keydown', escape);
     return () => { document.removeEventListener('mousedown', outside); document.removeEventListener('keydown', escape); };
   }, [onClose]);
-  // Bring the panel into view inside the side column only (the plot keeps its place).
-  useEffect(() => {
-    const box = panel.current?.closest('aside');
-    if (!box) return;
-    const below = panel.current.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom;
-    if (below > 0) box.scrollTop += below + 8;
-  }, [lookup]);
+  // Bring the panel into view: the side column scrolls first, the page only as far as needed.
+  useEffect(() => { panel.current?.scrollIntoView({ block: 'nearest' }); }, [lookup]);
   const found = lookup?.data ? peakCandidateRows(lookup.data, rows) : [];
   const full = selected.length >= MAX_REFINE;
   let content;
@@ -356,8 +406,8 @@ function PeakCandidates({ peak, lookup, rows, selected, onAdd, onPreview, onClos
     content = <ul onMouseLeave={() => onPreview(null)}>
       <li className="dara-qr-list-head"><span>Phase</span>
         <Tooltip title={HELP.line}><span className="dara-num">Line</span></Tooltip>
-        <Tooltip title={HELP.peaks}><span className="dara-num">Peaks</span></Tooltip>
-        <Tooltip title={HELP.rest}><span className="dara-num">Explains</span></Tooltip><span /></li>
+        <Tooltip title={HELP.peaksRest}><span className="dara-num">Peaks</span></Tooltip>
+        <Tooltip title={HELP.rest}><span className="dara-num">Of rest</span></Tooltip><span /></li>
       {found.map(row => <li key={row.key} onMouseEnter={() => onPreview(row)} onFocus={() => onPreview(row)}>
         <div className="dara-qr-phase">
           <div><ChemicalFormula formula={row.formula} /></div>
@@ -414,8 +464,8 @@ function ResidualPanel({ residual, rows, selected, setSelected, peak, onPeak, pe
     </ul> : null}
     {open && next.length ? <>
       <ul className="dara-qr-next">
-        <li className="dara-qr-list-head"><span>Next best match</span><Tooltip title={HELP.peaks}><span className="dara-num">Peaks</span></Tooltip>
-          <Tooltip title={HELP.rest}><span className="dara-num">Explains</span></Tooltip><span /></li>
+        <li className="dara-qr-list-head"><span>Next best match</span><Tooltip title={HELP.peaksRest}><span className="dara-num">Peaks</span></Tooltip>
+          <Tooltip title={HELP.rest}><span className="dara-num">Of rest</span></Tooltip><span /></li>
         {next.map(row => <li key={row.key}>
         <div className="dara-qr-phase">
           <div><ChemicalFormula formula={row.formula} /> <span className="meta"><SpaceGroup row={row} /></span></div>
@@ -425,7 +475,7 @@ function ResidualPanel({ residual, rows, selected, setSelected, peak, onPeak, pe
         <span className="dara-num" aria-label={`Explains ${row.scoreText} of the rest`}>{row.scoreText}</span>
         <Tooltip title={row.inRanking ? null : 'Not in the ranked list'}>
           <Button size="small" icon={<PlusOutlined />} disabled={!row.inRanking || selected.includes(row.key) || selected.length >= MAX_REFINE}
-            onClick={() => setSelected([...selected, row.key])}>Add</Button>
+            aria-label={`Add ${row.formula} ${row.sourceLabel}`} onClick={() => setSelected([...selected, row.key])}>Add</Button>
         </Tooltip>
       </li>)}</ul>
     </> : null}
@@ -440,7 +490,7 @@ export function QuickRankingSummary({ quick }) {
   return <div className="dara-qr-summary">
     <div>
       <div><b>Search-match</b> <span className="dara-qr-summary-meta">
-        {count ? `${data.pool?.candidates ?? count} candidates ranked · ${quick.selected.length} selected` : 'no candidate ranked'}</span></div>
+        {count ? `${count} phase${count === 1 ? '' : 's'} ranked · ${quick.selected.length} selected` : 'no candidate ranked'}</span></div>
       {data.combination?.length ? <div>Suggested: <Suggestion combination={data.combination} /></div> : null}
     </div>
   </div>;
@@ -563,6 +613,8 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const heading = useRef(null);
   useEffect(() => { heading.current?.focus(); }, []);
   const [showResidual, setShowResidual] = useState(false);
+  // A new ranking or an empty selection starts from the pattern view again.
+  useEffect(() => { setShowResidual(false); }, [state.data?.job_id, selected.length === 0]);
   const [showBackground, setShowBackground] = useState(false); // the measured pattern with its background
   const [backgroundOpen, setBackgroundOpen] = useState(false);
   const [backgroundPreview, setBackgroundPreview] = useState(null); // live curve while the Background popover is open
@@ -644,6 +696,14 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
     setPoints({ anchors: startingPoints(bgView), selected: null });
     setPointsPreview(null);
   };
+  const closeBackground = React.useCallback(() => { setBackgroundOpen(false); setBackgroundPreview(null); }, []);
+  // "Back to automatic": the automatic curve with the default settings (no base points, no tuned granularity).
+  const automatic = backgroundLabel(bgView?.settings) === backgroundLabel(null);
+  const backToAutomatic = () => {
+    setPoints(null);
+    setShowBackground(true);
+    quick.rankWithBackground(automaticBackground(null));
+  };
   const rankWithPoints = anchors => {
     setPoints(null);
     setShowBackground(true);
@@ -656,12 +716,15 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
     event.preventDefault();
     if (action === 'toggle') { setSelected(toggleKey(selected, row.key)); return; }
     const next = action === 'next' ? event.currentTarget.nextElementSibling : event.currentTarget.previousElementSibling;
-    if (next?.classList.contains('ant-table-row')) next.focus();
+    if (!next?.classList.contains('ant-table-row')) return;
+    // Only the table's list scrolls to the row; the page stays where it is.
+    next.focus({ preventScroll: true });
+    next.scrollIntoView({ block: 'nearest' });
   };
 
   const columns = [
     { title: 'Rank', dataIndex: 'rank', width: 64, className: 'dara-num', sorter: SORTERS.rank, defaultSortOrder: 'ascend',
-      render: (rank, row) => (altOf[row.key] ? <Tooltip title={`Alternative of ${altOf[row.key].formula} (rank ${altOf[row.key].rank}): the same strong peaks, so peak matching cannot tell them apart`}>
+      render: (rank, row) => (altOf[row.key] ? <Tooltip title={`Alternative of ${altOf[row.key].map(other => `${other.formula} (rank ${other.rank})`).join(', ')}: the same strong peaks, so peak matching cannot tell them apart`}>
         <span className="dara-qr-alt-rank">alt.</span></Tooltip> : rank) },
     { title: 'Formula', dataIndex: 'formula', render: formula => <ChemicalFormula formula={formula} /> },
     { title: 'Space group', dataIndex: 'spacegroupText', render: (_, row) => <span style={{ whiteSpace: 'nowrap' }}><SpaceGroup row={row} /></span> },
@@ -688,7 +751,8 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
     },
     {
       title: <Tooltip title={HELP.flags}>Flags</Tooltip>, dataIndex: 'tags',
-      render: tags => tags.map(tag => <Tag key={tag.label} color={tag.color} style={{ marginBottom: 2 }}>{tag.label}</Tag>),
+      render: tags => tags.map(tag => <Tag key={tag.label} color={tag.color} style={{ marginBottom: 2 }}>
+        {tag.label.startsWith('variant of ') ? <>variant of <ChemicalFormula formula={tag.label.slice(11)} /></> : tag.label}</Tag>),
     },
   ];
 
@@ -754,7 +818,7 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   };
   // The background view (when the server sends the curve) shows the measured pattern with the
   // background the ranking removed; the sticks belong to the net scale and stay in the other views.
-  const withBackground = pointTraces || (backgroundPreview ? backgroundTraces(backgroundPreview) : showBackground ? backgroundTraces(data?.background) : null);
+  const withBackground = pointTraces || (!showBackground ? null : backgroundPreview ? backgroundTraces(backgroundPreview) : backgroundTraces(data?.background));
   // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
   // A peak candidate under the mouse previews its sticks (fitted to what is left) in place of the table's preview.
   // The curve the plot leads with: the measured pattern in the background view, else the net (or residual) pattern.
@@ -771,7 +835,10 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
     const mark = Math.max(0, ...(markers?.y || []).filter((_, i) => markers.x[i] >= range[0] && markers.x[i] <= range[1]));
     return y && mark ? [0, Math.max(y[1], mark * 1.06)] : y;
   };
-  const shownY = zoom.y === 'fit' ? (zoom.range ? fitY(zoom.range) : null) : zoom.y;
+  // The residual view is scaled by what is left: a previewed candidate's sticks (fitted to the whole
+  // pattern) would otherwise flatten it.
+  const residualY = showResidual && left && !withBackground && bounds ? fitY(bounds) : null;
+  const shownY = zoom.y === 'fit' ? (zoom.range ? fitY(zoom.range) : null) : zoom.y ?? residualY;
   // A click on an unexplained-peak marker zooms there and lists its candidates. The hovered point can be
   // the pattern's (closest in 2-D), so a click within 0.3° of a marker, by the 2θ under the mouse, counts as well.
   const onPlotClick = event => {
@@ -836,8 +903,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                 </Tooltip>
                 {/* One Background control: show the curve, the method (automatic, granularity / bending, manual points), rank again. */}
                 {data.background?.settings ? <Popover trigger="click" placement="bottomRight" title="Background" open={backgroundOpen && !points}
-                  onOpenChange={value => { setBackgroundOpen(value); if (!value) setBackgroundPreview(null); }} destroyTooltipOnHide
-                  content={<BackgroundForm initial={data.background.settings} jobId={data.job_id} onPreview={setBackgroundPreview}
+                  onOpenChange={value => { setBackgroundOpen(value); if (!value) setBackgroundPreview(null); }}
+                  content={<BackgroundForm key={data.job_id} initial={data.background.settings} jobId={data.job_id} onPreview={setBackgroundPreview}
+                    open={backgroundOpen && !points} onClose={closeBackground}
                     shown={showBackground} onShow={backgroundTraces(data.background) ? setShowBackground : null}
                     onManual={backgroundTraces(data.background) ? () => { setBackgroundOpen(false); setBackgroundPreview(null); startPoints(); } : null}
                     onAccept={settings => {
@@ -869,17 +937,18 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
               onChange={pointsEdit.onChange} onSelect={pointsEdit.onSelect} onRemove={pointsEdit.onRemove} error={pointsError}
               warnings={[...pointWarnings, ...(shownCurve?.error ? [`Curve preview unavailable: ${shownCurve.error}`] : [])]}
               help="Drag a point · click the curve to add one · Alt+click a point or use the list to remove one. Search-match only."
-              submitText="Accept and rank again" resetText="Back to automatic" canReset={Boolean(bgView.settings?.anchors?.length)}
-              resetTitle={bgView.settings?.anchors?.length ? 'Rank again with the automatic background' : 'This ranking already uses the automatic background'}
-              onSubmit={() => rankWithPoints(points.anchors)} onReset={() => rankWithPoints([])} onCancel={() => setPoints(null)} /> : null}
+              submitText="Accept and rank again" resetText="Back to automatic" canReset={!automatic}
+              resetTitle={!automatic ? 'Rank again with the automatic background (default settings)' : 'This ranking already uses the automatic background'}
+              onSubmit={() => rankWithPoints(points.anchors)} onReset={backToAutomatic} onCancel={() => setPoints(null)} /> : null}
             </div> : null}
           </section>
           <div className="dara-qr-toolbar">
             <Tooltip title="Include structures computed only (Materials Project), not measured">
               <label><Switch size="small" checked={quick.theoretical} onChange={quick.toggleTheoretical} />Theoretical structures</label>
             </Tooltip>
-            <Button size="small" icon={<ReloadOutlined />} onClick={() => quick.start()}>Run again</Button>
-            <Tooltip title={poolSources(data)}><span className="dara-qr-pool">{poolText(data)}</span></Tooltip>
+            <Button size="small" icon={<ReloadOutlined />} onClick={() => quick.start(undefined, { keepSelection: true })}>Run again</Button>
+            <Tooltip title={[poolSources(data), `${rows.length} rows: one per formula and space group`].filter(Boolean).join(' · ')}>
+              <span className="dara-qr-pool">{poolText(data)}</span></Tooltip>
           </div>
           {caveats.length ? <div className="dara-caution-list" role="note"><ul>
             {caveats.map(text => <li key={text}><WarningOutlined />{text}</li>)}</ul></div> : null}
@@ -918,7 +987,9 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
               <span>{'Alternatives: '}</span></Tooltip>
             {groups[row.key].map((other, index) => <React.Fragment key={other.key}>{index ? ', ' : ''}
               <ChemicalFormula formula={other.formula} />{` ${other.sourceLabel}`}</React.Fragment>)}
-            <div><Tooltip title="Known-phase Rietveld refinement of the selected phases with these alternatives (minutes): the fit tells them apart">
+            <div><Tooltip title={selected.length + groups[row.key].length > MAX_REFINE
+              ? `${selected.length} selected + ${groups[row.key].length} alternatives exceed ${MAX_REFINE} phases: remove ${selected.length + groups[row.key].length - MAX_REFINE} selected phase${selected.length + groups[row.key].length - MAX_REFINE === 1 ? '' : 's'} first`
+              : 'Known-phase Rietveld refinement of the selected phases with these alternatives (minutes): the fit tells them apart'}>
               <Button size="small" loading={quick.refining} disabled={quick.identifying || selected.length + groups[row.key].length > MAX_REFINE}
                 onClick={() => quick.refine(onRefine, groups[row.key].map(other => other.key))}>Tell apart with Rietveld</Button>
             </Tooltip></div>

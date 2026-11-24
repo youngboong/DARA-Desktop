@@ -8,16 +8,21 @@ const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8
 export default function UpdateDialog({ open, onClose, status, onStatus }) {
   const [refused, setRefused] = useState(null);
   const [starting, setStarting] = useState(false);
+  const [checkFailed, setCheckFailed] = useState(false); // the check failed (not the install): Retry checks again
   const busy = isBusy(status);
 
   // Opening the dialog asks GitHub again; the header uses the server's 6 h cache.
+  const check = () => {
+    setCheckFailed(false);
+    onStatus({ ...(status || {}), state: 'checking' });
+    fetch(`${URL}/update?refresh=1`).then(response => response.json()).then(onStatus)
+      .catch(() => { setCheckFailed(true); onStatus({ ...(status || {}), state: 'error', error: 'DARA did not answer. Try again.' }); });
+  };
   useEffect(() => {
     if (!open) return;
     setRefused(null);
     if (busy) return;
-    onStatus({ ...(status || {}), state: 'checking' });
-    fetch(`${URL}/update?refresh=1`).then(response => response.json()).then(onStatus)
-      .catch(() => onStatus({ ...(status || {}), state: 'error', error: 'DARA did not answer. Try again.' }));
+    check();
   }, [open]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // The download runs on the server; follow it until DARA closes for the installer.
@@ -30,6 +35,7 @@ export default function UpdateDialog({ open, onClose, status, onStatus }) {
   }, [open, busy]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const install = force => {
+    setCheckFailed(false);
     setRefused(null);
     setStarting(true);
     fetch(`${URL}/update/install${force ? '?force=1' : ''}`, { method: 'POST' })
@@ -65,7 +71,7 @@ export default function UpdateDialog({ open, onClose, status, onStatus }) {
         {refused ? <Alert type="warning" showIcon message={refused.message} /> : null}
         {offer && !busy && !checking ? (
           <Space>
-            <Button type="primary" loading={starting} onClick={() => install(false)}>{failed || refused ? 'Retry' : 'Update now'}</Button>
+            <Button type="primary" loading={starting} onClick={() => (checkFailed ? check() : install(false))}>{failed || refused ? 'Retry' : 'Update now'}</Button>
             {refused?.force ? <Button disabled={starting} onClick={() => install(true)}>Update anyway</Button> : null}
           </Space>
         ) : null}

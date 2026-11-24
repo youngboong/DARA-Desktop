@@ -42,9 +42,11 @@ export default function FigureExportDialog({ open, onClose, style, onStyle, href
   const [shown, setShown] = React.useState({ src: null, failed: false });
   const set = key => value => onStyle({ ...style, [key]: value });
   const loading = shown.src !== src;
-  return <Modal title={title} open={open} onCancel={onClose} width={960} centered destroyOnClose
+  // Focus leaves the dialog before it is hidden (aria-hidden on a focused element is refused by the browser).
+  const close = () => { document.activeElement?.blur?.(); onClose(); };
+  return <Modal title={title} open={open} onCancel={close} width={960} centered destroyOnClose
     footer={[
-      <Button key="close" onClick={onClose}>Close</Button>,
+      <Button key="close" onClick={close}>Close</Button>,
       <Button key="download" type="primary" icon={<DownloadOutlined />} href={hrefOf(style, true)}>
         {`Download ${FORMAT_LABELS[style.format]}`}</Button>,
     ]}>

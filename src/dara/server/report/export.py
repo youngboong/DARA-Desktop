@@ -54,6 +54,8 @@ def html_to_pdf(html: str, timeout: float = 120) -> bytes | None:
             "--no-first-run", "--disable-extensions",
             # A profile of its own: never attaches to (or locks) the user's open browser.
             f"--user-data-dir={Path(tmp) / 'profile'}",
+            # The PDF's Creator is the browser's user agent: name DARA instead of "Mozilla/5.0 ...".
+            "--user-agent=DARA",
             f"--print-to-pdf={target}", source.as_uri(),
         ]
         try:

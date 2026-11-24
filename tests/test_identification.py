@@ -280,6 +280,17 @@ def test_residual_step_after_accepting_one_and_both_phases():
         qr.residual_step(x, y, CANDIDATES(), ["cod:9"])
 
 
+def test_residual_step_does_not_depend_on_tick_order():
+    # overlapping lines: subtracting in tick order would leave different residuals
+    x, y = _pattern([(A_D, A_I, 20000, 1.0), (B_D, B_I, 12000, 1.0), (C_D, C_I, 6000, 1.0)])
+    ab = qr.residual_step(x, y, CANDIDATES(), ["cod:1", "cod:2", "cod:3"])
+    ba = qr.residual_step(x, y, CANDIDATES(), ["cod:3", "cod:2", "cod:1"])
+    assert ab["explained"] == ba["explained"] and ab["unexplained_peaks"] == ba["unexplained_peaks"]
+    assert ab["profile"] == ba["profile"]
+    assert {s["source"]: s["gain"] for s in ab["steps"]} == {s["source"]: s["gain"] for s in ba["steps"]}
+    assert [s["source"] for s in ba["steps"]] == ["cod:3", "cod:2", "cod:1"]  # in the order asked
+
+
 def test_residual_endpoint_reuses_the_finished_job(monkeypatch):
     import time
 

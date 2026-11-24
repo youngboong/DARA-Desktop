@@ -658,17 +658,22 @@ def _instrument_line(metadata: dict | None) -> str | None:
 
 def _conditions_table(
     numbering: _Numbering, *, document, search_settings: dict, metadata: dict | None,
+    identified_from=None,
 ) -> str:
     rows: list[tuple[str, str]] = []
     mode = getattr(document, "analysis_mode", None)
-    if mode:
+    if identified_from is not None:
+        # submitted from an identification: its phases, not the user's precursors, were refined
+        rows.append(("Analysis mode", f"Rietveld refinement of the phases identified in task {identified_from} (search-match)"))
+    elif mode:
         rows.append(("Analysis mode", ANALYSIS_MODES.get(str(mode), str(mode))))
     elements = getattr(document, "elements", None)
     if elements:
         rows.append(("Elements", ", ".join(str(e) for e in elements)))
     precursors = getattr(document, "precursors", None)
     if precursors:
-        rows.append(("Precursor formulas", ", ".join(str(p) for p in precursors)))
+        rows.append(("Identified phases" if identified_from is not None else "Precursor formulas",
+                     ", ".join(str(p) for p in precursors)))
     rows.append(("Instrument profile", str(search_settings.get("instrument_profile") or NOT_RECORDED)))
     predict = getattr(document, "predict_kwargs", None) or {}
     kelvin = _finite(predict.get("temp")) if str(mode) == "reaction" else None
@@ -1023,6 +1028,30 @@ def build_report_html(
         )
 
 
+def _quantified_sentence(phase_details: dict, short_name=str) -> str | None:
+    """Summary sentence listing every phase with its amount (HTML-escaped); ``None`` without phases."""
+    quantified = []
+    # Beside a Le Bail phase the fractions are normalised over the Rietveld phases only.
+    relative = any((details or {}).get("le_bail") for details in phase_details.values())
+    for phase, details in phase_details.items():
+        weight = _finite(details.get("weight_percent"))
+        amount = (
+            _pm(weight_text(weight, details.get("weight_esd_percent")))
+            + (" wt%, relative" if relative else " wt%")
+            if weight is not None
+            else "Le Bail fit, no amount" if details.get("le_bail")
+            else "not quantified"
+        )
+        quantified.append(f"{escape(short_name(phase))} ({amount})")
+    if not quantified:
+        return None
+    listing = (
+        quantified[0] if len(quantified) == 1
+        else ", ".join(quantified[:-1]) + " and " + quantified[-1]
+    )
+    return f"Quantified phases: {listing}."
+
+
 def _build_report_html(
     task_id: int, task: dict, document, selection, review: dict, *,
     selection_label: str | None = None, selection_key: str | None = None,
@@ -1130,21 +1159,9 @@ def _build_report_html(
             ]
             if reasons:
                 sentences.append(escape(str(reasons[0])))
-    quantified = []
-    for phase, details in phase_details.items():
-        weight = _finite(details.get("weight_percent"))
-        amount = (
-            _pm(weight_text(weight, details.get("weight_esd_percent"))) + " wt%"
-            if weight is not None
-            else "not quantified"
-        )
-        quantified.append(f"{escape(short_name(phase))} ({amount})")
+    quantified = _quantified_sentence(phase_details, short_name)
     if quantified:
-        listing = (
-            quantified[0] if len(quantified) == 1
-            else ", ".join(quantified[:-1]) + " and " + quantified[-1]
-        )
-        sentences.append(f"Quantified phases: {listing}.")
+        sentences.append(quantified)
     gof, rwp = _finite(quality.get("gof")), _finite(quality.get("rwp"))
     if rwp is not None:
         sentences.append(f"Rwp = {rwp:.2f}%" + (f", GOF = {gof:.2f}." if gof is not None else "."))
@@ -1175,6 +1192,7 @@ def _build_report_html(
             metadata = None
     parts.append(_conditions_table(
         numbering, document=document, search_settings=search_settings, metadata=metadata,
+        identified_from=(((task.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}).get("identified_from"),
     ))
 
     # ---- 3 results ----------------------------------------------------------------------
@@ -1557,10 +1575,8 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
         entry = rir_rows.get(p["name"]) or {}
         weight, ratio = _finite(entry.get("weight_percent_rir")), _finite(entry.get("rir"))
         values = sizes.get(p["name"]) or []
-        if len(values) > 1:
-            size = f"{np.mean(values):.0f}{THIN}±{THIN}{np.std(values, ddof=1):.0f} ({len(values)})"
-        else:
-            size = f"{values[0]:.0f} (1)" if values else "—"
+        # the median, as on the task page (one statistic in both places; robust to one broad peak)
+        size = f"{np.median(values):.0f} ({len(values)})" if values else "—"
         rows.append([
             _name_html(p["name"]),
             _spacegroup_cell({"spacegroup_symbol": symbols.get(p["name"]), "spacegroup_number": p.get("spacegroup")}),
@@ -1574,7 +1590,7 @@ def _build_identification_html(task_id, task, document, review, *, observed, sch
     parts.append(f'<p class="note"><b>{escape(NOT_VERIFIED)}.</b> A Rietveld refinement of these phases verifies them.</p>')
     parts.append(
         '<p class="note">RIR weight fractions are normalised to the identified phases. Crystallite size: '
-        "mean ± standard deviation of the Scherrer sizes of the assigned peaks (their number in brackets), "
+        "median of the Scherrer sizes of the assigned peaks (their number in brackets), "
         f"{escape(scherrer_text)}. A dash means the quantity could not be determined.</p>"
     )
     parts.extend(

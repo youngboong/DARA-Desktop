@@ -7,8 +7,9 @@ import { spacegroupOfPhase } from './versions.mjs';
 import { cellQuery, cellText, parameterRows, peakCounts, shiftText, sigmaText } from './cellRefinement.mjs';
 
 const { Text } = Typography;
-const phaseText = row => { const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg ? `${label} (SG ${sg})` : label; };
-const angle = (value, digits = 4) => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-/, '−'));
+// The page's label of the phase (`labelOf`, as in the legend and the Peaks tab) first; the server's otherwise.
+const phaseText = (row, labelOf = null) => { const own = labelOf?.(row.phase); if (own) return own; const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg ? `${label} (SG ${sg})` : label; };
+const angle = (value, digits = 4) => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-(?=0\.?0*$)/, '').replace(/^-/, '−'));
 const signed = (value, digits) => `${value < 0 ? '−' : '+'}${Math.abs(value).toFixed(digits)}`;
 const esd = (item, digits, unit) => (item?.value == null ? null : `${signed(Number(item.value), digits)}${item.esd != null ? ` ± ${Number(item.esd).toFixed(digits)}` : ''} ${unit}`);
 // A difference of 3 combined e.s.d. or more is more than counting statistics: it stands out.
@@ -34,14 +35,14 @@ const PEAK_COLUMNS = [
 ];
 
 /** One phase: the refined cell beside the Rietveld cell, the shift, r.m.s. Δ2θ and the per-peak table. */
-function PhaseCell({ phase }) {
+function PhaseCell({ phase, labelOf = null }) {
   const counts = peakCounts(phase);
   const shift = shiftText(phase);
   const facts = [phase.crystal_system, `${counts.used} of ${counts.total} peaks used`,
     phase.rms_deg != null ? `r.m.s. Δ2θ ${Number(phase.rms_deg).toFixed(4)}°` : null, shift].filter(Boolean);
   return <section className="dara-cell-phase" aria-label={`Unit cell of ${phase.phase_label || phase.phase}`}>
     <div className="dara-cell-head">
-      <strong><ChemicalFormula formula={phaseText(phase)} /></strong>
+      <strong><ChemicalFormula formula={phaseText(phase, labelOf)} /></strong>
       <span className="dara-footnote" style={{ display: 'inline' }}>{facts.join(' · ')}</span>
     </div>
     {phase.parameters ? <Table size="small" rowKey="key" pagination={false} columns={PARAMETER_COLUMNS} dataSource={parameterRows(phase)} />
@@ -59,7 +60,7 @@ function PhaseCell({ phase }) {
  * positions of the observed peaks (GET /task/{id}/cell-refinement) with the shift `model`.
  * `onPhases(list)` hands the fit's phases to the shift-model select (internal-standard choices).
  */
-export default function CellRefinementView({ taskId, sel, model, active, onPhases }) {
+export default function CellRefinementView({ taskId, sel, model, active, onPhases, phaseLabel = null }) {
   const [body, setBody] = React.useState(null);
   const [error, setError] = React.useState('');
   const query = `sel=${encodeURIComponent(sel)}&${cellQuery(model)}`;
@@ -92,7 +93,7 @@ export default function CellRefinementView({ taskId, sel, model, active, onPhase
       {'. Cell: '}<span style={notCertified ? { color: 'var(--dara-review)' } : undefined}>{correction.certified_cell_source}</span>.
       {correction.note ? ` ${correction.note}` : ''}
     </div> : null}
-    {(body.phases || []).length ? <div className="dara-cell-grid">{body.phases.map(phase => <PhaseCell key={phase.phase} phase={phase} />)}</div>
+    {(body.phases || []).length ? <div className="dara-cell-grid">{body.phases.map(phase => <PhaseCell key={phase.phase} phase={phase} labelOf={phaseLabel} />)}</div>
       : <Alert type="info" showIcon message="No phase of this fit has assigned peaks to refine." />}
     <Text className="dara-footnote">From peak positions of the profile fits; the Rietveld cell uses the whole pattern.</Text>
   </>;

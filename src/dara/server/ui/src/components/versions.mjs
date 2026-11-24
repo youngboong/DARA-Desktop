@@ -29,6 +29,19 @@ export function parseSelection(value) {
   return null;
 }
 
+/**
+ * `'best'` when `sel` names the candidate that is the automatic fit (v1: the candidate with the
+ * final result's Rwp), else `sel` unchanged. Adopting "C1" and "v1" is the same fit, saved once.
+ */
+export function canonicalSelection(sel, allResults = [], finalResult = null) {
+  const parsed = parseSelection(sel);
+  if (parsed === 'best') return 'best';
+  if (typeof parsed !== 'number') return sel;
+  const results = allResults || [];
+  const index = results.findIndex(item => item.rwp === finalResult?.rwp);
+  return index >= 0 && (results[index].source_index ?? index) === parsed ? 'best' : sel;
+}
+
 /** Inverse of `parseSelection`: `'best' | number | 'version:n'`. */
 export function formatSelection(sel) {
   const parsed = parseSelection(sel);
@@ -814,6 +827,9 @@ export function needsBaseline(baselineStale, versions = [], body = {}) {
  * (with `adoptable`, which leaves out quick checks) the adopted-fit select. A quick check that is
  * the `current` (legacy adopted) choice stays listed there as a readable, disabled option.
  */
+/** Why a version is not offered for adoption (`adoptable: false` from the server). */
+export const NOT_ADOPTABLE = 'cell not determined, cannot be adopted';
+
 export function selectOptionGroups(allResults = [], versions = [], { adoptable = false, current = null } = {}) {
   const currentSel = formatSelection(current);
   const legacy = item => adoptable && item.refine_mode === 'fast';
@@ -834,6 +850,8 @@ export function selectOptionGroups(allResults = [], versions = [], { adoptable =
     ...(shown.length ? [{ label: 'Versions',
       options: shown.map(item => (legacy(item)
         ? { value: `version:${item.version}`, label: `v${item.version} (quick check)`, disabled: true }
+        : adoptable && item.adoptable === false && `version:${item.version}` !== currentSel
+          ? { value: `version:${item.version}`, label: `v${item.version} (${NOT_ADOPTABLE})`, disabled: true }
         : { value: `version:${item.version}`,
           label: `v${item.version} — ${versionLabel(item, versions) || 'Re-refinement'}${finite(item.rwp) ? ` — Rwp ${Number(item.rwp).toFixed(2)}%` : ''}` })) }] : []),
     ...(gone.length ? [{ label: 'Deleted', options: gone }] : []),
@@ -983,4 +1001,17 @@ export function controlsLabel(controls = {}) {
   if (controls.peak_width === 'refine') parts.push('sample broadening refined');
   else if (controls.peak_width === 'instrument_only') parts.push('instrument broadening only');
   return parts.length ? clip(`Controls: ${parts.join(', ')}`) : null;
+}
+
+/**
+ * `wt% ± e.s.d.` rounded to the precision of the e.s.d. (at least one decimal, at most four): the
+ * report's rule (`report.builder.weight_text`), so page and report print the same digits.
+ */
+export function weightText(weight, esd) {
+  if (!finite(weight)) return '—';
+  const value = Number(weight);
+  if (!finite(esd) || Number(esd) < 0) return value.toFixed(1);
+  const error = Number(esd);
+  const decimals = error > 0 ? Math.max(1, Math.min(4, -Math.floor(Math.log10(error)))) : 1;
+  return `${value.toFixed(decimals)} ± ${error.toFixed(decimals)}`;
 }

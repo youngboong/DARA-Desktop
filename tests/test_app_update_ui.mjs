@@ -32,3 +32,4 @@ assert.deepEqual(refusal({ detail: 'Up to date' }), { message: 'Up to date', for
 assert.equal(refusal(null).force, false);
 
 console.log('app update UI helpers ok');
+assert.equal(updateStateText({ state: 'ready', available: false }), 'The installed version could not be read.', 'never "DARA undefined"');

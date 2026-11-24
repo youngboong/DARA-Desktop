@@ -13,12 +13,15 @@ the way the classical result tools read a refinement, without a calculated curve
 
 from __future__ import annotations
 
+import logging
 from functools import cached_property
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 from monty.json import MSONable
+
+logger = logging.getLogger(__name__)
 
 MODE = "identification"
 NOT_AVAILABLE = "Not available for an identification result: refine the phases with Rietveld first."
@@ -116,6 +119,46 @@ class IdentificationDocument(MSONable):
             phases[phase["name"]] = IdentifiedPhase(structure, phase.get("spacegroup"), -np.radians(phase["shift"]) / 2)
         frame = pd.DataFrame(rows, columns=["phase", "2theta", "h", "k", "l", "intensity", "multiplicity"])
         return IdentificationFit(x[keep], y[keep], profile.background[keep], frame, phases)
+
+    @cached_property
+    def unexplained_peaks(self) -> list[list[float]] | None:
+        """``[2θ, height, d]`` of the peaks the accepted phases leave unexplained, by the Search-match
+        workspace's rule for the same selection (``quick_rank.residual_step`` → ``residual_maxima``),
+        so the task page and the workspace count the same peaks. ``None`` when the reflections of a
+        phase cannot be simulated again."""
+        from dara.search import quick_rank as qr
+
+        kw, rng = self.search_kwargs or {}, self._range()
+        sources = [phase.get("source") for phase in self.phases]
+        if not sources or not all(sources):
+            return None
+        x, y = _sorted_pattern(self.xrd_data)
+        background = kw.get("background") or LEGACY_BACKGROUND
+        common = dict(wavelength=kw.get("wavelength", "Cu"), wmin=rng.get("wmin"), wmax=rng.get("wmax"),
+                      excluded_ranges=rng.get("excluded_ranges"))
+        try:
+            from dara.search.prefilter import _merge_reflections, background_settings
+
+            ctx, _ = qr._context(x, y, **common, background=background_settings(background))
+            if ctx is None:
+                return None
+            stick_range = (max(1.0, ctx.profile.lo - 6.0), min(178.0, ctx.profile.hi + 6.0))  # as identify
+            candidates = []
+            for phase, source in zip(self.phases, sources):
+                sticks = qr.simulate_sticks(source, qr.reference_path(source), ctx.lam1, stick_range)
+                if sticks is None or isinstance(sticks, str):
+                    return None
+                two_theta, intensity, d = (np.asarray(v, float) for v in sticks)
+                ok = np.isfinite(two_theta) & np.isfinite(intensity) & np.isfinite(d) & (d > 0) & (intensity > 0)
+                candidates.append(qr.Candidate(
+                    source=source, formula=str(phase.get("formula") or ""), spacegroup=phase.get("spacegroup"),
+                    path=qr.reference_path(source),
+                    sticks=_merge_reflections(two_theta[ok], intensity[ok], d[ok], qr.CONFIG.merge_deg)))
+            return qr.residual_step(x, y, candidates, sources, **common, max_rows=0,
+                                    background=background)["unexplained_peaks"]
+        except Exception:  # noqa: BLE001 - the observed-peak assignment then stands alone
+            logger.debug("Unexplained peaks of the identification unavailable", exc_info=True)
+            return None
 
     def figure(self):
         """Plotly figure: observed, background and each phase's reflections as sticks on the

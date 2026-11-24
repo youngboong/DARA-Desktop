@@ -97,6 +97,7 @@ def peak_rows(refinement, *, wavelength, lattice_by_phase: dict | None = None, s
     ``dara.setting_cell``; computed here when ``setting_transforms`` is not given).
     """
     from dara.export.pattern_treatment import kalpha_pair, strip_kalpha2
+    from dara.miller import space_group_number, usual_hkl
     from dara.setting_cell import setting_transforms as find_transforms, transform_hkl
 
     transforms = find_transforms(refinement) if setting_transforms is None else setting_transforms
@@ -139,6 +140,10 @@ def peak_rows(refinement, *, wavelength, lattice_by_phase: dict | None = None, s
                 note = "not measurable"
             for member, record in enumerate(group):
                 two_theta = float(record.tt)
+                # the indices a paper writes (as in the plot and the report figures); a phase refined
+                # in another setting keeps the listed ones, which hkl_database_setting translates
+                h, k, l = (record.h, record.k, record.l) if phase in transforms else usual_hkl(
+                    (int(record.h), int(record.k), int(record.l)), space_group_number(phase), lattice)
                 if lattice is not None:
                     d_value, source = float(lattice.d_hkl((record.h, record.k, record.l))), "lattice"
                 elif lam:
@@ -150,7 +155,7 @@ def peak_rows(refinement, *, wavelength, lattice_by_phase: dict | None = None, s
                     {
                         "phase": phase,
                         "phase_label": label,
-                        "h": int(record.h), "k": int(record.k), "l": int(record.l),
+                        "h": int(h), "k": int(k), "l": int(l),
                         "two_theta_deg": round(two_theta, 4),
                         "d_angstrom": None if d_value is None else round(float(d_value), 5),
                         "intensity": round(intensity, 3),

@@ -90,13 +90,13 @@ def test_figure_endpoint(monkeypatch):
     )
     png = client.get("/api/task/9/figure.png?dpi=100&width_mm=80")
     assert png.status_code == 200 and png.headers["Content-Type"] == "image/png"
-    assert "dara_task_9_Sample_figure.png" in png.headers["Content-Disposition"]
+    assert "dara_task_9_Sample_figure_80mm.png" in png.headers["Content-Disposition"]
     width, _ = _png_size(png.content)
     assert width == pytest.approx(80 / 25.4 * 100, abs=2)
 
     svg = client.get("/api/task/9/figure.svg?idx=1")
     assert svg.status_code == 200 and svg.headers["Content-Type"] == "image/svg+xml"
-    assert "dara_task_9_Sample_figure_candidate_2.svg" in svg.headers["Content-Disposition"]
+    assert "dara_task_9_Sample_figure_170mm_candidate_2.svg" in svg.headers["Content-Disposition"]
     assert b"Excluded from refinement" in svg.content
 
     pdf = client.get("/api/task/9/figure.pdf?width_mm=85")

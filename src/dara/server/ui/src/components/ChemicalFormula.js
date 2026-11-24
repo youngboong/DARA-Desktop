@@ -2,20 +2,28 @@ import React from 'react';
 import { tidyFormula } from './composition.mjs';
 import { spaceGroupParts } from './versions.mjs';
 
-// "P2_12_12_1", "Ia-3", "C12/c1", "P-3c1" or a bare "P212121": a space-group symbol, not a formula.
-// Also one already written by formatSpaceGroup ("P2₁2₁2₁": subscript digits).
-// A formula never has a lower-case letter after a digit or two in a row: "P63mc", "Pbcm" are symbols.
-const isSpaceGroup = text => /[_/\-₀-₉]/.test(text) || /^[PIFCRA]\d+$/.test(text) || /\d[a-z]|[a-z]{2}/.test(text);
+// "P2_12_12_1", "Ia-3", "C12/c1", "P-3c1", "Pbcm" or a bare "P212121": a space-group symbol, not a
+// formula. Also one already written by formatSpaceGroup ("P2₁2₁2₁": subscript digits). A lattice letter,
+// then only digits, glide or mirror letters and - _ / : ; without a digit or sign at least four letters
+// ("Pnma"), so "Pd" or "Ca" stay formulas and a mineral name ("Bixbyite") is never a symbol.
+export const isSpaceGroup = text => /^[PIFCRAB][0-9abcdemn\-_/:₀-₉]+$/.test(text) && (/[0-9\-_/₀-₉]/.test(text) || text.length >= 4);
 
 function Segment({ text }) {
   // A database record ("COD 1010912") is plain text: its digits are not counts.
   if (/\s/.test(text)) return <>{text}</>;
   if (isSpaceGroup(text)) return <SpaceGroupSymbol symbol={text} />;
+  // Two lower-case letters in a row are never in a formula: a name ("Bixbyite-type") stays as written.
+  if (/[a-z]{2}/.test(text)) return <>{text}</>;
+  // A structure label "ZrO2_14": the formula, then its space-group number.
+  const numbered = /^(.+)_(\d{1,3})$/.exec(text);
+  if (numbered) return <><Segment text={numbered[1]} />{` (${numbered[2]})`}</>;
   const parts = tidyFormula(text).split(/(\d+(?:\.\d+)?)/g).filter(Boolean);
   return <>{parts.map((part, index) => /^\d/.test(part) ? <sub key={index}>{part}</sub> : <React.Fragment key={index}>{part}</React.Fragment>)}</>;
 }
 
-const OVERBAR = { textDecoration: 'overline' };
+// A bar on the digit itself: text-decoration overline sits at the top of the line box and read as a
+// stray underscore under the line above (task page selects and tables, sweep T20).
+const OVERBAR = { display: 'inline-block', lineHeight: 0.9, borderTop: '1px solid currentColor' };
 
 /** A space-group symbol as International Tables print it: italic letters, subscript screw
  *  components, overbars on rotoinversions (Fd-3m -> Fd3̄m, P6_3mc -> P6₃mc, C12/c1 -> C2/c). */

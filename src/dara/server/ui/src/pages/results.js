@@ -12,7 +12,8 @@ import { resultColumns } from '../components/ResultColumns';
 import { downloadResults, downloadTable, errorText, responseError } from '../components/exportTable';
 import {
   ACTIVE_STATES, MAX_LIMIT, PAGE_SIZES, STATES, apiQuery, backQuery, deletable, filtersActive,
-  hasActiveRows, isIdentificationEntry, mergeUsers, parseResultsView, partitionSelected, resultsSearch, retryable, stateLabel,
+  hasActiveRows, isIdentificationEntry, KEPT_SELECTION, mergeUsers, parseResultsView, partitionSelected, parseTaskIds, resultsSearch,
+  retryable, sameUser, stateLabel, tasksQuery,
 } from '../components/resultsList.mjs';
 
 const POLL_MS = 5000;
@@ -25,6 +26,11 @@ const VERDICT_OPTIONS = [
 ];
 const STATE_OPTIONS = STATES.map(value => ({ value, label: stateLabel(value) }));
 const plural = (count, word) => `${count} ${word}${count === 1 ? '' : 's'}`;
+// A selection too long for a task link's address waits here (this tab only) until Back returns.
+const SELECTION_KEY = 'dara.results.selected';
+const session = () => { try { return window.sessionStorage; } catch (error) { return null; } };
+// One tag when one value is chosen, else a count: the filter keeps its width at 1366 px.
+const tagSummary = word => omitted => `${word} (${omitted.length})`;
 
 async function fetchList(query, signal) {
   const response = await fetch(`${URL}/tasks?${query}`, { signal });
@@ -43,6 +49,8 @@ function ResultsPage({ location }) {
   const [busy, setBusy] = React.useState(false);
   const [users, setUsers] = React.useState([]);
   const [userText, setUserText] = React.useState('');
+  const [nameText, setNameText] = React.useState(''); // typed, applied with Enter or with any other filter
+  const [rowsVersion, setRowsVersion] = React.useState(0); // bumped when selected rows of other pages arrive
   const [userCounts, setUserCounts] = React.useState({}); // lower-case user → task count
   const [zipping, setZipping] = React.useState(false);
   const rowsById = React.useRef(new Map()); // every row seen, for bulk actions on selections across pages
@@ -58,17 +66,26 @@ function ResultsPage({ location }) {
     const user = readRemembered(typeof window === 'undefined' ? null : window.localStorage)?.fields?.user || '';
     setRemembered(String(user).trim());
     const initial = parseResultsView(location.search, user);
+    if (params.get('selected') === KEPT_SELECTION) initial.selected = parseTaskIds(session()?.getItem(SELECTION_KEY));
     setView(initial);
     setUserText(initial.user);
+    setNameText(initial.name);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   React.useEffect(() => {
-    if (view) window.history.replaceState(window.history.state, '', `${window.location.pathname}?${resultsSearch(view)}`);
+    if (!view) return;
+    window.history.replaceState(window.history.state, '', `${window.location.pathname}?${resultsSearch(view)}`);
+    try { session()?.setItem(SELECTION_KEY, view.selected.join(',')); } catch (error) { /* storage full or blocked */ }
   }, [view]);
 
   const query = view ? apiQuery(view) : null;
-  const update = patch => setView(previous => ({ ...previous, page: 1, ...patch }));
+  // A filter change also applies the text typed in the name and user filters without Enter.
+  const update = patch => setView(previous => ({
+    ...previous, page: 1, name: nameText.trim(),
+    ...(userText.trim() !== previous.user ? { user: userText.trim(), exact: false } : {}),
+    ...patch,
+  }));
   const setSelected = selected => setView(previous => ({ ...previous, selected }));
 
   const remember = tasks => {
@@ -91,7 +108,7 @@ function ResultsPage({ location }) {
     setLoadError(null);
     setPollErrors(0);
     fetchList(query, controller.signal)
-      .then(body => { setData({ ...body, query }); remember(body.tasks); })
+      .then(body => { remember(body.tasks); setData({ ...body, query }); })
       .catch(error => { if (!controller.signal.aborted) setLoadError(errorText(error)); });
     return () => controller.abort();
   }, [query, reloadToken]);
@@ -106,7 +123,7 @@ function ResultsPage({ location }) {
     const refresh = () => {
       if (document.hidden) return;
       fetchList(query)
-        .then(body => { if (!stopped) { setData({ ...body, query }); remember(body.tasks); setPollErrors(0); } })
+        .then(body => { if (!stopped) { remember(body.tasks); setData({ ...body, query }); setPollErrors(0); } })
         .catch(() => { if (!stopped) setPollErrors(count => count + 1); });
     };
     const timer = setInterval(refresh, POLL_MS);
@@ -114,6 +131,28 @@ function ResultsPage({ location }) {
     document.addEventListener('visibilitychange', onVisible);
     return () => { stopped = true; clearInterval(timer); document.removeEventListener('visibilitychange', onVisible); };
   }, [live, paused, query]);
+
+  // Selected rows of other pages (a selection restored from the address) are loaded, so a bulk
+  // action knows their state and user before it counts them; until then it skips them.
+  const selectedKey = view ? view.selected.join(',') : '';
+  React.useEffect(() => {
+    const missing = (view?.selected || []).filter(id => !rowsById.current.has(id));
+    if (!missing.length) return undefined;
+    const controller = new AbortController();
+    Promise.all(Array.from({ length: Math.ceil(missing.length / MAX_LIMIT) }, (_, index) => fetchList(
+      tasksQuery({ page: 1, limit: MAX_LIMIT, ids: missing.slice(index * MAX_LIMIT, (index + 1) * MAX_LIMIT) }), controller.signal)))
+      .then(bodies => { bodies.forEach(body => remember(body.tasks)); setRowsVersion(version => version + 1); })
+      .catch(() => {}); // an older server without ids: those rows stay skipped
+    return () => controller.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedKey]);
+
+  // Deleting the last row of the last page: back to the page that now is the last one.
+  React.useEffect(() => {
+    if (!data || data.query !== query || data.tasks.length || !data.total_tasks || view.page <= 1) return;
+    setView(previous => ({ ...previous, page: Math.max(1, Math.ceil(data.total_tasks / previous.limit)) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data]);
 
   const reload = () => { setPollErrors(0); setReloadToken(token => token + 1); };
 
@@ -213,7 +252,9 @@ function ResultsPage({ location }) {
   const selected = view.selected;
   const compare = partitionSelected(selected, rowsById.current, entry => entry.state === 'COMPLETED');
   const fit = partitionSelected(selected, rowsById.current, entry => !isIdentificationEntry(entry));
-  const removable = partitionSelected(selected, rowsById.current, deletable);
+  // Under My tasks a bulk delete never removes another user's task (one selected under All users, say).
+  const removable = partitionSelected(selected, rowsById.current, entry => deletable(entry) && (!view.exact || sameUser(entry.user, view.user)));
+  const hiddenSelected = selected.filter(id => !pageIds.includes(id)).length;
   const retryIds = selected.filter(id => retryable(rowsById.current.get(id)));
   const compareTip = compare.ids.length < 2 ? 'Tick 2–20 completed tasks to compare their patterns'
     : compare.ids.length > MAX_COMPARE ? `Compare takes at most ${MAX_COMPARE} patterns: ${compare.ids.length} completed tasks are selected`
@@ -278,8 +319,9 @@ function ResultsPage({ location }) {
   };
   const bulkDelete = () => Modal.confirm({
     title: `Delete ${plural(removable.ids.length, 'task')}?`,
-    content: <>This permanently removes the stored results.{removable.skipped.length
-      ? ` ${plural(removable.skipped.length, 'queued or running task')} ${removable.skipped.length === 1 ? 'is' : 'are'} skipped.` : ''}</>,
+    content: <>This permanently removes the stored results.{hiddenSelected
+      ? ` ${plural(hiddenSelected, 'selected task')} ${hiddenSelected === 1 ? 'is' : 'are'} not on this page.` : ''}{removable.skipped.length
+      ? ` ${plural(removable.skipped.length, 'task')} ${removable.skipped.length === 1 ? 'is' : 'are'} skipped (queued, running${view.exact ? ', or another user\'s' : ''}).` : ''}</>,
     okText: `Delete ${removable.ids.length}`, okButtonProps: { danger: true }, cancelText: 'Cancel',
     onOk: () => runBulk(removable.ids, async id => {
       const response = await fetch(`${URL}/task/${id}`, { method: 'DELETE' });
@@ -332,9 +374,9 @@ function ResultsPage({ location }) {
   };
 
   // --- states -------------------------------------------------------------------------------
-  const mine = remembered && view.user === remembered;
+  const mine = Boolean(remembered && view.exact && sameUser(view.user, remembered));
   const anyFilter = filtersActive(view);
-  const clearFilters = () => update({ name: '', state: [], verdict: [] });
+  const clearFilters = () => { setNameText(''); update({ name: '', state: [], verdict: [] }); };
   let body;
   if (loadError) {
     body = <div className="dara-empty" role="alert">
@@ -348,7 +390,7 @@ function ResultsPage({ location }) {
       <p>{anyFilter ? 'Clear the filters to see every task, or submit a new pattern.' : 'Show the tasks of all users, or submit a new pattern.'}</p>
       <div className="dara-empty-actions">
         {anyFilter ? <Button type="primary" onClick={clearFilters}>Clear filters</Button>
-          : <Button type="primary" onClick={() => { setUserText(''); update({ user: '' }); }}>Show all users</Button>}
+          : <Button type="primary" onClick={() => { setUserText(''); update({ user: '', exact: false }); }}>Show all users</Button>}
         <Button href="/">Submit a pattern</Button>
       </div>
     </div> : <div className="dara-empty">
@@ -417,27 +459,28 @@ function ResultsPage({ location }) {
                 : `Export table (CSV)${fit.ids.length ? ` · ${fit.ids.length}` : ''}`}
             </Dropdown.Button>
             <Dropdown menu={bulkMenu} disabled={!selected.length || busy || zipping} trigger={['click']}>
-              <Button loading={busy || zipping}>{zipping ? 'Preparing ZIP…' : `${selected.length} selected`} <DownOutlined /></Button>
+              <Button loading={busy || zipping} title={hiddenSelected ? 'Selected tasks outside this page or filter are included in the actions' : undefined}>
+                {zipping ? 'Preparing ZIP…' : `${selected.length} selected${hiddenSelected ? ` (${hiddenSelected} not shown)` : ''}`} <DownOutlined /></Button>
             </Dropdown>
           </div>
         </div>
         <div className="dara-filters" role="search" aria-label="Filter the results">
-          <Input.Search key={`name-${view.name}`} placeholder="Sample or file name" allowClear defaultValue={view.name}
+          <Input.Search placeholder="Sample or file name" allowClear value={nameText} onChange={event => setNameText(event.target.value)}
             onSearch={value => update({ name: value.trim() })} aria-label="Filter by sample or file name" className="dara-filter-name" />
           {remembered ? <Radio.Group optionType="button" value={mine ? 'mine' : !view.user ? 'all' : null} aria-label="Whose tasks"
             options={[{ value: 'mine', label: 'My tasks' }, { value: 'all', label: 'All users' }]}
-            onChange={event => { const user = event.target.value === 'mine' ? remembered : ''; setUserText(user); update({ user }); }} /> : null}
+            onChange={event => { const user = event.target.value === 'mine' ? remembered : ''; setUserText(user); update({ user, exact: Boolean(user) }); }} /> : null}
           <AutoComplete value={userText} onChange={setUserText} className="dara-filter-user" dropdownMatchSelectWidth={240}
             options={users.map(value => ({ value, label: userCounts[value.toLowerCase()]
               ? <span className="dara-user-option">{value}<span className="dara-num">{plural(userCounts[value.toLowerCase()], 'task')}</span></span> : value }))}
             filterOption={(input, option) => option.value.toLowerCase().includes(input.toLowerCase())}
-            onSelect={value => update({ user: value })}>
-            <Input.Search placeholder="User contains…" allowClear aria-label="Filter by user (contains)" onSearch={value => update({ user: value.trim() })} />
+            onSelect={value => update({ user: value, exact: false })}>
+            <Input.Search placeholder="User contains…" allowClear aria-label="Filter by user (contains)" onSearch={value => update({ user: value.trim(), exact: false })} />
           </AutoComplete>
           <Select mode="multiple" allowClear placeholder="Status" aria-label="Status" value={view.state} options={STATE_OPTIONS}
-            maxTagCount="responsive" className="dara-filter-select" onChange={state => update({ state })} />
+            maxTagCount={view.state.length > 1 ? 0 : 1} maxTagPlaceholder={tagSummary('Status')} className="dara-filter-select" onChange={state => update({ state })} />
           <Select mode="multiple" allowClear placeholder="Verdict" aria-label="Verdict" value={view.verdict} options={VERDICT_OPTIONS}
-            maxTagCount="responsive" className="dara-filter-select" onChange={verdict => update({ verdict })} />
+            maxTagCount={view.verdict.length > 1 ? 0 : 1} maxTagPlaceholder={tagSummary('Verdict')} className="dara-filter-select" onChange={verdict => update({ verdict })} />
           {anyFilter ? <Button type="link" onClick={clearFilters}>Clear filters</Button> : null}
         </div>
         {body}

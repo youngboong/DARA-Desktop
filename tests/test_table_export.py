@@ -437,7 +437,8 @@ def test_classified_missing_counts_fill_the_new_columns():
     }
     rows = task_table_rows(5, {}, summary)
     assert (rows[0]["missing_peaks_significant"], rows[0]["missing_peaks_minor"]) == (1, 3)
-    assert rows[0]["missing_peaks"] == 1  # the legacy count is untouched
+    # unexplained as on the page and in the report: significant + minor (noise left out)
+    assert rows[0]["missing_peaks"] == 4
     # old payloads have no classes: the cells stay empty
     assert rows[1]["missing_peaks_significant"] is None and rows[1]["missing_peaks_minor"] is None
     parsed = list(csv.reader(io.StringIO(rows_to_csv(rows, TABLE_COLUMNS).decode("utf-8-sig"))))

@@ -1,6 +1,6 @@
 import { Menu, Modal, Switch } from 'antd';
 import styled from 'styled-components';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link, navigate } from 'gatsby';
 import { leaveWarning } from './leaveGuard.mjs';
 import React from 'react';
@@ -14,11 +14,15 @@ const StyledMenu = styled(Menu)`
   border-bottom: none;
 `;
 
-// Menu key for the current path; task and compare pages belong to Results.
-function keyForPath(pathname) {
+// Menu key for the current path; task and compare pages belong to Results, or to Series when
+// opened from a series (`from=series`, or a task's `back` naming one).
+export function keyForPath(pathname, search = '') {
   const first = pathname.split('/').filter(Boolean)[0];
   if (!first) return 'submit';
-  return ['task', 'compare'].includes(first) ? 'results' : first;
+  if (!['task', 'compare'].includes(first)) return first;
+  const params = new URLSearchParams(search);
+  const back = new URLSearchParams(params.get('back') || '');
+  return params.get('from') === 'series' || back.get('from') === 'series' ? 'series' : 'results';
 }
 
 /**
@@ -45,7 +49,10 @@ function HeaderMenu() {
   const [ advanced, set_advanced ] = useAdvancedTools();
 
   // Read the path after mount so the server-rendered markup matches the first client render.
-  useEffect(() => { set_selected_key(keyForPath(window.location.pathname)); }, []);
+  useEffect(() => { set_selected_key(keyForPath(window.location.pathname, window.location.search)); }, []);
+  // Help stays open while its Advanced switch is toggled; Enter on the Help title opens it.
+  const [open_keys, set_open_keys] = useState([]);
+  const keep_open = useRef(false);
 
   // Version and update state; the server caches the GitHub check for 6 h.
   useEffect(() => {
@@ -58,7 +65,14 @@ function HeaderMenu() {
 
   const handleClick = ({ key }) => {
     if (key === 'update' || key === 'check-update') set_update_open(true);
-    if (key === 'advanced') set_advanced(!advanced);
+    if (key === 'advanced') {
+      set_advanced(!advanced);
+      keep_open.current = true; // the click's own close of the popup is ignored
+      setTimeout(() => { keep_open.current = false; }, 0);
+      set_open_keys(['help']);
+      return;
+    }
+    set_open_keys([]);
   };
 
   return (
@@ -69,6 +83,8 @@ function HeaderMenu() {
       // guard stops must not mark another page.
       selectedKeys={[selected_key]}
       onClick={handleClick}
+      openKeys={open_keys}
+      onOpenChange={keys => { if (!keep_open.current) set_open_keys(keys); }}
       inlineCollapsed={false}
       disabledOverflow
     >
@@ -86,7 +102,7 @@ function HeaderMenu() {
           <span className='dara-update-tag'>Update available</span>
         </Menu.Item>
       ) : null}
-      <Menu.SubMenu key='help' title='Help'>
+      <Menu.SubMenu key='help' title='Help' onTitleClick={() => set_open_keys(['help'])}>
         <Menu.Item key='tutorial' title='Tutorial'>
           <GuardedLink to='/tutorial/'>Tutorial</GuardedLink>
         </Menu.Item>

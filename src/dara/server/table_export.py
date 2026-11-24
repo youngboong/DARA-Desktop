@@ -24,7 +24,7 @@ TABLE_COLUMNS: list[str] = [
     "rwp", "rp_percent", "rexp", "gof", "chi_squared", "durbin_watson",
     "sample_displacement_eps2", "wavelength", "anode", "missing_peaks",
     "missing_peaks_significant", "missing_peaks_minor", "extra_peaks", "two_theta_min",
-    "two_theta_max", "cautions", "provenance", "verdict", "overall_confidence",
+    "two_theta_max", "cautions", "provenance", "phase_verdict", "overall_confidence",
     "mass_balance_deviation",
 ]
 # Decimal places per column (e.s.d. columns follow their value): lattice lengths 5, angles 3,
@@ -252,7 +252,10 @@ def _rows_for_result(
             "sample_displacement_eps2": quality.get("sample_displacement_eps2"),
             "wavelength": context.get("wavelength"),
             "anode": context.get("anode"),
-            "missing_peaks": counts.get("missing"),
+            # unexplained as on the task page and in the report: significant + minor (noise and
+            # instrument peaks left out); the raw count only for payloads without the classes
+            "missing_peaks": (int(by_class.get("significant") or 0) + int(by_class.get("minor") or 0))
+            if by_class else counts.get("missing"),
             "missing_peaks_significant": by_class.get("significant"),
             "missing_peaks_minor": by_class.get("minor"),
             "extra_peaks": counts.get("extra"),
@@ -260,7 +263,8 @@ def _rows_for_result(
             "two_theta_max": quality.get("two_theta_max"),
             "cautions": cautions,
             "provenance": _provenance(phase),
-            "verdict": ((phase_verdicts.get(phase) or {}).get("level")) or "",
+            # this phase's confidence; the list's Verdict is overall_confidence
+            "phase_verdict": ((phase_verdicts.get(phase) or {}).get("level")) or "",
             "overall_confidence": overall_level,
             "mass_balance_deviation": mass_balance_deviation,
         }

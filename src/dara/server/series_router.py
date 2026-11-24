@@ -76,6 +76,10 @@ async def preview_series(request: SeriesPreviewRequest):
     return _preview([Path(name).name for name in request.filenames])
 
 
+# Modes that search the element system; the others refine the phases the user entered.
+PER_FILE_CHEMISTRY_MODES = ("elemental", "search_match")
+
+
 def file_chemistry(filename: str, enabled: bool) -> dict:
     """``elements`` / ``precursor_formulas`` form fields from the file name (``{}`` when off or none)."""
     import json
@@ -128,7 +132,10 @@ async def submit_series(
     """Validate and build every job first, then queue them all in series order.
 
     ``per_file_chemistry``: each file runs with the elements and formulas its name gives (a batch
-    of different samples); a name without chemistry runs with the form's elements and formulas."""
+    of different samples); a name without chemistry runs with the form's elements and formulas. Only
+    the modes that search the element system take it: the phases entered for a Known-phase or
+    Reaction run are never replaced by a file name."""
+    per_file_chemistry = per_file_chemistry and analysis_mode in PER_FILE_CHEMISTRY_MODES
     name = (series_name or "").strip()
     if not 1 <= len(name) <= 120:
         raise HTTPException(status_code=400, detail="Series name must be 1 to 120 characters")

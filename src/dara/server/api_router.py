@@ -1042,7 +1042,13 @@ async def resolve_phase_set(task_id: int) -> list[Cif]:
     """
     from dara.server import review_router, versions
 
-    task, document = await review_router._load_completed_task(task_id)
+    try:
+        task, document = await review_router._load_completed_task(task_id)
+    except HTTPException as error:
+        if error.status_code != 409:
+            raise
+        # the shared message speaks of exporting; here no phases can be taken from the task
+        raise HTTPException(409, f"Task {task_id} has not finished with a result: no phases to reuse.") from error
     selection = review_router._report_selection(None, False, review_router._review_metadata(task))
     review_router._refuse_quick_check(task, selection)
     refinement, meta = versions.resolve_refinement(document, task, selection)
@@ -2200,6 +2206,9 @@ def _backfill_summary(job: dict, document, runtime) -> None:
             current = store.query_one({"index": job["index"]})
             if current is None or current.get("uuid") != job.get("uuid"):
                 return
+            # A fit adopted while this summary was computed: leave it to the next list request.
+            if (current.get("review") or {}).get("selection") != (job.get("review") or {}).get("selection"):
+                return
             current["summary"] = summary
             store.update(current)
     except Exception:
@@ -2670,9 +2679,10 @@ def _summarize_document(job: dict, document, *, persist_summary: bool = True) ->
             (result_index, result[1], fit_quality, phase_details, phase_metadata, diagnostics)
         )
 
-    start_time = convert_to_local_tz(job["start_time"])
-    end_time = convert_to_local_tz(job["end_time"])
-    runtime = (end_time - start_time).total_seconds()
+    # A record read with fewer fields (a version summary recomputed for an export) may lack the times.
+    start_time = convert_to_local_tz(job["start_time"]) if job.get("start_time") else None
+    end_time = convert_to_local_tz(job["end_time"]) if job.get("end_time") else None
+    runtime = runtime_seconds(job.get("start_time"), job.get("end_time"))
     predict_kwargs = d.predict_kwargs or {}
     weight_percent = _weight_percent(d.final_result)
     final_phase_metadata = _refined_phase_metadata(d.final_result)
@@ -2764,8 +2774,8 @@ def _summarize_document(job: dict, document, *, persist_summary: bool = True) ->
         "temperature": None if predict_kwargs.get("temp") is None else predict_kwargs["temp"] - 273,
         "use_rxn_predictor": d.phase_predictor is not None,
         "submitted_on": convert_to_local_tz(job["submitted_time"]).strftime("%Y-%m-%d %H:%M:%S"),
-        "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
-        "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+        "start_time": start_time.strftime("%Y-%m-%d %H:%M:%S") if start_time else None,
+        "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S") if end_time else None,
         "runtime": runtime,
         "additional_search_options": d.search_kwargs,
         "final_refinement_params": d.final_refinement_params,
@@ -3497,6 +3507,28 @@ def _instrument_correction(document, mode, instrument_fwhm):
     return None, instrument
 
 
+UNEXPLAINED_MATCH_DEG = 0.05
+
+
+def unassign_unexplained(rows: list[dict], diagnostics) -> list[dict]:
+    """Observed-peak rows with no phase or hkl where the fit leaves a counted unexplained peak
+    (significant or minor, as the banner counts them): the nearest reflection there is too weak
+    to explain it."""
+    classified = (diagnostics or {}).get("missing_classified") if isinstance(diagnostics, dict) else None
+    if not isinstance(classified, list):
+        return rows
+    entries = [(float(item["two_theta"]), str(item.get("class") or ""))
+               for item in classified if isinstance(item, dict) and item.get("two_theta") is not None]
+    out = []
+    for row in rows:
+        found = next((cls for position, cls in entries if abs(row["two_theta_deg"] - position) <= UNEXPLAINED_MATCH_DEG), None)
+        if found in ("significant", "minor"):
+            row = {**row, "phase": None, "phase_label": None, "hkl": None, "delta_two_theta_deg": None}
+        # the banner's class of an unexplained peak (noise and instrument lines are not counted there)
+        out.append({**row, "unexplained_class": found} if found else row)
+    return out
+
+
 async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrument_fwhm=None, instrument=None):
     """``(task, rows, wavelength, selection, document, refinement, settings)``: EFLECH peaks of the
     measured pattern (the cached peaks of quick-refine diagnostics) with the Kα1 FWHM of a
@@ -3509,6 +3541,17 @@ async def _measured_peak_rows_of(task_id: int, sel: str | None, k=0.89, instrume
     task, reflections, wavelength, selection, document, refinement, _ = await _peak_rows_of(task_id, sel)
     correction, applied = _instrument_correction(document, instrument, instrument_fwhm)
     rows = await _observed_rows(task, document, refinement, reflections, wavelength, k, correction)
+    try:
+        if getattr(document, "analysis_mode", None) == "identification":
+            # the Search-match workspace's rule for the same selection (quick_rank.residual_maxima)
+            peaks = await asyncio.to_thread(lambda: document.unexplained_peaks)
+            diagnostics = None if peaks is None else {
+                "missing_classified": [{"two_theta": peak[0], "class": "significant"} for peak in peaks]}
+        else:
+            diagnostics = await asyncio.to_thread(_classified_peak_diagnostics, document, refinement, hint_mode="off")
+        rows = unassign_unexplained(rows, diagnostics)
+    except Exception:  # noqa: BLE001 - the nearest-reflection assignment then stands
+        logger.debug("Unexplained peaks of task %s unavailable for the peak table", task_id, exc_info=True)
     if applied["two_theta_range"]:  # peaks outside the standard's range got the edge value of the curve
         low, high = applied["two_theta_range"]
         applied["clamped"] = sum(row["fwhm_deg"] is not None and not low <= row["two_theta_deg"] <= high for row in rows)
@@ -4010,10 +4053,13 @@ _VERDICT_ORDER = {"high": 0, "check": 1, "expert": 2}
 
 
 def _list_sort_value(task: dict, key: str):
-    """Sort value of a Results row; ``None`` (no value) always sorts last."""
+    """Sort value of a Results row; ``None`` (no value) always sorts last. Name: the sample name
+    where one was given (the list shows it first), else the file name."""
     summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
     if key == "name":
-        return str((task.get("job") or {}).get("name") or "").lower()
+        job = task.get("job") or {}
+        sample = (((job.get("metadata") or {}).get("submission_settings") or {}).get("sample") or "").strip()
+        return (sample or str(job.get("name") or "")).lower()
     if key == "submitted":
         stamp = task.get("submitted_time")
         return stamp.timestamp() if hasattr(stamp, "timestamp") else None
@@ -4029,10 +4075,19 @@ def _list_sort_value(task: dict, key: str):
         return None
 
 
-def _list_verdict(task: dict) -> str:
+def _list_verdict(task: dict) -> str | None:
+    """Verdict of a Results row as the list shows it (``resultsList.verdictView``): the confidence
+    level, "no-fit" for a finished search without a fit, else ``None`` (unfinished, failed,
+    cancelled, an identification, or a fit without a verdict)."""
     summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
+    settings = ((task.get("job") or {}).get("metadata") or {}).get("submission_settings") or {}
+    if task.get("status") != "COMPLETED" or "identification" in (summary.get("analysis_mode"), settings.get("analysis_mode")):
+        return None
     level = summary.get("confidence_overall")
-    return level if level in _VERDICT_ORDER else "no-fit"
+    if level in _VERDICT_ORDER:
+        return level
+    no_fit = summary.get("schema") is not None and summary.get("final_rwp") is None and not summary.get("final_phases")
+    return "no-fit" if no_fit else None
 
 
 def _row_progress(task: dict) -> dict | None:
@@ -4105,10 +4160,14 @@ async def get_all_tasks(
     sort: Optional[str] = None,
     order: Optional[str] = None,
     analysis_mode: Optional[str] = None,
+    user_exact: bool = False,
+    ids: Optional[str] = None,
 ):
     """One page of the Results list.
 
-    ``user``: case-insensitive substring ("unknown": tasks without a user). ``name``: file or
+    ``user``: case-insensitive substring ("unknown": tasks without a user); with ``user_exact``
+    the whole user name, case-insensitive ("My tasks": never another user whose name contains
+    it). ``ids``: comma-separated task ids (selected rows on other pages). ``name``: file or
     sample name substring. ``state``, ``verdict`` (high, check, expert, no-fit: no confidence
     verdict) and ``analysis_mode`` (elemental, reaction, known_mixture, identification) take
     comma-separated values. ``sort`` (name, submitted, rwp, gof, verdict) and ``order`` (asc,
@@ -4134,7 +4193,14 @@ async def get_all_tasks(
     if user == "unknown":
         query_dict["user"] = None
     elif user is not None and user.strip():
-        query_dict["user"] = {"$regex": re.escape(user.strip()), "$options": "i"}
+        text = re.escape(user.strip())
+        query_dict["user"] = {"$regex": rf"^\s*{text}\s*$" if user_exact else text, "$options": "i"}
+    if ids is not None:
+        try:
+            wanted_ids = [int(item) for item in values(ids)][:1000]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="ids must be task numbers")
+        query_dict["index"] = {"$in": wanted_ids}
     modes = values(analysis_mode)
     if modes:
         query_dict["job.metadata.submission_settings.analysis_mode"] = {"$in": modes}
@@ -4160,7 +4226,8 @@ async def get_all_tasks(
         # Verdict filter and summary-based sorts: filter and order every matching row, then page.
         with get_worker_store() as worker_store:
             light = list(worker_store.query(
-                criteria=query_dict, properties=["index", "summary", "job.name", "submitted_time"]))
+                criteria=query_dict, properties=["index", "status", "summary", "job.name", "submitted_time",
+                                                 "job.metadata.submission_settings"]))
         if verdicts:
             light = [task for task in light if _list_verdict(task) in verdicts]
         present = [task for task in light if _list_sort_value(task, sort) is not None]

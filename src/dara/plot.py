@@ -284,6 +284,9 @@ def visualize(
     relative = ", relative" if weight_fractions and len(weight_fractions) < len(plot_data.structs) else ""
 
     peak_data = result.peak_data
+    from dara.miller import usual_hkl_lookup
+
+    usual = usual_hkl_lookup(result)
     max_y = max(np.array(result.plot_data.y_obs) + np.array(result.plot_data.y_bkg))
     min_y_diff = min(
         np.array(result.plot_data.y_obs) - np.array(result.plot_data.y_calc)
@@ -330,7 +333,8 @@ def visualize(
         intensity = phase_peaks["intensity"]
         reflection_y = (i + 1) * -max_y * 0.1 + min_y_diff
         if {"h", "k", "l"}.issubset(phase_peaks.columns):
-            hkl = list(zip(phase_peaks["h"], phase_peaks["k"], phase_peaks["l"]))
+            # the indices a paper writes, as in the report figures and the reflection list
+            hkl = [usual(phase_name, item) for item in zip(phase_peaks["h"], phase_peaks["k"], phase_peaks["l"])]
         else:
             hkl = [("?", "?", "?")] * len(phase_peaks)
         fig.add_trace(

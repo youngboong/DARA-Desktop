@@ -2,7 +2,7 @@ import React from 'react';
 import { Alert, Button, InputNumber, message, Modal, Popover, Radio, Space, Table, Tooltip, Typography } from 'antd';
 import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
 import { backgroundRequest } from './versions.mjs';
-import { MIN_ANCHORS } from './backgroundAnchors.mjs';
+import { MIN_ANCHORS, intervalProblem } from './backgroundAnchors.mjs';
 
 const { Text } = Typography;
 
@@ -12,7 +12,7 @@ export { backgroundRequest };
  * One Background control (the search-match uses the same words): Automatic, Polynomial terms or
  * Manual points (drawn on the plot), plus the 2θ intervals excluded from the fit.
  */
-function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }) {
+function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve, twoThetaRange = null }) {
   // A fit with an explicit degree keeps it unless the user switches to Automatic (which resets it).
   const hasBase = baseDegree != null && Number.isFinite(Number(baseDegree));
   const [method, setMethod] = React.useState(manual ? 'manual' : hasBase ? 'terms' : 'auto');
@@ -38,7 +38,8 @@ function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }
     : manual && method === 'auto' ? { background: { degree: null, excluded_ranges: kept?.background.excluded_ranges || [] },
       label: ['Background: automatic', ...(kept?.label ? [kept.label] : [])].join('; ') }
       : backgroundRequest({ ...base, auto, manual: false });
-  const invalid = ranges.some(([lo, hi]) => !(Number.isFinite(lo) && Number.isFinite(hi) && lo < hi));
+  const problems = ranges.map(range => intervalProblem(range, twoThetaRange));
+  const invalid = problems.some(Boolean);
   return <div style={{ width: 360 }}>
     <Space direction="vertical" size="small" style={{ width: '100%' }}>
       <div>
@@ -58,6 +59,8 @@ function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }
           <InputNumber aria-label={`Excluded interval ${index + 1} to`} value={range[1]} step={0.5} onChange={value => setRange(index, 1, value)} />
           <Button size="small" icon={<DeleteOutlined />} aria-label={`Remove interval ${index + 1}`}
             onClick={() => setRanges(previous => previous.filter((_, i) => i !== index))} />
+          {/* said, not only a disabled button: an unusable interval would otherwise fail silently */}
+          {problems[index] && (range[0] != null || range[1] != null) ? <Text type="danger">{problems[index]}</Text> : null}
         </Space>)}
         <div style={{ marginTop: 6 }}>
           <Space wrap>
@@ -82,18 +85,18 @@ function EditorForm({ busy, getView, onSubmit, baseDegree, manual, onEditCurve }
  * Without `open` it is a button with a popover; with `open`/`onOpenChange` it is a modal opened
  * from elsewhere (the Advanced menu).
  */
-export default function BackgroundEditor({ busy, disabled, getView, onSubmit, baseDegree = null, manual = false, open: controlledOpen, onOpenChange, onEditCurve = null }) {
+export default function BackgroundEditor({ busy, disabled, getView, onSubmit, baseDegree = null, manual = false, open: controlledOpen, onOpenChange, onEditCurve = null, twoThetaRange = null }) {
   const [localOpen, setLocalOpen] = React.useState(false);
   if (controlledOpen !== undefined) {
     return <Modal title="Background" open={controlledOpen} footer={null} width={420} destroyOnClose
       onCancel={() => onOpenChange?.(false)}>
-      <EditorForm busy={busy} getView={getView} baseDegree={baseDegree} manual={manual}
+      <EditorForm busy={busy} getView={getView} baseDegree={baseDegree} manual={manual} twoThetaRange={twoThetaRange}
         onEditCurve={onEditCurve ? () => { onOpenChange?.(false); onEditCurve(); } : null}
         onSubmit={(background, label) => { onOpenChange?.(false); onSubmit(background, label); }} />
     </Modal>;
   }
   return <Popover trigger="click" open={localOpen} onOpenChange={setLocalOpen} placement="bottomLeft" title="Background"
-    content={<EditorForm busy={busy} getView={getView} baseDegree={baseDegree} manual={manual}
+    content={<EditorForm busy={busy} getView={getView} baseDegree={baseDegree} manual={manual} twoThetaRange={twoThetaRange}
       onEditCurve={onEditCurve ? () => { setLocalOpen(false); onEditCurve(); } : null}
       onSubmit={(background, label) => { setLocalOpen(false); onSubmit(background, label); }} />}>
     <Button disabled={disabled}>Background…</Button>

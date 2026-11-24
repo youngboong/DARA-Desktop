@@ -5,7 +5,7 @@ import { EXPORT_FORMATS, exportHref } from './confidence.mjs';
 import { downloadReport } from './ResultWorkflows';
 import { API, NOT_AVAILABLE, requestJson } from './QuickRefineProgress';
 import ChemicalFormula from './ChemicalFormula';
-import { BASELINE_LABEL, QUICK_CHECK_HINT, REFINE_ALL_FIRST, comparisonBase, phaseLabels, phaseRecordLine, rememberDisplayFormulas, sameFitAs, versionLabel } from './versions.mjs';
+import { BASELINE_LABEL, NOT_ADOPTABLE, QUICK_CHECK_HINT, REFINE_ALL_FIRST, comparisonBase, phaseLabels, phaseRecordLine, rememberDisplayFormulas, sameFitAs, versionLabel } from './versions.mjs';
 
 const { Text } = Typography;
 
@@ -97,11 +97,12 @@ function originTag(row) {
   return <Text type="secondary">{ORIGIN_LABEL[kind] || kind || '—'}</Text>;
 }
 
-export default function VersionsPanel({ taskId, store, review, onView, onCompare, onRefineAll, refineBusy = false, extra, symbolOf = () => null, onPreview = null, shownSel }) {
+export default function VersionsPanel({ taskId, store, review, onView, onCompare, onRefineAll, refineBusy = false, extra, symbolOf = () => null, onPreview = null, shownSel, adoptedSel }) {
   const { versions, available, loading, error, remove } = store;
   const [deleting, setDeleting] = React.useState(null);
   if (available === false) return null;
-  const adopted = review?.saved?.selection;
+  // the page's canonical adoption (C1 saved by older reviews reads as v1)
+  const adopted = adoptedSel !== undefined ? adoptedSel : review?.saved?.selection;
   const confirmDelete = row => Modal.confirm({
     title: `Delete version ${row.version}?`,
     content: "Removes this version's refinement.",
@@ -171,8 +172,8 @@ export default function VersionsPanel({ taskId, store, review, onView, onCompare
           ? (onRefineAll ? <Tooltip title="Refine all phases, then compare">
             <Button size="small" disabled={refineBusy} onClick={() => onRefineAll(row.version)}>Refine all phases</Button>
           </Tooltip> : null)
-          : <Tooltip title="Adopt (saves notes too)">
-            <span><Button size="small" disabled={review.loading || !!review.error || review.saving}
+          : <Tooltip title={row.adoptable === false && !isAdopted ? `A lattice parameter is not determined by the data: ${NOT_ADOPTABLE}` : 'Adopt (saves notes too)'}>
+            <span><Button size="small" disabled={review.loading || !!review.error || review.saving || (row.adoptable === false && !isAdopted)}
               onClick={() => review.save(sel)}>{isAdopted ? 'Adopted' : 'Adopt'}</Button></span>
           </Tooltip>}
         <Dropdown menu={{ items, onClick: onMenu }} trigger={['click']}>

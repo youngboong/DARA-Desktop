@@ -104,6 +104,23 @@ def _refuse_quick_check(task: dict, selection) -> None:
         raise HTTPException(409, QUICK_CHECK_MESSAGE)
 
 
+UNDETERMINED_MESSAGE = (
+    "This version cannot be adopted: a lattice parameter is not determined by the data "
+    "(the refinement was degenerate). Adopt another fit."
+)
+
+
+def _refuse_undetermined(task: dict, selection) -> None:
+    """409 for a version whose refined cell the data did not determine (``undetermined_lattice``)."""
+    from dara.server.fit_cautions import undetermined_lattice
+
+    if not _is_version_selection(selection):
+        return
+    record = versions.load_version(task["uuid"], versions.parse_selection(selection)[1], light=True)
+    if undetermined_lattice(((record or {}).get("summary") or {}).get("phase_details")):
+        raise HTTPException(409, UNDETERMINED_MESSAGE)
+
+
 @router.put("/task/{task_id}/review")
 async def save_review(task_id: int, update: ReviewUpdate):
     task, document = await _load_completed_task(task_id)
@@ -112,6 +129,8 @@ async def save_review(task_id: int, update: ReviewUpdate):
         parsed = versions.parse_selection(selection)
         selection = "best" if parsed == "best" else versions.format_selection(parsed)
         _refuse_quick_check(task, selection)
+        if selection != (task.get("review") or {}).get("selection"):  # notes of an earlier adoption still save
+            _refuse_undetermined(task, selection)
     if selection is not None:
         _select_refinement(document, selection, task)
     now = datetime.now(timezone.utc).isoformat()
@@ -499,8 +518,9 @@ async def download_figure(
         )
     except Exception as exc:
         raise HTTPException(500, f"Figure rendering failed: {exc}") from exc
+    # one file name per column width: the 85 mm and the 170 mm figure no longer overwrite each other
     filename = download_name(
-        task_id, task["job"]["name"], "figure", _download_selection(selection), fmt
+        task_id, task["job"]["name"], f"figure_{width_mm:g}mm", _download_selection(selection), fmt
     )
     return Response(
         content,

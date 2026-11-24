@@ -207,6 +207,8 @@ def test_adopted_candidate_is_the_listed_fit_and_an_older_digest_is_stale():
     assert summary_is_current(summary, record)
     assert not summary_is_current({**summary, "adopted": None}, record)  # stored before this rule
     assert summary_is_current({**summary, "adopted": None}, {"review": {"selection": "best"}})
+    assert not summary_is_current({**summary, "adopted": None}, {"review": {"selection": "version:2"}})
+    assert summary_is_current({**summary, "adopted": "version:2"}, {"review": {"selection": "version:2"}})
     assert not summary_is_current({**summary, "schema": SUMMARY_SCHEMA - 1}, {})
 
 
@@ -241,12 +243,16 @@ def test_list_filters_and_sorts_across_pages(tmp_path, monkeypatch):
     monkeypatch.setattr(worker, "get_worker_store", lambda: _store(tmp_path))
     assert _list(user="verify")["total_tasks"] == 2  # case-insensitive substring
     assert _list(user="VERIFY-")["total_tasks"] == 1
+    # "My tasks": the whole name (case and surrounding spaces ignored), never one that contains it
+    assert [t["fw_id"] for t in _list(user=" verify ", user_exact=True)["tasks"]] == [1]
+    assert [t["fw_id"] for t in _list(ids="5,2", user="")["tasks"]] == [5, 2]
     assert [t["fw_id"] for t in _list(sort="rwp")["tasks"]][:2] == [2, 1]  # no Rwp sorts last
     assert [t["fw_id"] for t in _list(sort="rwp", order="desc")["tasks"]][:2] == [1, 2]
     assert [t["fw_id"] for t in _list(sort="name")["tasks"]] == [2, 1, 3, 4, 5]
     assert [t["fw_id"] for t in _list(sort="verdict", limit=1, page=2)["tasks"]] == [1]  # high, check, ...
     assert [t["fw_id"] for t in _list(verdict="high,check")["tasks"]] == [2, 1]
-    assert _list(verdict="no-fit")["total_tasks"] == 3
+    # "No fit" is a finished search without a fit only: not an identification, queued or failed task
+    assert _list(verdict="no-fit")["total_tasks"] == 0
     assert [t["fw_id"] for t in _list(analysis_mode="identification")["tasks"]] == [3]
     rows = {t["fw_id"]: t for t in _list()["tasks"]}
     assert rows[2]["source_task_id"] == 1 and rows[1]["source_task_id"] is None
@@ -271,3 +277,12 @@ def test_users_are_distinct_with_counts_and_case_variants_merged(populated):
     users = asyncio.run(api_router.task_users())["users"]
     # "amy" (2 tasks) and "Amy" (1) are one entry under the spelling used most; no entry without a user.
     assert users == [{"user": "amy", "count": 3}, {"user": "bob", "count": 1}]
+
+
+def test_no_fit_verdict_is_a_finished_search_without_a_fit(populated):
+    with _store(populated) as store:
+        store.update({"uuid": "u6", "index": 6, "status": "COMPLETED", "user": "amy", "job": {"name": "none.xy"},
+                      "summary": {"schema": SUMMARY_SCHEMA, "final_rwp": None, "final_phases": []}})
+        store.update({"uuid": "u7", "index": 7, "status": "CANCELLED", "user": "amy", "job": {"name": "stop.xy"},
+                      "summary": {"schema": SUMMARY_SCHEMA, "final_rwp": None, "final_phases": []}})
+    assert [t["fw_id"] for t in _list(verdict="no-fit")["tasks"]] == [6]

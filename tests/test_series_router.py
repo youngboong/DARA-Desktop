@@ -154,6 +154,14 @@ def test_per_file_chemistry_takes_each_file_name(fake):
     assert by_name["sample_7.xy"]["elements"] == '["Zn", "O"]'  # no chemistry in the name: the form's
 
 
+@pytest.mark.parametrize("mode", ["known_mixture", "reaction"])
+def test_per_file_chemistry_never_replaces_entered_phases(fake, mode):
+    """Known-phase and Reaction runs refine the entered phases: the flag is ignored."""
+    _submit(["CoO-ZnO_1100C.xy", "Fe2O3-2TiO2_1000C.xy"], per_file_chemistry=True, analysis_mode=mode,
+            precursor_formulas='["ZnO"]')
+    assert {fields["precursor_formulas"] for _, _, fields in fake.built} == {'["ZnO"]'}
+
+
 def test_unreadable_file_rejects_everything_and_queues_nothing(fake):
     with pytest.raises(HTTPException) as caught:
         _submit(["a_300C.xy", "broken_500C.xy", "c_700C.xy"])

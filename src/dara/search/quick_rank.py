@@ -977,8 +977,8 @@ def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu",
                   excluded_ranges=None, max_rows: int = MAX_ROWS, background=None) -> dict:
     """One more step of the greedy combination (:func:`rank`) for any selection.
 
-    The models of the ``selected`` sources are subtracted from the net pattern in the given order,
-    as the combination subtracts its picks. Returns ``explained`` (share of the net intensity the
+    The models of the ``selected`` sources are subtracted from the net pattern as the combination
+    subtracts its picks, in an order fixed by the set (:func:`_after_selection`). Returns ``explained`` (share of the net intensity the
     selection explains together), ``steps`` (``source``, ``gain`` of each), ``profile`` (the
     residual, decimated like the ranking's), ``unexplained_peaks`` (:func:`residual_maxima`) and
     ``next``: ranking rows scored against the residual without the selection's (formula, space
@@ -1019,25 +1019,32 @@ def _d_spacing(two_theta: float, lam: float) -> float:
 def _after_selection(angles, intensities, candidates, selected, *, wavelength, wmin, wmax, excluded_ranges,
                      background):
     """``(ctx, by_source, steps, lines, caveat)``: the scoring context with the ``selected`` sources'
-    models subtracted in order (as the combination subtracts its picks); ``ctx`` is ``None`` with a
-    caveat when the pattern cannot be ranked. Raises ``KeyError(source)`` for an unknown source."""
+    models subtracted (as the combination subtracts its picks); ``ctx`` is ``None`` with a caveat
+    when the pattern cannot be ranked. Raises ``KeyError(source)`` for an unknown source.
+
+    The subtraction order is fixed by the sources, not by the order they were ticked: the one
+    that explains most of the whole pattern first (the combination's order), ties by source id.
+    So the residual, its unexplained peaks and each step's gain depend on the set alone; ``steps``
+    are returned in the order of ``selected``."""
     by_source = {c.source: c for c in candidates if c.sticks is not None}
     for source in selected:
         if source not in by_source:
             raise KeyError(source)
     ctx, caveat = _context(angles, intensities, wavelength=wavelength, wmin=wmin, wmax=wmax,
                            excluded_ranges=excluded_ranges, background=background)
-    steps, lines = [], []
+    steps, lines = {}, []
     if ctx is None:
-        return None, by_source, steps, lines, caveat
-    for source in selected:
-        result = _score(ctx, by_source[source])
+        return None, by_source, [], lines, caveat
+    first = {source: _score(ctx, by_source[source]) for source in dict.fromkeys(selected)}
+    order = sorted(first, key=lambda s: (-(first[s]["score"] if first[s] else -1.0), s))
+    for index, source in enumerate(order):
+        result = first[source] if index == 0 else _score(ctx, by_source[source])
         model = None if result is None else result["model"]
-        steps.append({"source": source, "gain": 0.0 if model is None else round(result["explained"], 4)})
+        steps[source] = {"source": source, "gain": 0.0 if model is None else round(result["explained"], 4)}
         if model is not None:
             lines.append(_line_positions(ctx, by_source[source], result))
             _subtract(ctx, model)
-    return ctx, by_source, steps, lines, None
+    return ctx, by_source, [steps[source] for source in selected], lines, None
 
 
 PEAK_CANDIDATES = 6
@@ -1064,7 +1071,7 @@ def peak_candidates(angles, intensities, candidates, selected, two_theta: float,
     by_source = {c.source: c for c in candidates if c.sticks is not None}
     keys = {(by_source[s].formula, by_source[s].spacegroup) for s in [*selected, *exclude] if s in by_source}
     hw = CONFIG.window_hw_deg
-    if scored is not None and tuple(scored["selected"]) == tuple(selected):
+    if scored is not None and sorted(scored["selected"]) == sorted(selected):  # the order is fixed by the set
         lo, hi, pairs = scored["lo"], scored["hi"], scored["pairs"]
     else:
         ctx, by_source, _, _, caveat = _after_selection(

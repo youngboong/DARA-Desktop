@@ -93,10 +93,11 @@ def phase_symbols(*name_lists) -> dict[str, str]:
 
 def _version_entry(record: dict) -> dict:
     from dara.server.api_router import unexplained_count, unexplained_minor_count
-    from dara.server.fit_cautions import structure_cautions
+    from dara.server.fit_cautions import lattice_cautions, structure_cautions, undetermined_lattice
 
     summary = record.get("summary") or {}
     quality = summary.get("fit_quality") or {}
+    cautions = lattice_cautions(summary.get("cautions"), summary.get("phase_details"))
     return {
         "version": record["version"],
         "label": versions.display_label(record),
@@ -113,10 +114,12 @@ def _version_entry(record: dict) -> dict:
         "n_unexplained": unexplained_count(summary.get("peak_diagnostics")),
         "n_unexplained_minor": unexplained_minor_count(summary.get("peak_diagnostics")),
         # stored before structure values at their limit became a caution (added on read, as in the detail)
-        "cautions_count": len(summary.get("cautions") or []) + (
-            0 if any(isinstance(c, dict) and c.get("code") == "structure_at_limit" for c in summary.get("cautions") or [])
+        "cautions_count": len(cautions) + (
+            0 if any(isinstance(c, dict) and c.get("code") == "structure_at_limit" for c in cautions)
             else len(structure_cautions(summary.get("phase_details")))
         ),
+        # a degenerate fit (a cell the data did not determine) is shown but never adopted
+        "adoptable": not undetermined_lattice(summary.get("phase_details")),
         "elapsed_s": record.get("elapsed_s"),
         "controls": record.get("controls"),
         "background": record.get("background"),
@@ -133,7 +136,9 @@ def _version_entry(record: dict) -> dict:
 
 def _original_entry(task: dict, document=None) -> dict:
     summary = task.get("summary") if isinstance(task.get("summary"), dict) else {}
-    if summary.get("adopted") and document is not None:
+    # Candidate 0 is a valid adoption: test for presence, not truthiness. Saving a review clears the
+    # stored digest until the results list summarizes the task again: no digest is summarized here too.
+    if (not summary or summary.get("adopted") is not None) and document is not None:
         # The stored summary describes the adopted version; v1 is the automatic fit.
         try:
             from dara.server.task_summary import compact_summary
@@ -306,6 +311,10 @@ async def get_task_version(task_id: int, number: int):
             from dara.server.fit_cautions import structure_cautions
 
             summary["cautions"] = cautions + structure_cautions(summary.get("phase_details"))
+        # stored before an undetermined cell became a caution (and its at-bound check used the rounded value)
+        from dara.server.fit_cautions import lattice_cautions
+
+        summary["cautions"] = lattice_cautions(summary.get("cautions"), summary.get("phase_details"))
         if isinstance(summary.get("peak_diagnostics"), dict):
             summary["peak_diagnostics"] = peak_significance.filter_stored_hints(
                 summary["peak_diagnostics"],

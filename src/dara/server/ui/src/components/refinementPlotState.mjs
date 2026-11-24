@@ -266,7 +266,9 @@ export function buildRefinementView(plot, {
   const xView = xWindow || fullX;
   // The 2θ title is drawn once, under the Obs − calc panel; the main panel keeps its tick
   // labels, which leaves a clear gap between the panels at small heights.
-  const xaxis = { ...baseLayout.xaxis, showticklabels: true, title: { text: '' } };
+  // An identification (reference sticks, no Obs - calc panel) keeps the title on the main panel.
+  const identification = plot.data.some(trace => trace?.meta === 'reference-sticks');
+  const xaxis = { ...baseLayout.xaxis, showticklabels: true, ...(identification ? {} : { title: { text: '' } }) };
   if (xView) Object.assign(xaxis, { range: [...xView], autorange: false });
   const layout = { ...baseLayout, annotations, yaxis, xaxis };
   // Bragg-row labels sit left of the axis: widen the left margin so the longest is not clipped.
@@ -315,7 +317,11 @@ export function buildRefinementView(plot, {
           range[1] = Math.min(cap, topForLabels(sized, range, areaPx));
           if (scale !== 'log') yaxis.tickvals = positiveTicks(minimum, range[1]);
         }
-        labels = sized.filter(({ y, px }) => (range[1] - y) / (range[1] - range[0]) * areaPx >= px).map(({ item }) => item);
+        // A label without room above its peak (the strongest ones, under the capped top) is not
+        // dropped: it hangs from the top of the frame beside the peak line.
+        const span = range[1] - range[0];
+        labels = sized.map(({ item, y, px }) => ((range[1] - y) / span * areaPx >= px ? item
+          : { ...item, y: range[1] - (px / areaPx) * span, xshift: Math.round(item.font.size * 0.7) }));
       }
       annotations.push(...labels);
     }
@@ -372,5 +378,30 @@ function hklAnnotations(plot, data, selection, window, minGap, scale) {
     return [{ x: item.x, xref: 'x', y: scale === 'log' ? Math.log10(height) : height, yref: 'y',
       text: hklText(item.h, item.k, item.l), showarrow: false, textangle: -90, yanchor: 'bottom', yshift: 3,
       font: { size: 11, color: item.color } }];
+  });
+}
+
+/**
+ * 2θ of the unexplained peaks the page counts (significant and minor; noise and instrument lines
+ * left out) from a fit's `peak_diagnostics`, or `null` when the payload has no classification.
+ */
+export function countedUnexplained(diagnostics) {
+  const classified = diagnostics?.missing_classified;
+  if (!Array.isArray(classified)) return null;
+  return classified.filter(item => ['significant', 'minor'].includes(item?.class)).map(item => Number(item.two_theta))
+    .filter(Number.isFinite);
+}
+
+/** The "Unexplained peaks" markers reduced to `positions` (2θ, ±0.02°); `null` keeps them all. */
+export function keepUnexplained(data, positions) {
+  if (!Array.isArray(positions)) return data;
+  return (data || []).map(trace => {
+    if (trace?.name !== 'Unexplained peaks') return trace;
+    const xs = numbers(trace.x);
+    const keep = xs.map(x => positions.some(position => Math.abs(position - x) <= 0.02));
+    const pick = values => (Array.isArray(values) ? values.filter((_, i) => keep[i]) : values);
+    // none left: one empty point keeps the legend entry toggleable, as the server does
+    if (!keep.some(Boolean)) return { ...trace, x: [null], y: [null], text: [''] };
+    return { ...trace, x: xs.filter((_, i) => keep[i]), y: pick(numbers(trace.y)), text: pick(trace.text) };
   });
 }

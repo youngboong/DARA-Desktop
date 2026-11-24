@@ -316,7 +316,7 @@ def test_report_and_figure_accept_sel(monkeypatch, api):
     figure = _call(review_router.download_figure(7, "svg", None, False, 600, 170, "version:2"))
     assert figure.body == b"<svg/>" and captured["rwp"] == 3.0
     assert captured["excluded_ranges"] == [[18.0, 19.0]]
-    assert "figure_version_2.svg" in figure.headers["content-disposition"]
+    assert "figure_170mm_version_2.svg" in figure.headers["content-disposition"]
 
 
 def test_report_defaults_to_the_adopted_version(monkeypatch, api):
@@ -575,6 +575,13 @@ def test_v1_shows_the_automatic_fit_after_a_version_is_adopted(monkeypatch):
     entry = versions_router._original_entry(task, document=None)
     assert entry["rwp"] == 21.1  # no document: the stored summary is all there is
     entry = versions_router._original_entry(task, document=object())
+    assert entry["rwp"] == 22.95 and entry["phases"] == ["A"]
+    # candidate 0 is a real adoption too (it used to read as "nothing adopted": 0 is falsy)
+    task = {"summary": {**adopted, "adopted": 0}, "end_time": None}
+    entry = versions_router._original_entry(task, document=object())
+    assert entry["rwp"] == 22.95 and entry["phases"] == ["A"]
+    # saving a review clears the stored digest: v1 is summarized from the document meanwhile
+    entry = versions_router._original_entry({"summary": None, "end_time": None}, document=object())
     assert entry["rwp"] == 22.95 and entry["phases"] == ["A"]
 
 

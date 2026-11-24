@@ -48,9 +48,11 @@ export function phasesTooltip(summary) {
 }
 
 /** Query string for the task list; empty values are omitted and text is encoded. */
-export function tasksQuery({ page = 1, limit = 10, user, name, state, verdict, sort, order, selected = [] } = {}) {
+export function tasksQuery({ page = 1, limit = 10, user, userExact = false, name, state, verdict, sort, order, selected = [], ids = [] } = {}) {
   const parts = [`page=${page}`, `limit=${limit}`];
   if (user) parts.push(`user=${encodeURIComponent(user)}`);
+  if (user && userExact) parts.push('user_exact=true');
+  if (ids.length) parts.push(`ids=${ids.join(',')}`);
   if (name) parts.push(`name=${encodeURIComponent(name)}`);
   if (state) parts.push(`state=${encodeURIComponent(state)}`);
   if (verdict) parts.push(`verdict=${encodeURIComponent(verdict)}`);
@@ -81,7 +83,9 @@ export function parseTaskIds(value) {
 
 /**
  * The Results view of an address. `user` absent means the user remembered by the Submit form
- * ("My tasks"); `user=` (empty) means all users. `limit` is clamped to what the server accepts.
+ * ("My tasks", matched as the whole name); `user=` (empty) means all users; `exact=1` matches the
+ * whole user name, else the user filter is "contains". `limit` is clamped to what the server
+ * accepts. `selected=kept`: the selection was too long for the address and is in this tab's storage.
  */
 export function parseResultsView(search, rememberedUser = null) {
   const params = new URLSearchParams(search || '');
@@ -93,6 +97,7 @@ export function parseResultsView(search, rememberedUser = null) {
     page: Number.isInteger(page) && page > 0 ? page : 1,
     limit: Number.isInteger(limit) && limit > 0 ? Math.min(limit, MAX_LIMIT) : 50,
     user: params.has('user') ? params.get('user').trim() : String(rememberedUser || '').trim(),
+    exact: params.has('user') ? params.get('exact') === '1' : Boolean(String(rememberedUser || '').trim()),
     name: (params.get('name') || '').trim(),
     state: listOf(params.get('state'), STATES),
     verdict: listOf(params.get('verdict'), VERDICTS),
@@ -108,6 +113,7 @@ export function resultsSearch(view, { withSelection = true } = {}) {
   params.set('page', String(view.page));
   params.set('limit', String(view.limit));
   params.set('user', view.user || '');
+  if (view.user && view.exact) params.set('exact', '1');
   if (view.name) params.set('name', view.name);
   if (view.state?.length) params.set('state', view.state.join(','));
   if (view.verdict?.length) params.set('verdict', view.verdict.join(','));
@@ -120,15 +126,23 @@ export function resultsSearch(view, { withSelection = true } = {}) {
 /** `GET /api/tasks` query of a view (`page`/`limit` overridable to page through every match). */
 export function apiQuery(view, overrides = {}) {
   const { page, limit } = { ...view, ...overrides };
-  return tasksQuery({ page, limit, user: view.user, name: view.name, state: view.state.join(','),
+  return tasksQuery({ page, limit, user: view.user, userExact: view.exact, name: view.name, state: view.state.join(','),
     verdict: view.verdict.join(','), sort: view.sort, order: view.order });
 }
 
-/** `back` of a task link: the view's query, without the selection when the address would get too long. */
+export const KEPT_SELECTION = 'kept';
+
+/**
+ * `back` of a task link: the view's query; a selection too long for the address is written as
+ * `selected=kept` (the Results page keeps it in the tab's session storage).
+ */
 export function backQuery(view) {
   const full = resultsSearch(view);
-  return full.length <= 1800 ? full : resultsSearch(view, { withSelection: false });
+  return full.length <= 1800 ? full : `${resultsSearch(view, { withSelection: false })}&selected=${KEPT_SELECTION}`;
 }
+
+/** Whether a row's user is `user` (the whole name, case and surrounding spaces ignored): "My tasks". */
+export const sameUser = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
 
 export const filtersActive = view => Boolean(view.name || view.state.length || view.verdict.length);
 
@@ -197,11 +211,14 @@ export function displayName(entry) {
   return sample && sample !== file ? { primary: sample, secondary: file } : { primary: file || sample, secondary: null };
 }
 
-/** Selected ids split by whether a bulk action applies (`applies(entry)`); unknown rows count as applying. */
+/**
+ * Selected ids split by whether a bulk action applies (`applies(entry)`). A row not loaded yet (a
+ * selection restored from the address) is skipped: an action never runs on a row it has not checked.
+ */
 export function partitionSelected(selected = [], rowsById = new Map(), applies = () => true) {
   const ids = [];
   const skipped = [];
-  for (const id of selected) (rowsById.has(id) && !applies(rowsById.get(id)) ? skipped : ids).push(id);
+  for (const id of selected) (rowsById.has(id) && applies(rowsById.get(id)) ? ids : skipped).push(id);
   return { ids, skipped };
 }
 

@@ -8,10 +8,11 @@ import { lineText, missingPhases, rirRows, signedText } from './rirView.mjs';
 
 const { Text } = Typography;
 const percent = value => (value == null ? '—' : Number(value).toFixed(1));
-const phaseText = row => { const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg ? `${label} (SG ${sg})` : label; };
+// The page's label of the phase (`labelOf`, as in the legend and the Peaks tab) first; the server's otherwise.
+const phaseText = (row, labelOf = null) => { const own = labelOf?.(row.phase); if (own) return own; const label = row.phase_label || row.phase; const sg = spacegroupOfPhase(row.phase); return sg ? `${label} (SG ${sg})` : label; };
 
 /** The RIR table of `sel` (GET /task/{id}/rir), loaded when mounted. */
-function RirTable({ taskId, sel, identification }) {
+function RirTable({ taskId, sel, identification, phaseLabel = null }) {
   const [body, setBody] = React.useState(null);
   const [error, setError] = React.useState('');
   const query = `sel=${encodeURIComponent(sel)}`;
@@ -27,7 +28,7 @@ function RirTable({ taskId, sel, identification }) {
   if (!body) return <Spin size="small" />;
   const missing = missingPhases(body);
   const columns = [
-    { title: 'Phase', key: 'phase', render: (_, row) => <ChemicalFormula formula={phaseText(row)} /> },
+    { title: 'Phase', key: 'phase', render: (_, row) => <ChemicalFormula formula={phaseText(row, phaseLabel)} /> },
     { title: <Tooltip title="Reference intensity ratio: intensity of the strongest line relative to corundum 113 in a 50:50 mixture by weight"><span>I/Ic</span></Tooltip>,
       dataIndex: 'rir', className: 'dara-num', render: (value, row) => (value == null ? '—' : <Tooltip title={row.rir_source}>{Number(value).toFixed(2)}</Tooltip>) },
     { title: 'Line used', key: 'line', render: (_, row) => {
@@ -63,11 +64,11 @@ function RirTable({ taskId, sel, identification }) {
  * Semi-quantitative RIR (I/Ic) check under the phase table, collapsed: the Rietveld fractions stay
  * the reported result; this is the classical cross-check. Loads when opened.
  */
-export default function RirSemiQuant({ taskId, sel, identification = false }) {
+export default function RirSemiQuant({ taskId, sel, identification = false, phaseLabel = null }) {
   return <Collapse ghost destroyInactivePanel className="dara-rir">
     <Collapse.Panel key="rir" header={<span>{identification ? 'RIR details (I/Ic, lines used)' : 'Semi-quantitative check (RIR, I/Ic)'} {identification ? null
       : <Text type="secondary" className="dara-footnote" style={{ display: 'inline' }}>beside the Rietveld weight fractions</Text>}</span>}>
-      <RirTable taskId={taskId} sel={sel} identification={identification} />
+      <RirTable taskId={taskId} sel={sel} identification={identification} phaseLabel={phaseLabel} />
     </Collapse.Panel>
   </Collapse>;
 }

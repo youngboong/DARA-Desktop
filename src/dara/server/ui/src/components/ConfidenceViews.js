@@ -113,13 +113,21 @@ export function DownloadMenu({ taskId, selection, size, blocked = null, reportBl
     { type: 'divider' },
     { key: 'hkl', label: <Checkbox checked={hkl}>Miller indices on the figure</Checkbox> },
   ];
+  // Ticking "Miller indices" is a setting for the next download: the menu stays open for it.
+  const [open, setOpen] = React.useState(false);
+  const keepOpen = React.useRef(false);
   const onClick = ({ key }) => {
     if (key === 'report') downloadReport(taskId, selection, 'bundle', hkl);
     if (key === 'report-html') downloadReport(taskId, selection, 'html', hkl);
-    if (key === 'hkl') toggleHkl();
+    // only the close that this click triggers is ignored; a later outside click closes the menu
+    if (key === 'hkl') { keepOpen.current = true; setTimeout(() => { keepOpen.current = false; }, 0); toggleHkl(); }
     extraItems.find(item => item.key === key)?.onClick?.();
+  };
+  const onOpenChange = next => {
+    if (!next && keepOpen.current) { keepOpen.current = false; return; }
+    setOpen(next);
   };
   const button = <Button size={size} icon={<DownloadOutlined />} disabled={Boolean(blocked)}>{label} <DownOutlined /></Button>;
   if (blocked) return <Tooltip title={blocked}><span>{button}</span></Tooltip>;
-  return <Dropdown menu={{ items, onClick }} trigger={['click']}>{button}</Dropdown>;
+  return <Dropdown menu={{ items, onClick }} trigger={['click']} open={open} onOpenChange={onOpenChange}>{button}</Dropdown>;
 }

@@ -69,6 +69,9 @@ export function dAxisTicks([lo, hi], wavelength, minGap) {
     const last = Math.min(Math.floor(dMax / step + 1e-9), first + 400); // bounded at tiny 2θ
     for (let n = first; n <= last; n += 1) {
       const d = Number((n * step).toFixed(4));
+      // No odd values such as 3.42 between 4 and 3: a step finer than 1/40 of d is used only when
+      // the window itself is that narrow (zoomed in).
+      if (step < Math.min(d / 40, (dMax - dMin) / 8)) continue;
       const sine = wavelength / (2 * d);
       if (sine >= 1) continue;
       const x = (360 / Math.PI) * Math.asin(sine);

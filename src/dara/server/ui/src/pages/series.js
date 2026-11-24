@@ -8,8 +8,9 @@ import { downloadTable, errorText } from '../components/exportTable';
 import { taskHref } from '../components/sampleNav.mjs';
 import { formatDate } from '../components/resultsList.mjs';
 import FigureExportDialog, { useFigureStyle } from '../components/FigureExportDialog';
+import ChemicalFormula from '../components/ChemicalFormula';
 import {
-  LATTICE_PARAMETERS, fitTraces, hasActiveItems, latticeTraces, phaseLabels, phaseTraces, progress,
+  LATTICE_PARAMETERS, fitTraces, hasActiveItems, latticeTraces, phaseLabels, phaseTraces, plotlyPhaseLabel, progress,
   seriesFigureHref, taskIds, xAxis,
 } from '../components/seriesTrends.mjs';
 
@@ -55,7 +56,7 @@ function PhaseChart({ items, axis }) {
   }
   return <Plotly
     data={traces.map(trace => ({
-      type: 'scatter', mode: 'lines+markers', name: trace.label, x: trace.x, y: trace.y,
+      type: 'scatter', mode: 'lines+markers', name: plotlyPhaseLabel(trace.label), x: trace.x, y: trace.y,
       error_y: errorBars(trace.err), connectgaps: false,
     }))}
     layout={baseLayout(axis, 'Weight fraction (wt%)')}
@@ -72,14 +73,14 @@ function LatticeChart({ items, axis }) {
   return <>
     <Space wrap style={{ marginBottom: 8 }}>
       <label>Phase <Select aria-label="Phase" style={{ width: 260 }} value={selected} onChange={setPhase}
-        options={labels.map(label => ({ value: label, label }))} /></label>
+        options={labels.map(label => ({ value: label, label: <ChemicalFormula formula={label} /> }))} /></label>
       <label>Parameter <Select aria-label="Lattice parameter" style={{ width: 120 }} value={parameter} onChange={setParameter}
         options={LATTICE_PARAMETERS.map(key => ({ value: key, label: PARAMETER_LABEL[key] }))} /></label>
     </Space>
     {trace.y.every(value => value === null)
       ? <Alert type="info" showIcon message={`${PARAMETER_LABEL[parameter]} is not reported for this phase.`} description="Parameters fixed by the crystal system are not listed." />
       : <Plotly
-        data={[{ type: 'scatter', mode: 'lines+markers', name: `${selected} — ${parameter}`, x: trace.x, y: trace.y, error_y: errorBars(trace.err), connectgaps: false }]}
+        data={[{ type: 'scatter', mode: 'lines+markers', name: `${plotlyPhaseLabel(selected)} — ${parameter}`, x: trace.x, y: trace.y, error_y: errorBars(trace.err), connectgaps: false }]}
         layout={baseLayout(axis, PARAMETER_LABEL[parameter], { showlegend: false })}
         config={config(`dara-series-lattice-${parameter}`)} style={{ width: '100%' }} useResizeHandler />}
   </>;
@@ -103,6 +104,18 @@ function FitChart({ items, axis }) {
  */
 function StackedPatterns({ options, figure, onChange, src }) {
   const [shown, setShown] = React.useState({ src: null, failed: false });
+  // Labels typed reach the figure after a 500 ms pause: each redraw takes seconds.
+  const [draft, setDraft] = React.useState(null);
+  const latest = React.useRef(figure);
+  latest.current = figure;
+  React.useEffect(() => {
+    if (draft === null) return undefined;
+    const timer = setTimeout(() => { onChange({ ...latest.current, labels: draft }); setDraft(null); }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
+  const [labelsOpen, setLabelsOpen] = React.useState(false);
+  const labels = draft ?? figure.labels ?? {};
   if (!options.tasks.length) return null;
   const loading = shown.src !== src;
   const weight = phase => (phase.max_weight_percent === null ? '' : ` (max ${phase.max_weight_percent.toFixed(1)} wt%)`);
@@ -121,13 +134,13 @@ function StackedPatterns({ options, figure, onChange, src }) {
             options={options.phases.map(phase => ({ value: phase.key, label: `${phase.label}${weight(phase)}` }))} /></label>
       </div>
       <div className="dara-toolbar-group">
-        <Popover trigger="click" placement="bottomLeft" title="Pattern labels" content={
-          <div className="dara-figure-labels">
+        <Popover trigger="click" placement="bottomLeft" title="Pattern labels" open={labelsOpen} onOpenChange={setLabelsOpen} content={
+          <div className="dara-figure-labels" onKeyDown={event => { if (event.key === 'Escape') setLabelsOpen(false); }}>
             {options.tasks.filter(task => figure.tasks.includes(task.task_id)).map(task =>
               <label key={task.task_id}><span className="dara-num">#{task.task_id}</span>
-                <Input size="small" value={figure.labels?.[task.task_id] ?? ''} placeholder={task.label} maxLength={80}
+                <Input size="small" value={labels[task.task_id] ?? ''} placeholder={task.label} maxLength={80}
                   aria-label={`Label of task ${task.task_id}`}
-                  onChange={event => onChange({ ...figure, labels: { ...figure.labels, [task.task_id]: event.target.value } })} /></label>)}
+                  onChange={event => setDraft({ ...labels, [task.task_id]: event.target.value })} /></label>)}
           </div>}>
           <Button size="small">Labels</Button>
         </Popover>
@@ -136,7 +149,7 @@ function StackedPatterns({ options, figure, onChange, src }) {
       </div>
     </div>
     {!figure.tasks.length ? <Alert type="info" showIcon message="Select at least one task." /> : <>
-      {shown.src === src && shown.failed ? <Alert type="error" showIcon message="The figure could not be drawn." /> : null}
+      {shown.src === src && shown.failed ? <Alert type="error" showIcon message="The figure could not be drawn." description="Check that DARA is running, then reload the page." /> : null}
       <div className="dara-figure-preview" aria-busy={loading}>
         <img key={src} src={src} alt="Stacked measured patterns with the reference patterns of the phases"
           onLoad={() => setShown({ src, failed: false })} onError={() => setShown({ src, failed: true })} />
@@ -145,6 +158,9 @@ function StackedPatterns({ options, figure, onChange, src }) {
     </>}
   </ChartBlock>;
 }
+
+// "dara_series_ZnO anneal.csv": the series name, without characters a file name cannot hold.
+const seriesCsvName = name => `dara_series_${String(name || 'series').replace(/[\\/:*?"<>|]+/g, '_').trim().slice(0, 80) || 'series'}.csv`;
 
 // "300 °C" (value, a space, the unit); the token from the file name when it has no value.
 const variableText = variable => (variable?.value !== null && variable?.value !== undefined
@@ -161,8 +177,10 @@ function SeriesDetail({ id, onName }) {
   const [figureOpen, setFigureOpen] = React.useState(false);
   const completedCount = (data?.items || []).filter(item => item.state === 'COMPLETED').length;
 
-  // Tasks and phases of the stacked figure: reloaded when another task completes, then all tasks
-  // and the default phases are selected.
+  // Tasks and phases of the stacked figure: reloaded when another task completes. The first load
+  // selects all tasks and the default phases; later loads keep the user's choice and add only the
+  // newly completed tasks and new default phases.
+  const knownOptions = React.useRef(null);
   React.useEffect(() => {
     if (!completedCount) return undefined;
     let active = true;
@@ -170,9 +188,18 @@ function SeriesDetail({ id, onName }) {
       .then(response => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then(body => {
         if (!active) return;
+        const known = knownOptions.current;
+        knownOptions.current = body;
         setFigureOptions(body);
-        setFigure(previous => ({ ...previous, tasks: body.tasks.map(task => task.task_id),
-          phases: body.phases.filter(phase => phase.default).map(phase => phase.key) }));
+        const taskIdsNow = body.tasks.map(task => task.task_id);
+        const defaults = body.phases.filter(phase => phase.default).map(phase => phase.key);
+        setFigure(previous => (!known ? { ...previous, tasks: taskIdsNow, phases: defaults } : {
+          ...previous,
+          tasks: [...previous.tasks.filter(task => taskIdsNow.includes(task)),
+            ...taskIdsNow.filter(task => !known.tasks.some(old => old.task_id === task))],
+          phases: [...previous.phases.filter(key => body.phases.some(phase => phase.key === key)),
+            ...defaults.filter(key => !known.phases.some(phase => phase.key === key))],
+        }));
       })
       .catch(e => { if (active) setFigureOptions({ error: errorText(e) }); });
     return () => { active = false; };
@@ -238,8 +265,10 @@ function SeriesDetail({ id, onName }) {
   const compareIds = completedIds.slice(0, MAX_COMPARE);
   // The series variable goes along, so the comparison map can use it as its y axis.
   const valueOf = new Map(items.map((item, index) => [item.task_id, axis.values[index]]));
-  const compareValues = axis.usesVariable ? `&values=${compareIds.map(id => valueOf.get(id)).join(',')}${axis.title ? `&unit=${encodeURIComponent(axis.title)}` : ''}` : '';
-  const allIds = taskIds(items).slice(0, MAX_EXPORT);
+  const compareValues = axis.usesVariable ? `&values=${compareIds.map(id => valueOf.get(id)).join(',')}${axis.unit ? `&unit=${encodeURIComponent(axis.unit)}` : ''}` : '';
+  // The table holds fits: identifications and unfinished tasks would be empty rows.
+  const fitItems = items.filter(item => item.state === 'COMPLETED' && item.summary?.analysis_mode !== 'identification');
+  const allIds = fitItems.map(item => item.task_id).slice(0, MAX_EXPORT);
   const seriesIds = taskIds(items);
   // A task opened here knows the series order (Previous / Next sample) and returns to this series.
   const back = `from=series&id=${encodeURIComponent(id)}`;
@@ -250,13 +279,13 @@ function SeriesDetail({ id, onName }) {
     tasks: figure.tasks, allTasks: figureOptions?.tasks || [], phases: figure.phases, normalize: figure.normalize,
     format: style.format, widthMm: style.widthMm, download, style, labels: figure.labels });
   const downloads = [
-    { key: 'table', label: 'Results table (CSV)' },
+    { key: 'table', label: allIds.length ? 'Results table (CSV)' : 'Results table (CSV): no completed fit yet', disabled: !allIds.length },
     { key: 'figure', label: 'Stacked patterns figure…', disabled: !figureReady },
   ];
   const exportTable = async () => {
     setExporting(true);
     try {
-      message.success(`Exported to ${await downloadTable(allIds)}.`);
+      message.success(`Exported to ${await downloadTable(allIds, undefined, seriesCsvName(data.name))}.`);
     } catch (e) {
       message.error(errorText(e));
     } finally {
@@ -289,7 +318,7 @@ function SeriesDetail({ id, onName }) {
       </div>
       {completedIds.length > MAX_COMPARE ? <div><Typography.Text type="secondary">{`Pattern comparison shows the first ${MAX_COMPARE} completed tasks.`}</Typography.Text></div> : null}
     </div>
-    {items.length > MAX_EXPORT ? <Typography.Text type="secondary">{`The table export takes the first ${MAX_EXPORT} tasks; select the rest in Results to export them.`}</Typography.Text> : null}
+    {fitItems.length > MAX_EXPORT ? <Typography.Text type="secondary">{`The table export takes the first ${MAX_EXPORT} fits; select the rest in Results to export them.`}</Typography.Text> : null}
     <Table size="small" className="dara-results-table" rowKey="fw_id" pagination={false} dataSource={rows} tableLayout="fixed" scroll={{ x: 1000 }}
       columns={[
         { title: 'Order', dataIndex: 'order', key: 'order', width: 64, className: 'dara-num', render: value => value + 1 },

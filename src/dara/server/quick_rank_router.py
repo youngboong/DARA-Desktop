@@ -44,6 +44,15 @@ _JOBS_LOCK = threading.Lock()
 _RUN_LOCK = threading.Lock()  # one ranking at a time: stick simulation is CPU and memory heavy
 
 
+def _touch(job_id: str):
+    """The job ``job_id`` (or ``None``), marked as just used (call under ``_JOBS_LOCK``): the store
+    evicts the least recently used job, never one the user is still working on."""
+    job = _JOBS.get(job_id)
+    if job is not None:
+        _JOBS.move_to_end(job_id)
+    return job
+
+
 def _add_symbols(rows) -> None:
     from dara.server.api_router import _spacegroup_symbol
 
@@ -97,7 +106,8 @@ async def _start_and_wait(params: dict, key_parts, wavelength_mismatch: dict | N
                    "wavelength_mismatch": wavelength_mismatch}
             _JOBS[job_id] = job
             while len(_JOBS) > _JOBS_MAX:
-                _JOBS.popitem(last=False)
+                _, evicted = _JOBS.popitem(last=False)  # least recently used
+                evicted["cancel"].set()  # an evicted pending ranking stops at its next check
             fresh = True
         else:
             _JOBS.move_to_end(job_id)
@@ -200,10 +210,19 @@ def _elements_and_precursors(elements_raw, precursors_raw) -> tuple[list[str], l
         elements = element_symbols(_parse_string_list(elements_raw))
         if not elements:
             elements = formula_elements(precursors)
+        # A listed formula is a guaranteed candidate: one with an element outside the entered
+        # ones would be ranked although the sample is said not to contain that element.
+        outside = {formula: [e for e in formula_elements([formula]) if e not in elements] for formula in precursors}
+        outside = {formula: extra for formula, extra in outside.items() if extra}
     except (ValueError, KeyError) as exc:
         raise HTTPException(status_code=400, detail=f"Invalid elements or formulas: {exc}")
     if not elements:
         raise HTTPException(status_code=400, detail="Enter the elements (or formulas) of the sample.")
+    if outside:
+        formula, extra = next(iter(outside.items()))
+        one = len(extra) == 1
+        raise HTTPException(status_code=400, detail=f"{formula} contains {', '.join(extra)}, which {'is' if one else 'are'} "
+                            f"not among the elements: add {'it' if one else 'them'} to the elements or remove the formula.")
     if len(elements) > MAX_ELEMENTS:  # the pool spans every sub-system: 2^n chemical systems
         raise HTTPException(
             status_code=422,
@@ -370,7 +389,7 @@ async def quick_ranking_task(task_id: int, request: TaskQuickRankingRequest | No
 @router.get("/quick-ranking/{job_id}")
 async def quick_ranking_status(job_id: str):
     with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
+        job = _touch(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
     task = job.get("task")
@@ -393,7 +412,7 @@ async def quick_ranking_residual(job_id: str, request: ResidualRequest):
     from dara.search.quick_rank import residual_step
 
     with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
+        job = _touch(job_id)
     if job is None or job["cancel"].is_set():
         raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
     if job["status"] != "done" or not job.get("candidates"):
@@ -429,7 +448,7 @@ async def quick_ranking_peak_candidates(job_id: str, request: PeakCandidatesRequ
     from dara.search.quick_rank import peak_candidates
 
     with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
+        job = _touch(job_id)
     if job is None or job["cancel"].is_set():
         raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
     if job["status"] != "done" or not job.get("candidates"):
@@ -460,7 +479,7 @@ async def quick_ranking_background(job_id: str, settings: Optional[dict] = Body(
     from dara.search.quick_rank import CONFIG, background_view
 
     with _JOBS_LOCK:
-        job = _JOBS.get(job_id)
+        job = _touch(job_id)
     if job is None or job["cancel"].is_set():
         raise HTTPException(status_code=404, detail="Unknown or expired search-match; start it again.")
     params, chosen = job["params"], background_param(settings)

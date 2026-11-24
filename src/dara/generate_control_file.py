@@ -179,16 +179,20 @@ def generate_control_file(
         for index, (lower, upper) in enumerate(range_params.get("excluded_ranges", []), 1)
     )
 
+    def is_le_bail(str_path) -> bool:
+        return bool(re.search(r"^\s*LeBail\s*=\s*[1-9]", Path(str_path).read_text(), re.MULTILINE))
+
+    # Le Bail phases go last: with a LeBail=1 phase as STRUC[1], BGMN 4.2.22 prints the next phase's
+    # e.s.d. from a shifted covariance ("A=0.8+-4.1", "k1=1.0+-7.5" for a cell refined within
+    # 0.819-0.852 nm, task 118, 2026-11-24) and rounds the value to it; the fit itself is the same.
+    str_paths = [path for path in str_paths if not is_le_bail(path)] + [path for path in str_paths if is_le_bail(path)]
     phases_str = "\n".join(
         [f"STRUC[{i}]={str_path.name}" for i, str_path in enumerate(str_paths, start=1)]
     )
 
     # A LeBail=1 phase has no GEWICHT (bgmn.de/variables.html: LeBail "will cause to omit
     # calculation of F, GEWICHT"); in the sum it would make every Q goal UNDEF (BGMN 4.2.22).
-    phase_names = [
-        read_phase_name_from_str(str_path) for str_path in str_paths
-        if not re.search(r"^\s*LeBail\s*=\s*[1-9]", Path(str_path).read_text(), re.MULTILINE)
-    ]
+    phase_names = [read_phase_name_from_str(str_path) for str_path in str_paths if not is_le_bail(str_path)]
     phase_fraction_str = "\n".join(
         [f"Q{phase_name}={phase_name}/sum" for phase_name in phase_names]
     )

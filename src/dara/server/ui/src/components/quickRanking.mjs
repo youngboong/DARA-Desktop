@@ -225,10 +225,21 @@ export function unexplainedStatus(residual) {
   return n ? `${n} unexplained peak${n === 1 ? '' : 's'}` : 'No unexplained peaks';
 }
 
+/**
+ * `row` (a row scored against what is left) with the key of its ranking row: a group of records of one
+ * structure may be represented by another record there (the best one of the group differs), so the
+ * records of both rows are compared. `inRanking` when such a row exists (it can be selected).
+ */
+function asRankingRow(row, rows) {
+  const records = new Set([row.key, ...(row.sources || [])]);
+  const match = rows.find(other => other.key === row.key) || rows.find(other => records.has(other.key)
+    || (other.sources || []).some(source => records.has(source)));
+  return { ...row, key: match ? match.key : row.key, inRanking: Boolean(match) };
+}
+
 /** Up to `limit` best matches for the remaining peaks as table rows; `inRanking` when the row can be selected. */
 export function nextMatches(residual, rows = [], limit = 3) {
-  const known = new Set(rows.map(row => row.key));
-  return rankingRows({ ranking: (residual?.next || []).slice(0, limit) }).map(row => ({ ...row, inRanking: known.has(row.key) }));
+  return rankingRows({ ranking: (residual?.next || []).slice(0, limit) }).map(row => asRankingRow(row, rows));
 }
 
 /** The ranking response with the residual net pattern in place of the measured one (the "what is left" view). */
@@ -281,9 +292,8 @@ export const peakTitle = peak => `Candidates for 2θ ${Number(peak.x).toFixed(2)
  * (the relative intensity of the candidate's line at the peak) and `inRanking` (it can be added).
  */
 export function peakCandidateRows(response, rows = []) {
-  const known = new Set(rows.map(row => row.key));
   return rankingRows({ ranking: response?.candidates || [] }).map(row => ({
-    ...row, inRanking: known.has(row.key), lineText: Number.isFinite(row.line?.rel) ? `${Math.round(row.line.rel * 100)} %` : '—',
+    ...asRankingRow(row, rows), lineText: Number.isFinite(row.line?.rel) ? `${Math.round(row.line.rel * 100)} %` : '—',
   }));
 }
 
@@ -440,11 +450,15 @@ export function alternativeGroups(rows, selectedKeys) {
     .filter(other => byKey[other] && !chosen.has(other)).map(other => byKey[other])]).filter(([, list]) => list.length));
 }
 
-/** `{row key: selected row}` of the rows that are an alternative of a selected row (the table marks them). */
+/** `{row key: [selected rows]}` of the rows that are an alternative of one or more selected rows (the table marks them). */
 export function alternativeOf(rows, selectedKeys) {
   const byKey = Object.fromEntries((rows || []).map(row => [row.key ?? rowKey(row), row]));
-  return Object.fromEntries(Object.entries(alternativeGroups(rows, selectedKeys))
-    .flatMap(([key, list]) => list.map(row => [row.key ?? rowKey(row), byKey[key]])));
+  const of = {};
+  Object.entries(alternativeGroups(rows, selectedKeys)).forEach(([key, list]) => list.forEach(row => {
+    const alt = row.key ?? rowKey(row);
+    of[alt] = [...(of[alt] || []), byKey[key]];
+  }));
+  return of;
 }
 
 /** Alternatives saved with an identification: `[{source, formula, spacegroup, of}]`. */

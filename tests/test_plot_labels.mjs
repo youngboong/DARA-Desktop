@@ -79,9 +79,12 @@ assert.equal(hklText(1, 0, 12), '(1 0 12)');
   assert.equal(label.font.color, '#0072b2');
   const [bottom, upper] = view.layout.yaxis.range;
   assert((upper - label.y) / (upper - bottom) * 200 >= hklLabelPx(label.text, 11) - 1e-9, 'inside the frame');
-  // A short panel: the top rises by at most a quarter of the data range; a label that does not fit is dropped.
+  // A short panel: the top rises by at most a quarter of the data range; a label that does not fit
+  // above its peak hangs from the top of the frame beside it (the strongest peaks keep their labels).
   const short = buildRefinementView(plot, { plotWidth: 1200, plotHeight: 130, hklLabels: true });
-  assert.equal(short.layout.annotations.filter(item => item.textangle === -90).length, 0);
+  const hung = short.layout.annotations.filter(item => item.textangle === -90);
+  assert.equal(hung.length, 1);
+  assert(hung[0].y < short.layout.yaxis.range[1] && hung[0].xshift > 0);
   assert(short.layout.yaxis.range[1] <= 520 + 0.3 * (520 - Math.min(0, 10)) + 1e-9, 'the pattern keeps its height');
 }
 console.log('hkl labels and d-axis ticks passed.');

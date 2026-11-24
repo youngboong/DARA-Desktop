@@ -42,7 +42,7 @@ export function updateStateText(status) {
   }
   if (status.available) return `DARA ${status.latest} is available (you have ${status.current}).`;
   if (status.error) return status.error;
-  return `DARA ${status.current} is up to date`;
+  return status.current ? `DARA ${status.current} is up to date` : 'The installed version could not be read.';
 }
 
 /** A refused install (HTTP 409): its message and whether "Update anyway" may retry with force=1. */

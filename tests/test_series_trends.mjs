@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   MAX_SERIES_FILES, fitTraces, hasActiveItems, latticeTraces, phaseLabels, phaseTraces, progress,
-  seriesFigureHref, seriesPreviewRows, taskIds, xAxis,
+  plotlyPhaseLabel, seriesFigureHref, seriesPreviewRows, taskIds, xAxis,
 } from '../src/dara/server/ui/src/components/seriesTrends.mjs';
 
 const lattice = (a, esd) => ({ a: { value: a, esd }, c: { value: a * 1.6, esd: esd * 2 } });
@@ -21,7 +21,10 @@ const items = [
 // --- x axis ----------------------------------------------------------------------
 let axis = xAxis(items);
 assert.deepEqual(axis.values, [300, 500, 700]);
-assert.equal(axis.title, '°C');
+assert.equal(axis.title, 'Temperature (°C)', 'the quantity with its unit');
+assert.equal(axis.unit, '°C');
+assert.equal(plotlyPhaseLabel('Fe2O3 · R-3c'), 'Fe<sub>2</sub>O<sub>3</sub> · <i>R</i>3̄<i>c</i>');
+assert.equal(plotlyPhaseLabel('Zincite · ZnO'), 'Zincite · ZnO', 'a mineral name stays as written');
 assert.equal(axis.usesVariable, true);
 const noVariable = xAxis([item(1, 0, null, 'COMPLETED', []), item(2, 1, 5, 'COMPLETED', [])]);
 assert.deepEqual(noVariable.values, [1, 2]);

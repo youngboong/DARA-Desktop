@@ -26,7 +26,7 @@ export function saveText(text, filename, type = 'text/csv;charset=utf-8') {
  * The results table of `ids` (adopted fits) as one CSV: requested in parts of the server's limit
  * (50 ids), merged with one header and saved. `onProgress(done)` after each part. Resolves to the file name.
  */
-export async function downloadTable(ids, onProgress = () => {}) {
+export async function downloadTable(ids, onProgress = () => {}, name = null) {
   const texts = [];
   let done = 0;
   for (const part of chunks(ids)) {
@@ -36,7 +36,7 @@ export async function downloadTable(ids, onProgress = () => {}) {
     done += part.length;
     onProgress(done);
   }
-  const filename = exportFilename(ids.length);
+  const filename = name || exportFilename(ids.length);
   saveText(mergeCsv(texts), filename);
   return filename;
 }

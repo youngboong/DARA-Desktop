@@ -277,8 +277,10 @@ def search_references(query: str) -> list[dict]:
         for item in library
         if _reduced(item.get("formula")) == reduced
     ]
+    # Index formulas are spelled in several ways (Y(HO)3, Mg0.5H0.5O2): compare reduced compositions,
+    # so La(OH)3, LaH3O3 and La(HO)3 find the same rows.
     rows = [row for row in shared_cod_database().preparsed_info.get(composition.chemical_system, [])
-            if row[0] == reduced]
+            if row[0] == reduced or _reduced(row[0]) == reduced]
     # most stable first; rows without an energy last
     rows.sort(key=lambda row: (row[3] is None, row[3] if row[3] is not None else 0, str(row[1])))
     return (items + [_cod_item(row) for row in rows])[:SEARCH_LIMIT]

@@ -5,13 +5,13 @@ import {
   mergeCsv, mergeUsers, middleSplit, parseResultsView, partitionSelected, resultsSearch, retryable, rowStatusLine, verdictView,
 } from '../src/dara/server/ui/src/components/resultsList.mjs';
 import { listContext, resultsHref } from '../src/dara/server/ui/src/components/sampleNav.mjs';
-import { leaveWarning, setLeaveGuard } from '../src/dara/server/ui/src/components/leaveGuard.mjs';
+import { guardHistory, leaveWarning, setLeaveGuard } from '../src/dara/server/ui/src/components/leaveGuard.mjs';
 
 test('the Results view round-trips through the address', () => {
   const view = parseResultsView('?page=3&limit=500&user=Ann&name=ZnO&state=FIZZLED,BOGUS&verdict=expert,check&sort=rwp&order=desc&selected=41,9,9,x,22');
   assert.deepEqual(view, {
     page: 3, limit: 100, user: 'Ann', name: 'ZnO', state: ['FIZZLED'], verdict: ['expert', 'check'],
-    sort: 'rwp', order: 'desc', selected: [41, 9, 22],
+    sort: 'rwp', order: 'desc', selected: [41, 9, 22], exact: false,
   });
   assert.equal(resultsSearch(view), 'page=3&limit=100&user=Ann&name=ZnO&state=FIZZLED&verdict=expert,check&sort=rwp&order=desc&selected=41,9,22');
   assert.deepEqual(parseResultsView(`?${resultsSearch(view)}`), view);
@@ -22,6 +22,13 @@ test('the Results view round-trips through the address', () => {
 
 test('no user in the address means the remembered user; an empty one means all users', () => {
   assert.equal(parseResultsView('', 'ann').user, 'ann');
+  // My tasks: the whole user name, kept in the address and sent to the server
+  const mine = parseResultsView('', 'ann');
+  assert.equal(mine.exact, true);
+  assert.equal(resultsSearch(mine), 'page=1&limit=50&user=ann&exact=1');
+  assert.deepEqual(parseResultsView(`?${resultsSearch(mine)}`), mine);
+  assert.ok(apiQuery(mine).includes('user=ann&user_exact=true'));
+  assert.equal(parseResultsView('?user=ann').exact, false, 'a typed user filter stays "contains"');
   assert.equal(parseResultsView('?user=', 'ann').user, '');
   assert.equal(parseResultsView('', null).user, '');
   assert.equal(resultsSearch(parseResultsView('?user=', 'ann')), 'page=1&limit=50&user=');
@@ -36,7 +43,8 @@ test('a task link returns to the same view, selection included', () => {
   const context = listContext(`?id=2&list=1,2&back=${encodeURIComponent(backQuery(view))}`, 2);
   assert.equal(resultsHref(context), '/results?page=2&limit=50&user=&state=COMPLETED&selected=1%2C2');
   const many = { ...view, selected: Array.from({ length: 600 }, (_, index) => 100000 + index) };
-  assert.equal(backQuery(many).includes('selected'), false, 'too long for the task link: the selection is left out');
+  assert.ok(backQuery(many).endsWith('&selected=kept'), 'too long for the task link: kept in the tab');
+  assert.deepEqual(parseResultsView(`?${backQuery(many)}`).selected, [], 'restored by the page, not the parser');
 });
 
 test('verdicts, states and the line under the name', () => {
@@ -81,7 +89,7 @@ test('names: sample first, middle ellipsis keeps the distinguishing end, one dat
 
 test('bulk actions skip rows they do not apply to', () => {
   const rows = new Map([[1, { state: 'RUNNING' }], [2, { state: 'COMPLETED' }], [3, { state: 'FIZZLED', error_summary: { temporary: true } }]]);
-  assert.deepEqual(partitionSelected([1, 2, 3, 4], rows, deletable), { ids: [2, 3, 4], skipped: [1] });
+  assert.deepEqual(partitionSelected([1, 2, 3, 4], rows, deletable), { ids: [2, 3], skipped: [1, 4] }, 'a row not loaded is never acted on');
   assert.equal(retryable(rows.get(3)), true);
   assert.equal(retryable({ state: 'FIZZLED', error_summary: { temporary: false } }), false);
 });
@@ -102,6 +110,32 @@ test('the leave guard asks only while a page registers unsaved work', () => {
   assert.equal(leaveWarning(), 'The pattern is not kept.');
   off();
   assert.equal(leaveWarning(), null);
+});
+
+test('Back to another page with unsaved work is held from the router and asked', () => {
+  const listeners = [];
+  const steps = [];
+  globalThis.window = {
+    location: { pathname: '/', search: '', hash: '' },
+    addEventListener: (type, fn) => listeners.push(fn),
+    history: { go: step => steps.push(step) },
+  };
+  const asked = [];
+  guardHistory((text, leave) => asked.push([text, leave]), () => {});
+  const pop = () => { const event = { stopped: false, stopImmediatePropagation() { this.stopped = true; } }; listeners.forEach(fn => fn(event)); return event.stopped; };
+  window.location.pathname = '/results/';
+  assert.equal(pop(), false, 'nothing unsaved: the router goes on');
+  window.location.pathname = '/';
+  const off = setLeaveGuard(() => 'The pattern is not kept.');
+  window.location.pathname = '/results/';
+  assert.equal(pop(), true, 'held');
+  assert.deepEqual(steps, [1]);
+  assert.equal(asked[0][0], 'The pattern is not kept.');
+  window.location.pathname = '/';
+  assert.equal(pop(), true, 'the step forward again is hidden too (the page is not mounted afresh)');
+  assert.equal(pop(), false, 'Back within the page (the search-match view) is its own');
+  off();
+  delete globalThis.window;
 });
 
 test('user suggestions merge spellings that differ only in case', () => {

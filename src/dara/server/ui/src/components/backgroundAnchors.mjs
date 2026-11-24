@@ -202,3 +202,17 @@ export function fitSeries(plot) {
   if (!obs || !calc || !bkg) return null;
   return { x: traceNumbers(obs.x), yObs: traceNumbers(obs.y), yCalc: traceNumbers(calc.y), yBkg: traceNumbers(bkg.y) };
 }
+
+/**
+ * Why an excluded 2θ interval `[lo, hi]` cannot be used, or `null`: both ends needed, `lo < hi`,
+ * and some overlap with the measured `range` ([min, max] of 2θ; not checked when unknown).
+ */
+export function intervalProblem([lo, hi] = [], range = null) {
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return 'enter both ends';
+  if (!(lo < hi)) return '"from" must be below "to"';
+  const [min, max] = Array.isArray(range) ? range.map(Number) : [];
+  if (Number.isFinite(min) && Number.isFinite(max) && (hi <= min || lo >= max)) {
+    return `outside the measured range (${min.toFixed(1)}–${max.toFixed(1)}°)`;
+  }
+  return null;
+}

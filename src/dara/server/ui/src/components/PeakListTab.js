@@ -47,7 +47,8 @@ function correctionNote(applied) {
 }
 
 // Negative values take the minus sign (U+2212), as on the plot axes.
-const fixed = digits => value => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-/, '\u2212'));
+// A value that rounds to zero prints without a sign (no "−0.000").
+const fixed = digits => value => (value == null ? '—' : Number(value).toFixed(digits).replace(/^-(?=0\.?0*$)/, '').replace(/^-/, '\u2212'));
 
 // Formula with the space group, so polymorphs of one formula (R-3c and R-3m Fe2O3) stay apart.
 // The page's name for each phase of the fit (`name -> label | null`): formula, space group and, where
@@ -156,7 +157,7 @@ export default function PeakListTab({ taskId, sel, active, phaseLabel = null, id
     </div>
     {shown === 'observed' ? <ObservedPeaks taskId={taskId} query={plainQuery} onResponse={onResponse} active={active} />
       : shown === 'size' ? <SizeStrain taskId={taskId} query={query} onResponse={onResponse} active={active} reload={reload} />
-        : shown === 'cell' ? <CellRefinementView taskId={taskId} sel={sel} model={shiftModel} active={active} onPhases={onCellPhases} />
+        : shown === 'cell' ? <CellRefinementView taskId={taskId} sel={sel} model={shiftModel} active={active} onPhases={onCellPhases} phaseLabel={phaseLabel} />
           : <CalculatedReflections taskId={taskId} sel={sel} active={active} widths={!identification} />}
     {measurable && advanced ? <FwhmCurveDialog profile={profile} open={curveOpen} onClose={() => setCurveOpen(false)} onChange={curveChanged} /> : null}
     {/* An identification shows the RIR amounts and Scherrer sizes in its Phases tab already. */}
@@ -197,6 +198,8 @@ function ObservedPeaks({ taskId, query, onResponse, active }) {
 
   const rows = (body.rows || []).map((row, index) => ({ ...row, key: index, number: index + 1 }));
   const unassigned = rows.filter(row => !row.phase).length;
+  // the summary banner counts significant and minor unexplained peaks; noise-level ones are unassigned too
+  const counted = rows.filter(row => ['significant', 'minor'].includes(row.unexplained_class)).length;
   const shown = filter === 'all' ? rows : rows.filter(row => (filter === 'assigned') === Boolean(row.phase));
   const columns = [
     { title: '#', dataIndex: 'number', className: 'dara-num', sorter: byNumber('number') },
@@ -208,7 +211,8 @@ function ObservedPeaks({ taskId, query, onResponse, active }) {
       className: 'dara-num', sorter: byNumber('fwhm_deg'),
       render: fwhmCell },
     { title: 'Phase', key: 'phase', sorter: (a, b) => Number(Boolean(a.phase)) - Number(Boolean(b.phase)) || String(a.phase_label).localeCompare(String(b.phase_label)),
-      render: (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row, labelOf)} /> : <span style={{ color: 'var(--dara-review)' }}>Unassigned</span>) },
+      render: (_, row) => (row.phase ? <ChemicalFormula formula={phaseText(row, labelOf)} />
+        : <span style={{ color: 'var(--dara-review)' }}>{row.unexplained_class ? `Unexplained (${row.unexplained_class})` : 'Unassigned'}</span>) },
     { title: <Tooltip title="Indices of the nearest reflection, in the database setting"><span>hkl</span></Tooltip>, dataIndex: 'hkl',
       render: value => <span style={{ fontVariantNumeric: 'tabular-nums' }}>{value ?? <Text type="secondary">—</Text>}</span> },
     { title: <Tooltip title="Observed − calculated 2θ of the assigned reflection"><span>Δ2θ (°)</span></Tooltip>, dataIndex: 'delta_two_theta_deg', className: 'dara-num',
@@ -218,7 +222,7 @@ function ObservedPeaks({ taskId, query, onResponse, active }) {
     <div className="dara-toolbar">
       <Radio.Group size="small" optionType="button" value={filter} onChange={event => setFilter(event.target.value)} aria-label="Filter by assignment"
         options={[{ value: 'all', label: 'All' }, { value: 'assigned', label: 'Assigned' }, { value: 'unassigned', label: 'Unassigned' }]} />
-      <Text type="secondary" className="dara-num">{`${rows.length} peak${rows.length === 1 ? '' : 's'}, ${unassigned} unassigned`}</Text>
+      <Text type="secondary" className="dara-num">{`${rows.length} peak${rows.length === 1 ? '' : 's'}, ${unassigned} unassigned${body.rows?.some(row => 'unexplained_class' in row) ? ` (${counted} counted as unexplained in the summary)` : ''}`}</Text>
       <Button size="small" icon={<DownloadOutlined />} href={`${API}/task/${taskId}/observed-peaks.csv?${query}`}>Download CSV</Button>
     </div>
     <div className="dara-fit-table">

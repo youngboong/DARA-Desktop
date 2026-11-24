@@ -243,6 +243,8 @@ def summary_is_current(summary, record: dict | None) -> bool:
     selection = ((record or {}).get("review") or {}).get("selection")
     if isinstance(selection, int) and not isinstance(selection, bool):
         return summary.get("adopted") == selection
+    if isinstance(selection, str) and selection.startswith("version:"):
+        return summary.get("adopted") == selection  # a digest of the automatic fit is stale once a version is adopted
     return True
 
 

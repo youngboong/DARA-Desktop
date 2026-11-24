@@ -4,13 +4,15 @@ import { DownloadOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-desig
 import Loadable from 'react-loadable';
 import Layout from '../components/Layout';
 import {
-  comparisonTraces, differenceCsv, differenceCurves, mapMatrix, measuredAngularBounds, parseComparisonTaskIds, parseSeriesValues,
+  comparisonTraces, differenceCsv, differenceCurves, mapMatrix, measuredAngularBounds, parseComparisonTaskIds, parseSeriesValues, shownIntensities,
 } from '../components/patternComparison.mjs';
 import { TRAY_LINES } from '../components/composition.mjs';
 import { viewChangeFromRelayout } from '../components/plotNavigation.mjs';
 import { NAVIGATION_CONFIG, NAVIGATION_DRAGMODE, NAVIGATION_HELP } from '../components/usePlotView';
 import { MiddleText } from '../components/ResultColumns';
 import { errorText } from '../components/exportTable';
+import { middleSplit } from '../components/resultsList.mjs';
+import { taskHref } from '../components/sampleNav.mjs';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const Plotly = Loadable({
@@ -29,7 +31,12 @@ const VIEWS = [
   { value: 'map', label: <Tooltip title="2θ against pattern with the intensity as colour, as for in-situ and series measurements"><span>Map</span></Tooltip> },
   { value: 'difference', label: <Tooltip title="A − k·B: what one pattern has that the other has not"><span>Difference</span></Tooltip> },
 ];
-const shortName = pattern => `#${pattern.task_id} ${pattern.name.length > 40 ? `${pattern.name.slice(0, 38)}…` : pattern.name}`;
+// At most about 40 characters; the end that tells a series apart ("…--8min") stays.
+const shortName = pattern => {
+  const [head, tail] = middleSplit(pattern.name);
+  const room = 40 - tail.length;
+  return `#${pattern.task_id} ${head.length > room ? `${head.slice(0, room - 1)}…` : head}${tail}`;
+};
 // A series variable with only a few values reads as categories: a linear axis would stretch two
 // rows over -1…11 with empty space between them.
 const FEW_VALUES = 6;
@@ -130,12 +137,23 @@ function MeasuredComparePage({ location }) {
   // Zoom and pan stay inside the measured 2θ range; the view starts there (no autorange padding).
   const bounds = React.useMemo(() => measuredAngularBounds(patterns), [patterns]);
   const validRange = minimum !== null && maximum !== null && Number.isFinite(minimum) && Number.isFinite(maximum) && minimum < maximum;
+  // The stack offset follows the shown scale: 110 for patterns normalised to 100, else 1.1 × the
+  // largest shown value (√I of the counts with √I on).
+  const offsetFor = (norm, root) => (norm ? 110 : Math.ceil(1.1 * patterns.reduce((size, pattern) => shownIntensities(pattern.intensities, { normalize: false, sqrt: root })
+    .reduce((top, value) => (Number.isFinite(value) ? Math.max(top, Math.abs(value)) : top), size), 0)));
   const changeNormalization = value => {
     setNormalize(value);
-    const largest = patterns.reduce((size, pattern) => pattern.intensities.reduce((maximumValue, intensity) => Math.max(maximumValue, Math.abs(intensity)), size), 0);
-    setOffset(value ? 110 : Math.ceil(largest * 1.1));
+    setOffset(offsetFor(value, sqrt));
     setViewRevision(previous => previous + 1);
   };
+  const changeSqrt = value => {
+    setSqrt(value);
+    setOffset(offsetFor(normalize, value));
+    setViewRevision(previous => previous + 1);
+  };
+  // Server-rendered links keep the build's address on hydration: the breadcrumb is drawn again once mounted.
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => { setMounted(true); }, []);
   const resetView = () => {
     const bounds = measuredAngularBounds(patterns);
     setRange(undefined);
@@ -193,7 +211,7 @@ function MeasuredComparePage({ location }) {
   const ready = !loading && patterns.length >= 2;
   return <Layout hasSider={false} title="Compare patterns">
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Space wrap align="center"><Typography.Title level={2} style={{ margin: 0, fontSize: 'var(--dara-font-20)', fontWeight: 400 }}><a href={crumb.href}>{crumb.text}</a>{' › '}<span style={{ fontWeight: 600 }}>Compare patterns</span></Typography.Title>
+      <Space wrap align="center"><Typography.Title level={2} style={{ margin: 0, fontSize: 'var(--dara-font-20)', fontWeight: 400 }}><a key={mounted ? 'client' : 'server'} href={crumb.href}>{crumb.text}</a>{' › '}<span style={{ fontWeight: 600 }}>Compare patterns</span></Typography.Title>
         {ready ? <Tooltip title={`Original measured patterns, not calculated fits. ${NAVIGATION_HELP} Click a legend item to hide or show a sample. Controls change the view only.`}>
           <InfoCircleOutlined aria-label="About this comparison" style={{ color: 'var(--dara-text-hint)' }} />
         </Tooltip> : null}</Space>
@@ -218,7 +236,7 @@ function MeasuredComparePage({ location }) {
         </div> : null}
         {view !== 'difference' ? <div className="dara-toolbar-group" aria-label="Intensity">
           <label className="dara-toolbar-item"><span>Normalize max |I| to 100</span><Switch size="small" checked={normalize} onChange={changeNormalization} aria-label="Normalize" /></label>
-          <label className="dara-toolbar-item"><span>√I (weak peaks)</span><Switch size="small" checked={sqrt} onChange={value => { setSqrt(value); setViewRevision(previous => previous + 1); }} aria-label="Square-root intensity" /></label>
+          <label className="dara-toolbar-item"><span>√I (weak peaks)</span><Switch size="small" checked={sqrt} onChange={changeSqrt} aria-label="Square-root intensity" /></label>
         </div> : null}
         {view === 'stack' ? <div className="dara-toolbar-group">
           <label className="dara-toolbar-item" htmlFor="pattern-offset">Vertical offset
@@ -269,7 +287,8 @@ function MeasuredComparePage({ location }) {
       />}
       {ready && <Table size="small" rowKey="task_id" dataSource={patterns} pagination={false} scroll={{ x: 640 }} columns={[
         { title: 'ID', dataIndex: 'task_id', width: 60, className: 'dara-num' },
-        { title: 'Sample / file', render: (_, row) => <div className="dara-row-name"><a href={`/task/?id=${row.task_id}`} className="dara-row-primary">{row.name}</a>
+        { title: 'Sample / file', render: (_, row) => <div className="dara-row-name"><a href={taskHref(row.task_id, { ids: patterns.map(pattern => pattern.task_id), back: seriesId ? `from=series&id=${seriesId}` : backQuery })}
+          className="dara-row-primary">{row.name}</a>
           {row.file && row.file !== row.name ? <MiddleText text={row.file} className="dara-row-file" /> : null}</div> },
         ...(seriesValues ? [{ title: unit ? `Variable (${unit})` : 'Variable', className: 'dara-num', render: (_, row, index) => seriesValues[index] }] : []),
         { title: '2θ range (°)', render: (_, row) => `${row.angles[0].toFixed(3)}–${row.angles[row.angles.length - 1].toFixed(3)}` },

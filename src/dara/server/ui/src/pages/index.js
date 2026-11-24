@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
 import { Alert, AutoComplete, Button, Form, Input, InputNumber, message, Modal, Radio, Select, Space, Switch, Table, Tag, Tooltip, Typography, Upload } from 'antd';
-import { FileOutlined, MinusCircleOutlined, PlusOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
+import { CloseOutlined, FileOutlined, MinusCircleOutlined, PlusOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
 import { CalibrateProfile, DEFAULT_CONTROLS, InstrumentManager, RefinementControlsEditor } from '../components/PracticalControls';
 import { detailMessage, qualityAlertItems, qualityStatText, wavelengthMismatch } from '../components/dataQuality.mjs';
 import { MpKeyStatus, ReferenceLibraryField, useReferenceLibrary } from '../components/ReferenceLibrary';
@@ -21,6 +21,7 @@ import QuickRankingWorkspace, { QuickRankingSummary, useQuickRanking } from '../
 import StructureLibrary from '../components/StructureLibrary.js';
 import { setLeaveGuard } from '../components/leaveGuard.mjs';
 import { NOT_VERIFIED } from '../components/identification.mjs';
+import { MiddleText } from '../components/ResultColumns';
 
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
 const { confirm } = Modal;
@@ -181,9 +182,24 @@ const commaList = value => JSON.stringify(
   (value || '').split(',').map(item => item.trim()).filter(Boolean)
 );
 const uploadFile = value => value?.originFileObj || value;
+const withName = (list, name) => (list.includes(name) ? list : [...list, name]); // a recalibrated profile is listed once
+// "Fe2O3 contains Fe: ..." for the first formula with an element outside the entered ones (none entered: null).
+const formulaOutside = (elements, formulas) => {
+  const symbols = checkElements(elements).symbols;
+  if (!symbols.length) return null;
+  const found = (formulas || '').split(',').map(item => item.trim()).filter(Boolean)
+    .map(formula => [formula, (formula.match(/[A-Z][a-z]?/g) || []).filter(symbol => !symbols.includes(symbol))])
+    .find(([, extra]) => extra.length);
+  return found ? `${found[0]} contains ${found[1].join(', ')}: add it to the elements or remove the formula.` : null;
+};
 const splitList = value => (value || '').split(',').map(item => item.trim()).filter(Boolean);
 const elementList = value => JSON.stringify(checkElements(value).symbols);
 const fileKey = file => (file ? `${file.uid}:${file.name}` : null);
+// An excluded-interval row left empty is ignored (by the search-match and the Rietveld run alike).
+const completeRanges = ranges => (ranges || []).filter(item => item?.[0] != null && item?.[1] != null);
+// The same file (name, size, date) chosen twice is listed once.
+const sameFile = item => `${item.name}|${uploadFile(item)?.size}|${uploadFile(item)?.lastModified}`;
+const uniqueFiles = list => (list || []).filter((item, index, all) => all.findIndex(other => sameFile(other) === sameFile(item)) === index);
 
 // 'm min' below one hour, 'h:mm h' from one hour on.
 const formatDuration = seconds => {
@@ -285,14 +301,28 @@ function Submission() {
     setUsingRemembered(true);
     return true;
   };
-  const resetToDefaults = () => {
-    forgetRemembered(browserStorage());
-    form.resetFields();
-    setAnalysisMode(DEFAULT_MODE);
-    setSynchrotron(false);
-    setRefinementControls(DEFAULT_CONTROLS);
-    setUsingRemembered(false);
-  };
+  // The remembered settings go; the loaded pattern (or files) and the sample name stay, and the
+  // file's suggestions (instrument, radiation, elements) are applied again on the defaults.
+  const resetToDefaults = () => confirm({
+    title: 'Reset to defaults?',
+    content: 'The settings remembered from your last submission in this browser are forgotten. The loaded pattern stays.',
+    okText: 'Reset', cancelText: 'Cancel',
+    onOk() {
+      const kept = form.getFieldsValue(['pattern_file', 'series_files', 'series_name', 'sample']);
+      forgetRemembered(browserStorage());
+      form.resetFields();
+      form.setFieldsValue(kept);
+      setAnalysisMode(DEFAULT_MODE);
+      setSynchrotron(false);
+      setRefinementControls(DEFAULT_CONTROLS);
+      setUsingRemembered(false);
+      autoElements.current = null;
+      autoFormulas.current = null;
+      firstSeriesFile.current = null;
+      if (seriesMode) onSeriesFilesChange({ fileList: kept.series_files || [] });
+      else inspectFile(kept.pattern_file ? uploadFile(kept.pattern_file) : null);
+    },
+  });
   const [loadingClone, setLoadingClone] = useState(false);
   // A stored search-match to reopen once the clone's settings are in the form: /?clone_task=ID&search=1,
   // or any identification task ({selected, background, theoretical}).
@@ -301,9 +331,13 @@ function Submission() {
   const [seriesMode, setSeriesMode] = useState(false);
   // "Identify all": {seriesId, running, rows: {file key: {state, taskId, phases, error}}}
   const [batch, setBatch] = useState(null);
-  const [perFileChemistry, setPerFileChemistry] = useState(false); // each file's elements from its name
+  const [perFileSwitch, setPerFileChemistry] = useState(false); // each file's elements from its name
+  // Only the modes that search the element system take a file's own chemistry: entered phases stay.
+  const perFileChemistry = perFileSwitch && SEARCH_MODES.includes(analysisMode);
   const [verifyKeys, setVerifyKeys] = useState([]); // identified files ticked for "Verify selected with Rietveld"
   const [verifying, setVerifying] = useState(false);
+  const batchRun = useRef(0); // a new batch, a switch of the file mode or leaving the page stops the running one
+  useEffect(() => () => { batchRun.current += 1; }, []);
   const updateBatchRow = (key, entry) => setBatch(previous => (previous
     ? { ...previous, rows: { ...previous.rows, [key]: { ...previous.rows[key], ...entry } } } : previous));
   // "Submit a series" from the Series page opens the form in series mode.
@@ -345,12 +379,14 @@ function Submission() {
 
   // Advanced options are collapsed unless one of them differs from its default (remembered
   // settings, a cloned task, or a validation error there); the card never closes by itself.
+  // Options a search-match does not use (hidden in that mode) are not counted as changed there.
+  const rietveldOnly = value => (analysisMode === 'search_match' ? undefined : value);
   const changedAdvanced = advancedChanges({
     use_cod: watchedUseCod, use_mp: watchedUseMp, mp_e_hull_cutoff: watchedEHull, max_mp_structures: watchedMaxMp,
-    candidate_prefilter: watchedPrefilter, screening_timeout_s: watchedScreening,
-    max_analysis_minutes: watchedMaxMinutes, library_cif_ids: watchedLibraryCifs, additional_phases: watchedAdditional,
-    reuse_additional_cifs: watchedReuseCifs,
-  }, refinementControls, DEFAULT_CONTROLS);
+    candidate_prefilter: rietveldOnly(watchedPrefilter), screening_timeout_s: rietveldOnly(watchedScreening),
+    max_analysis_minutes: rietveldOnly(watchedMaxMinutes), library_cif_ids: watchedLibraryCifs, additional_phases: rietveldOnly(watchedAdditional),
+    reuse_additional_cifs: rietveldOnly(watchedReuseCifs),
+  }, rietveldOnly(refinementControls), DEFAULT_CONTROLS);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [standardOpen, setStandardOpen] = useState(false);
   const hasAdvancedChanges = changedAdvanced.length > 0;
@@ -383,8 +419,8 @@ function Submission() {
       return undefined;
     }
     const controller = new AbortController();
+    setEstimating(true); // the shown estimate is faded at once: it is for the previous inputs
     const timer = setTimeout(() => {
-      setEstimating(true);
       const thetaMax = Number.isFinite(watchedThetaMax) ? watchedThetaMax : inspectedThetaMax;
       fetch(`${URL}/submission/estimate`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
@@ -458,7 +494,8 @@ function Submission() {
         if (!active) return;
         const settings = data.settings;
         // A rerun of a task that reused a phase set refines the same stored structures, not the formulas.
-        if (data.phase_set?.length) setPhaseSet({ id: settings.phase_set_from ?? data.source_task_id, phases: data.phase_set, stored: true });
+        // (Not when it is opened for its search-match: that ranks the database again.)
+        if (data.phase_set?.length && new URLSearchParams(window.location.search).get('search') !== '1') setPhaseSet({ id: settings.phase_set_from ?? data.source_task_id, phases: data.phase_set, stored: true });
         const isSync = typeof settings.wavelength === 'number';
         form.setFieldsValue({
           ...settings,
@@ -476,12 +513,14 @@ function Submission() {
           standard_wt: settings.internal_standard?.wt_percent,
         });
         if (settings.internal_standard) setStandardOpen(true);
-        // An identification is a Search-match result: it reopens in the Search-match mode.
+        // An identification is a Search-match result: it reopens in the Search-match mode, as does any
+        // task opened for its search-match (search=1); a Saved identification then is remembered as one.
         const identification = settings.analysis_mode === 'identification';
-        const mode = identification ? 'search_match' : settings.analysis_mode;
-        if (identification) form.setFieldsValue({ analysis_mode: mode });
+        const searchAgain = identification || new URLSearchParams(window.location.search).get('search') === '1';
+        const mode = searchAgain ? 'search_match' : settings.analysis_mode;
+        if (searchAgain) form.setFieldsValue({ analysis_mode: mode });
         setAnalysisMode(mode);
-        if (identification || new URLSearchParams(window.location.search).get('search') === '1') {
+        if (searchAgain) {
           setReopenSearch({ selected: settings.reference_ids || [], background: settings.background || null, theoretical: settings.include_theoretical });
         }
         setSynchrotron(isSync);
@@ -523,6 +562,11 @@ function Submission() {
   };
   useEffect(() => { if (seriesMode) (seriesFiles || []).forEach(seriesInspection); }, [seriesMode, seriesFiles]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const removeSeriesFile = key => {
+    const list = (form.getFieldValue('series_files') || []).filter(item => fileKey(item) !== key);
+    form.setFieldsValue({ series_files: list });
+    onSeriesFilesChange({ fileList: list });
+  };
   const onSeriesFilesChange = info => {
     setBatch(previous => (previous?.running ? previous : null)); // results of other files go
     if (info?.fileList?.length && !(form.getFieldValue('series_name') || '').trim()) {
@@ -536,7 +580,8 @@ function Submission() {
     inspectFile(first ? uploadFile(first) : null, first ? seriesInspection(first) : null);
   };
 
-  const toggleSeriesMode = checked => {
+  const switchSeriesMode = checked => {
+    batchRun.current += 1; // a running "Identify all" stops sending
     setSeriesMode(checked);
     setBatch(null);
     firstSeriesFile.current = null;
@@ -544,8 +589,21 @@ function Submission() {
     setSeriesPreview(null);
     inspectFile(null);
   };
+  // The loaded pattern or files go with the switch: asked first.
+  const toggleSeriesMode = checked => {
+    const loaded = checked ? Boolean(form.getFieldValue('pattern_file')) : (form.getFieldValue('series_files') || []).length > 0;
+    if (!loaded) { switchSeriesMode(checked); return; }
+    confirm({
+      title: checked ? 'Switch to several files?' : 'Switch to one file?',
+      content: checked ? 'The loaded pattern is removed; add it again among the files.' : 'The selected files are removed.',
+      okText: 'Switch', cancelText: 'Cancel', onOk: () => switchSeriesMode(checked),
+    });
+  };
   // Several files dropped on (or selected in) the pattern field: they all go to the several-files view.
-  const takeSeveral = files => {
+  const takeSeveral = dropped => {
+    if (dropped.length > MAX_SERIES_FILES) message.warning(`At most ${MAX_SERIES_FILES} files: the first ${MAX_SERIES_FILES} were taken.`);
+    const files = dropped.slice(0, MAX_SERIES_FILES);
+    batchRun.current += 1;
     const list = files.map(file => ({ uid: file.uid, name: file.name, size: file.size, type: file.type, lastModified: file.lastModified, originFileObj: file }));
     setSeriesMode(true);
     setBatch(null);
@@ -634,9 +692,9 @@ function Submission() {
     }
   };
 
-  // Search-match request of `file` with the form's settings; `chemistry` ({elements, formulas}) replaces the form's.
-  const searchMatchBody = (file, chemistry = null) => {
-    const values = form.getFieldsValue(true);
+  // Search-match request of `file` with the form's settings (or the snapshot `values`); `chemistry`
+  // ({elements, formulas}) replaces the form's.
+  const searchMatchBody = (file, chemistry = null, values = form.getFieldsValue(true)) => {
     const body = new FormData();
     if (file) body.append('pattern_file', file);
     body.append('elements', chemistry ? JSON.stringify(chemistry.elements) : elementList(values.elements));
@@ -644,7 +702,7 @@ function Submission() {
     body.append('wavelength', synchrotron ? Number((Number(values.wavelength_sync_a) / 10).toPrecision(10)) : (values.wavelength_lab || 'Cu'));
     if (values.two_theta_min != null) body.append('two_theta_min', values.two_theta_min);
     if (values.two_theta_max != null) body.append('two_theta_max', values.two_theta_max);
-    body.append('excluded_ranges', JSON.stringify((values.excluded_ranges || []).filter(item => item?.[0] != null && item?.[1] != null)));
+    body.append('excluded_ranges', JSON.stringify(completeRanges(values.excluded_ranges)));
     body.append('use_cod', values.use_cod !== false);
     body.append('use_mp', values.use_mp !== false);
     body.append('mp_e_hull_cutoff', values.mp_e_hull_cutoff ?? 0.05);
@@ -715,6 +773,7 @@ function Submission() {
     return () => { active = false; };
   }, []);
   const openSearchMatch = () => {
+    setMsg(null); // an error of an earlier submission is not the search-match's
     setRecentElements(rememberElements(browserStorage(), checkElements(form.getFieldValue('elements')).symbols));
     quick.open();
   };
@@ -723,20 +782,24 @@ function Submission() {
   const seriesKept = batchKept(batch, (seriesFiles || []).map(fileKey));
   const unsaved = Boolean(watchedPattern || ((seriesFiles || []).length && !seriesKept) || batch?.running || verifying
     || quick.ranked || quick.state.status === 'pending');
+  const leaveText = batch?.running || verifying ? 'Files still being sent are not saved.'
+    : `The loaded ${seriesMode ? 'files' : 'pattern'}${quick.ranked || quick.state.status === 'pending'
+      ? ', the settings and the search-match ranking' : ' and the settings'} on this page are not kept.`;
   useEffect(() => {
     if (!unsaved) return undefined;
     const warn = event => { if (!leaving.current) { event.preventDefault(); event.returnValue = ''; } };
     window.addEventListener('beforeunload', warn);
-    // The header's links change the route without unloading: they ask through the leave guard.
-    const unguard = setLeaveGuard(() => (leaving.current ? null
-      : 'The loaded pattern, its settings and the search-match ranking on this page are not kept.'));
+    // The header's links and the browser's Back to another page of the app change the route
+    // without unloading: they ask through the leave guard (gatsby-browser.js guards Back).
+    const unguard = setLeaveGuard(() => (leaving.current ? null : leaveText));
     return () => { window.removeEventListener('beforeunload', warn); unguard(); };
-  }, [unsaved]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [unsaved, leaveText]);
 
   // "Save identification": the selected phases as the result, without refinement. Uses the ranking's
   // pattern and chemistry with the setup's user, sample and instrument; a field the setup has not
   // filled in yet takes the user back to it, like "Refine with Rietveld".
-  const saveIdentification = async ({ referenceIds: ids, background, alternatives = [] }) => {
+  const saveIdentification = async ({ referenceIds: ids, background, alternatives = [], theoretical = false }) => {
     let values;
     try {
       values = await form.validateFields(['user', 'instrument_profile', ...(synchrotron ? ['wavelength_sync_a'] : ['wavelength_lab'])]);
@@ -761,6 +824,8 @@ function Submission() {
     if (sample?.trim()) body.append('sample', sample.trim());
     body.append('instrument_profile', values.instrument_profile);
     body.append('reference_ids', JSON.stringify(ids));
+    // Stored with the search-match settings: a reopened identification ranks with theoretical structures again.
+    body.append('include_theoretical', String(Boolean(theoretical)));
     // Candidates peak matching cannot tell apart from an accepted phase: kept for "Tell apart with Rietveld".
     if (alternatives.length) body.append('alternatives', JSON.stringify(alternatives));
     // The background the ranking used (sliders or base points): stored and named in the report's methods.
@@ -809,30 +874,52 @@ function Submission() {
       values = await form.validateFields(['user', 'instrument_profile', 'series_name', 'series_files', 'elements', 'precursor_formulas',
         synchrotron ? 'wavelength_sync_a' : 'wavelength_lab']);
     } catch (error) {
-      const first = (error?.errorFields || [])[0];
-      if (first) form.scrollToField(first.name, { block: 'center' });
+      focusFirstError(error);
       return;
     }
+    const run = ++batchRun.current;
+    const stopped = () => run !== batchRun.current;
+    // The settings at the click hold for every file: later edits of the form do not reach the batch.
+    const snapshot = form.getFieldsValue(true);
+    const perFile = perFileChemistry;
     const rows = [...seriesRows];
     const preview = Object.fromEntries((seriesPreview?.items || []).map(item => [item.filename, item]));
     const files = Object.fromEntries((values.series_files || []).map(item => [fileKey(item), uploadFile(item)]));
     const series = { id: hexId(12), name: values.series_name.trim(), size: rows.length };
-    const update = updateBatchRow;
+    const update = (key, entry) => { if (!stopped()) updateBatchRow(key, entry); };
     setVerifyKeys([]);
     setMsg(null);
     setBatch({ seriesId: series.id, running: true, rows: Object.fromEntries(rows.map(row => [row.key, { state: 'queued' }])) });
     const started = [];
+    let wavelengthAsked = false;
+    let wavelengthConfirmed = false;
     for (const [index, row] of rows.entries()) {
+      if (stopped()) return;
       update(row.key, { state: 'sending' });
-      const chemistry = perFileChemistry && row.elements.length ? { elements: row.elements, formulas: row.formulas } : null;
-      const body = searchMatchBody(files[row.key], chemistry);
+      const chemistry = perFile && row.elements.length ? { elements: row.elements, formulas: row.formulas } : null;
+      const body = searchMatchBody(files[row.key], chemistry, snapshot);
       body.append('user', values.user);
       body.append('instrument_profile', values.instrument_profile);
       body.append('automatic', 'true');
       body.append('series', JSON.stringify({ ...series, order: preview[row.filename]?.order ?? index, variable: preview[row.filename]?.variable ?? null }));
       try {
-        const response = await fetch(`${URL}/identification`, { method: 'POST', body });
-        const data = await response.json().catch(() => ({}));
+        let response;
+        let data;
+        for (;;) {
+          if (wavelengthConfirmed) body.set('confirm_wavelength', 'true');
+          response = await fetch(`${URL}/identification`, { method: 'POST', body });
+          data = await response.json().catch(() => ({}));
+          const mismatch = !response.ok && !wavelengthAsked ? wavelengthMismatch(data.detail) : null;
+          if (!mismatch || stopped()) break;
+          // Asked once for the batch: the answer holds for every file.
+          wavelengthAsked = true;
+          wavelengthConfirmed = await new Promise(resolve => Modal.confirm({
+            title: 'The selected wavelength differs from the file',
+            content: `${mismatch.filename ? `${mismatch.filename}: ` : ''}${mismatch.message} Identify all files with the selected wavelength anyway?`,
+            okText: 'Identify anyway', cancelText: "Don't identify", onOk: () => resolve(true), onCancel: () => resolve(false),
+          }));
+          if (!wavelengthConfirmed) break;
+        }
         if (!response.ok || data.wf_id == null) throw new Error(detailMessage(data.detail, `Not saved (HTTP ${response.status}).`));
         update(row.key, { state: 'running', taskId: data.wf_id });
         started.push([row.key, data.wf_id]);
@@ -840,11 +927,12 @@ function Submission() {
         update(row.key, { state: 'failed', error: String(error.message || error) });
       }
     }
-    if (started.length) runAfterSuccess([() => writeRemembered(browserStorage(), form.getFieldsValue(true), refinementControls)]);
+    if (started.length) runAfterSuccess([() => writeRemembered(browserStorage(), snapshot, refinementControls)]);
     // Follow the tasks until each is done (the server works through them one search-match at a time).
     let open = started;
     while (open.length) {
       await new Promise(resolve => setTimeout(resolve, 1500));
+      if (stopped()) return;
       const next = [];
       for (const [key, taskId] of open) {
         try {
@@ -862,7 +950,16 @@ function Submission() {
       }
       open = next;
     }
-    setBatch(previous => (previous ? { ...previous, running: false } : previous));
+    if (!stopped()) setBatch(previous => (previous ? { ...previous, running: false } : previous));
+  };
+  // Back to the first field with an error: in view and focused (the Run card stays where it is).
+  const focusFirstError = error => {
+    const first = (error?.errorFields || [])[0];
+    if (!first) return;
+    setTimeout(() => {
+      form.scrollToField(first.name, { block: 'center' });
+      form.getFieldInstance(first.name)?.focus?.({ preventScroll: true });
+    }, 0);
   };
   // "Verify selected with Rietveld": each ticked identification goes to the existing refine hand-off
   // (a Known-phase refinement of its phases, queued as a new task).
@@ -905,8 +1002,7 @@ function Submission() {
       if ((error?.errorFields || []).some(item => advancedNames.includes(item.name?.[0]))) setAdvancedOpen(true);
       if ((error?.errorFields || []).some(item => String(item.name?.[0]).startsWith('standard_'))) setStandardOpen(true);
       // The Run card stays in view while the field with the error may be far above it.
-      const first = (error?.errorFields || [])[0];
-      if (first) setTimeout(() => form.scrollToField(first.name, { block: 'center' }), 0);
+      focusFirstError(error);
       return false;
     }
 
@@ -937,7 +1033,7 @@ function Submission() {
     if (values.max_analysis_minutes != null) formData.append('max_analysis_minutes', values.max_analysis_minutes);
     if (seriesMode) {
       formData.append('series_name', (values.series_name || '').trim());
-      if (perFileChemistry) formData.append('per_file_chemistry', 'true');
+      if (perFileSwitch && SEARCH_MODES.includes(values.analysis_mode)) formData.append('per_file_chemistry', 'true');
       (values.series_files || []).forEach(file => formData.append('pattern_files', uploadFile(file)));
     } else {
       if (values.pattern_file) formData.append('pattern_file', uploadFile(values.pattern_file));
@@ -946,7 +1042,7 @@ function Submission() {
     }
     if (values.two_theta_min != null) formData.append('two_theta_min', values.two_theta_min);
     if (values.two_theta_max != null) formData.append('two_theta_max', values.two_theta_max);
-    formData.append('excluded_ranges', JSON.stringify(values.excluded_ranges || []));
+    formData.append('excluded_ranges', JSON.stringify(completeRanges(values.excluded_ranges)));
     (values.additional_phases || []).forEach(file => formData.append('additional_phases', uploadFile(file)));
 
     const abortControl = new AbortController();
@@ -993,6 +1089,14 @@ function Submission() {
               () => form.resetFields(),
               () => { autoElements.current = null; autoFormulas.current = null; },
               () => setCloneSource(null),
+              () => {
+                // The copied task is submitted: a reload must not copy it again.
+                const params = new URLSearchParams(window.location.search);
+                if (!params.has('clone_task')) return;
+                params.delete('clone_task');
+                params.delete('search');
+                window.history.replaceState(window.history.state, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}${window.location.hash}`);
+              },
               () => setPatternInspection(null),
               () => setAnalysisMode(DEFAULT_MODE),
               () => setSynchrotron(false),
@@ -1092,6 +1196,11 @@ function Submission() {
     quick.start();
   };
   const fileChemistry = patternInspection?.filename_chemistry;
+  // What the file name filled in and is still in the field (a mode change or an edit takes it out).
+  const elementsFromName = autoElements.current !== null && (watchedElements || '') === autoElements.current;
+  const formulasFromName = autoFormulas.current !== null && (watchedPrecursors || '').trim() === autoFormulas.current;
+  // Without either database only library and uploaded CIFs are candidates.
+  const noDatabase = watchedUseCod === false && watchedUseMp === false;
   const unrecognised = fileChemistry ? unrecognisedTokens(patternInspection.filename, fileChemistry) : [];
   const offeredFormulas = analysisMode === 'known_mixture' && !phaseSet && fileChemistry?.formulas?.length
     && splitList(watchedPrecursors).join(', ') !== fileChemistry.formulas.join(', ') ? fileChemistry.formulas : null;
@@ -1128,14 +1237,18 @@ function Submission() {
   const selected = instrumentDetails[selectedInstrument];
   const hasChemistry = elementCheck.symbols.length > 0 || splitList(watchedPrecursors).length > 0;
   const unreadable = Boolean(!seriesMode && watchedPattern && patternInspection?.error);
-  const quickReady = Boolean(watchedPattern || cloneSource) && !unreadable && !elementCheck.error && hasChemistry;
+  const outsideNote = formulaOutside(watchedElements, watchedPrecursors);
+  const quickReady = Boolean(watchedPattern || cloneSource) && !unreadable && !elementCheck.error && hasChemistry && !outsideNote;
   const quickNote = !watchedPattern && !cloneSource ? 'Needs a pattern'
     : unreadable ? 'The pattern could not be read'
     : elementCheck.error ? `Fix the elements: ${elementCheck.error}`
+      : outsideNote ? outsideNote
       : !hasChemistry ? 'Needs the elements or expected formulas'
         : null;
   const runtimeText = estimate?.runtime_s?.expected ? `about ${formatDuration(estimate.runtime_s.expected)}${seriesMode ? ' per file' : ''}` : null;
-  const identifyReady = seriesCount >= 2 && !batch?.running && !elementCheck.error && (hasChemistry || perFileChemistry);
+  // Once a batch saved any file it is not sent again (a second series of the same files); change the files to start over.
+  const batchSaved = Object.values(batch?.rows || {}).some(entry => entry.taskId != null);
+  const identifyReady = seriesCount >= 2 && !batch?.running && !batchSaved && !elementCheck.error && (hasChemistry || perFileChemistry);
   const msgAlert = msg ? <Alert message={msg} type="error" showIcon closable onClose={() => setMsg(null)} /> : null;
 
   return (
@@ -1162,6 +1275,8 @@ function Submission() {
             if (Object.prototype.hasOwnProperty.call(changed, 'elements')) autoElements.current = null;
             if (Object.prototype.hasOwnProperty.call(changed, 'precursor_formulas')) autoFormulas.current = null;
             if (Object.prototype.hasOwnProperty.call(changed, 'analysis_mode')) {
+              // An error of the previous mode's rules (formulas required) does not stay on screen.
+              form.setFields([{ name: 'precursor_formulas', errors: [] }, { name: 'elements', errors: [] }]);
               // File-name formulas are filled in only as expected formulas or precursors; in
               // Known-phase refinement they are offered instead (often the precursors of a product).
               const named = (patternInspection?.filename_chemistry?.formulas || []).join(', ');
@@ -1192,7 +1307,7 @@ function Submission() {
                 </Form.Item>
                 {!cloneSource && !loadingClone ? (
                   <Form.Item label="Several files" tooltip="Analyse several patterns with identical settings, grouped as a series (for example a temperature or time series). Dropping several files on the pattern field turns this on.">
-                    <Switch checked={seriesMode} onChange={toggleSeriesMode} aria-label="Several files" />
+                    <Switch checked={seriesMode} onChange={toggleSeriesMode} aria-label="Several files" disabled={Boolean(batch?.running || verifying)} />
                   </Form.Item>
                 ) : null}
               </div>
@@ -1210,10 +1325,10 @@ function Submission() {
                     tooltip="The files appear together under this name in Series; filled in from the file names.">
                     <Input placeholder="e.g. ZnO anneal series" maxLength={120} />
                   </Form.Item>
-                  <Form.Item label="XRD patterns" name="series_files" valuePropName="fileList" getValueFromEvent={event => event?.fileList}
+                  <Form.Item label="XRD patterns" name="series_files" valuePropName="fileList" getValueFromEvent={event => uniqueFiles(event?.fileList)}
                     rules={[{ required: true, type: 'array', min: 2, message: 'Please add at least two XRD patterns.' }]}
                     tooltip="XRDML is recommended: its acquisition metadata can select the closest instrument profile and wavelength automatically.">
-                    <Dragger multiple maxCount={MAX_SERIES_FILES} beforeUpload={() => false} onChange={onSeriesFilesChange}
+                    <Dragger multiple maxCount={MAX_SERIES_FILES} beforeUpload={() => false} onChange={info => onSeriesFilesChange({ ...info, fileList: uniqueFiles(info?.fileList) })}
                       showUploadList={!seriesRows.length} accept={PATTERN_ACCEPT}>
                       <p className="ant-upload-drag-icon"><UploadOutlined /></p>
                       <p className="ant-upload-text">Select all measured XRD files of the series</p>
@@ -1227,7 +1342,7 @@ function Submission() {
                     description={<>
                       {perFileChemistry ? 'A file without chemistry in its name runs with the elements entered under Chemistry.'
                         : `${otherChemistry.map(row => `${row.filename} (${row.elements.filter(symbol => !usedElements.includes(symbol)).join(', ')})`).join('; ')}.`}
-                      {analysisMode === 'known_mixture' ? null : <div><Switch size="small" checked={perFileChemistry} onChange={setPerFileChemistry} aria-label="Use each file's own elements" />
+                      {!SEARCH_MODES.includes(analysisMode) ? null : <div><Switch size="small" checked={perFileSwitch} onChange={setPerFileChemistry} aria-label="Use each file's own elements" />
                         <span style={{ marginLeft: 8 }}>Use each file's own elements (from its name)</span></div>}
                     </>} /> : null}
                   {seriesRows.length ? (
@@ -1236,7 +1351,8 @@ function Submission() {
                       <Table size="small" pagination={false} rowKey="key" dataSource={seriesRows} scroll={{ x: 'max-content' }}
                         columns={[
                           ...(seriesPreview?.items?.length ? [{ title: 'Order', dataIndex: 'order', width: 64, className: 'dara-num' }] : []),
-                          { title: 'File', dataIndex: 'filename', render: (name, row) => <span style={{ whiteSpace: 'nowrap' }}>{name}{row.pending ? <span className="dara-dim"> · reading…</span> : null}</span> },
+                          // The end that tells files of a series apart ("…_60min.xrdml") stays when the name is shortened.
+                          { title: 'File', dataIndex: 'filename', render: (name, row) => <span title={name} style={{ display: 'block', width: 220 }}><MiddleText text={name} />{row.pending ? <span className="dara-dim"> · reading…</span> : null}</span> },
                           ...(seriesPreview?.items?.length ? [{ title: seriesPreview.unit ? `Variable (${seriesPreview.unit})` : 'Variable', dataIndex: 'variableText' }] : []),
                           { title: 'Elements in name', dataIndex: 'elements', render: list => (list.length ? list.join(', ') : '—') },
                           // Once identified, the result takes the place of the file inspection columns.
@@ -1255,6 +1371,9 @@ function Submission() {
                                 {entry.verifyError ? <span className="dara-batch-fail">{` (${entry.verifyError})`}</span> : null}</>;
                             return entry?.taskId != null ? <span><a href={`/task/?id=${entry.taskId}`}>{`Task ${entry.taskId}`}</a> · {text}{verify}</span> : text;
                           } }] : []),
+                          // Before a batch: a file can be taken out of the list one by one.
+                          ...(batch ? [] : [{ title: <span className="dara-sr-only">Remove</span>, key: 'remove', width: 40, render: (_, row) => (
+                            <Button type="text" size="small" icon={<CloseOutlined />} aria-label={`Remove ${row.filename}`} onClick={() => removeSeriesFile(row.key)} />) }]),
                         ]}
                         rowSelection={batch && !batch.running ? { selectedRowKeys: verifyKeys, onChange: setVerifyKeys, columnWidth: 36,
                           getCheckboxProps: row => ({ disabled: row.result?.state !== 'done' || row.result?.refinedTaskId != null,
@@ -1280,7 +1399,8 @@ function Submission() {
                     <div className="dara-file-row">
                       <FileOutlined aria-hidden="true" />
                       <span className="name" title={watchedPattern.name}>{watchedPattern.name}</span>
-                      {Number.isFinite(uploadFile(watchedPattern)?.size) ? <span className="meta">{`${Math.max(1, Math.round(uploadFile(watchedPattern).size / 1024)).toLocaleString()} KB`}</span> : null}
+                      {Number.isFinite(uploadFile(watchedPattern)?.size) ? <span className="meta">{uploadFile(watchedPattern).size < 1024
+                        ? `${uploadFile(watchedPattern).size} bytes` : `${Math.round(uploadFile(watchedPattern).size / 1024).toLocaleString()} KB`}</span> : null}
                       <Upload showUploadList={false} beforeUpload={() => false} onChange={inspectPattern} accept={PATTERN_ACCEPT}>
                         <Button size="small">Change…</Button>
                       </Upload>
@@ -1311,7 +1431,7 @@ function Submission() {
                 <Alert
                   type={patternInspection.profile_suggestion ? 'success' : 'warning'}
                   showIcon
-                  message={(seriesMode ? 'Inspection of the first file: ' : '') + (patternInspection.profile_suggestion
+                  message={(seriesMode ? `Inspection of ${patternInspection.filename || 'the first file'}: ` : '') + (patternInspection.profile_suggestion
                     ? `Instrument settings applied: ${patternInspection.profile_suggestion.profile}`
                     : 'Pattern loaded; select the instrument profile manually')}
                   description={[
@@ -1342,8 +1462,10 @@ function Submission() {
                     ? `Elements recognised from the file name: ${fileChemistry.elements.join(', ')}${unrecognised.length ? ` · not recognised: ${unrecognised.join(', ')}` : ''}`
                     : `No unambiguous chemical formula in the file name${unrecognised.length ? ` (not recognised: ${unrecognised.join(', ')})` : ''}. Enter the elements.`}
                   description={fileChemistry.elements.length
-                    ? `Formulas: ${fileChemistry.formulas.join(', ')}. ${patternInspection.elementsAutoApplied ? 'Added to Elements.' : 'Existing element entries were kept.'} ${
-                      patternInspection.formulasAutoApplied ? `Added to ${FORMULA_LABELS[analysisMode] || 'the formulas'}.` : 'The formula list was kept.'} ${
+                    ? `Formulas: ${fileChemistry.formulas.join(', ')}. ${elementsFromName ? 'Added to Elements.' : 'Existing element entries were kept.'} ${
+                      formulasFromName ? `Added to ${FORMULA_LABELS[analysisMode] || 'the formulas'}.`
+                        : analysisMode === 'known_mixture' ? 'Not added to Phases to refine: a file name often names the precursors, not the products.'
+                          : 'The formula list was kept.'} ${
                       unrecognised.length ? `${unrecognised.join(', ')} ${unrecognised.length === 1 ? 'was' : 'were'} not read as chemistry: add any element they stand for. ` : ''}A suggestion from the file name only; compare it with the actual sample. Temperatures, times and single-letter symbols are never filled in.`
                     : 'Example: BiFeO3_800C_60min.xrdml → Bi, Fe, O. Check single-letter symbols such as C or S and ambiguous names before entering them.'}
                 />
@@ -1352,7 +1474,7 @@ function Submission() {
 
             <Card name="chemistry" title="Chemistry">
               <Form.Item label="Analysis mode" name="analysis_mode">
-                <Radio.Group className="dara-mode-radio" optionType="button" buttonStyle="solid" disabled={Boolean(phaseSet)}
+                <Radio.Group className="dara-mode-radio" name="analysis_mode" optionType="button" buttonStyle="solid" disabled={Boolean(phaseSet) || Boolean(batch?.running)}
                   options={Object.entries(MODE_LABELS).map(([value, label]) => ({ value, label }))} />
               </Form.Item>
               <Alert type={analysisMode === 'known_mixture' ? 'warning' : 'info'} showIcon message={modeMessage} />
@@ -1363,6 +1485,11 @@ function Submission() {
                     // Search-match and Rietveld phase search take the same input: elements, or formulas to derive them from.
                     ({ getFieldValue }) => ({ validator: (_, value) => (SEARCH_MODES.includes(getFieldValue('analysis_mode')) && !perFileChemistry && !checkElements(value).symbols.length
                       && !splitList(getFieldValue('precursor_formulas')).length ? Promise.reject(new Error('Enter the elements, or the expected formulas.')) : Promise.resolve()) }),
+                    // A search-match ranks a listed formula whatever the elements: it must not name another element.
+                    ({ getFieldValue }) => ({ validator: (_, value) => {
+                      const outside = getFieldValue('analysis_mode') === 'search_match' ? formulaOutside(value, getFieldValue('precursor_formulas')) : null;
+                      return outside ? Promise.reject(new Error(outside)) : Promise.resolve();
+                    } }),
                   ]}
                   tooltip="Symbols separated by commas or spaces, e.g. In, La, Ti, O; case is corrected where the symbol is unambiguous. Left empty, they are derived from the formulas."
                   extra={recentElements.length ? <span className="dara-recent">Recent:{recentElements.slice(0, 5).map(set => (
@@ -1452,17 +1579,17 @@ function Submission() {
                     </Form.Item>
                   </div>
                   <InstrumentManager buttonLabel="Register profile…" buttonSize="middle" onRegistered={profile => {
-                    setInstrumentNames(previous => [...previous, profile.id]);
+                    setInstrumentNames(previous => withName(previous, profile.id));
                     setInstrumentDetails(previous => ({ ...previous, [profile.id]: profile }));
-                    if (profile.has_sav) setCalibratable(previous => [...previous, profile.id]);
+                    if (profile.has_sav) setCalibratable(previous => withName(previous, profile.id));
                     form.setFieldsValue({ instrument_profile: profile.id });
                   }} />
                   <CalibrateProfile profile={selectedInstrument} enabled={calibratable.includes(selectedInstrument)}
                     wavelength={watchedWavelengthLab || 'Cu'} onCalibrated={(profile, curve) => {
                       if (curve?.usable) setFwhmCurves(previous => ({ ...previous, [profile.id]: curve }));
-                      setInstrumentNames(previous => [...previous, profile.id]);
+                      setInstrumentNames(previous => withName(previous, profile.id));
                       setInstrumentDetails(previous => ({ ...previous, [profile.id]: profile }));
-                      setCalibratable(previous => [...previous, profile.id]);
+                      setCalibratable(previous => withName(previous, profile.id));
                       form.setFieldsValue({ instrument_profile: profile.id });
                     }} />
                   {advanced && selectedInstrument && selectedInstrument !== 'synchrotron'
@@ -1486,7 +1613,9 @@ function Submission() {
                     <Select options={WAVELENGTHS.map(item => ({ value: item[0], label: `${item[0]} Kα1 (${item[1].toFixed(4)} Å)` }))} />
                   </Form.Item>
                 ) : (
-                  <Form.Item label="Wavelength (Å)" name="wavelength_sync_a" rules={[{ required: true, pattern: /^\d+(\.\d+)?$/, message: 'Wavelength in Å, e.g. 0.7293' }]}>
+                  <Form.Item label="Wavelength (Å)" name="wavelength_sync_a" rules={[{ required: true, message: 'Wavelength in Å, e.g. 0.7293' },
+                    { validator: (_, value) => (value == null || value === '' || (/^(\d+\.?\d*|\.\d+)$/.test(String(value).trim()) && Number(value) > 0)
+                      ? Promise.resolve() : Promise.reject(new Error('Wavelength in Å above 0, e.g. 0.7293'))) }]}>
                     <Input />
                   </Form.Item>
                 )}
@@ -1507,7 +1636,9 @@ function Submission() {
                   <Space>
                     <Form.Item name="two_theta_min" noStyle><InputNumber min={0} max={180} placeholder="Start" aria-label="Analysis start angle" style={{ width: 96 }} /></Form.Item>
                     <span>to</span>
-                    <Form.Item name="two_theta_max" noStyle><InputNumber min={0} max={180} placeholder="End" aria-label="Analysis end angle" style={{ width: 96 }} /></Form.Item>
+                    <Form.Item name="two_theta_max" noStyle dependencies={['two_theta_min']}
+                      rules={[({ getFieldValue }) => ({ validator: (_, value) => (value != null && getFieldValue('two_theta_min') != null && value <= getFieldValue('two_theta_min')
+                        ? Promise.reject(new Error('The end angle must be above the start angle.')) : Promise.resolve()) })]}><InputNumber min={0} max={180} placeholder="End" aria-label="Analysis end angle" style={{ width: 96 }} /></Form.Item>
                   </Space>
                 </Form.Item>
                 <Form.Item label="Excluded intervals · 2θ (°)" tooltip="Exclude confirmed holder/artifact regions only. These intervals are omitted from fitting and peak diagnostics; measured intensities are preserved.">
@@ -1516,11 +1647,19 @@ function Submission() {
                       <Space direction="vertical" style={{ width: '100%' }}>
                         {fields.map(field => (
                           <Space key={field.key} align="start">
-                            <Form.Item name={[field.name, 0]} rules={[{ required: true, message: 'Start angle required' }]} style={{ marginBottom: 0 }}>
+                            <Form.Item name={[field.name, 0]} dependencies={[['excluded_ranges', field.name, 1]]} style={{ marginBottom: 0 }}
+                              rules={[({ getFieldValue }) => ({ validator: (_, value) => (value == null && getFieldValue(['excluded_ranges', field.name, 1]) != null
+                                ? Promise.reject(new Error('Start angle required')) : Promise.resolve()) })]}>
                               <InputNumber min={0} max={180} placeholder="Start" aria-label="Excluded interval start" style={{ width: 96 }} />
                             </Form.Item>
                             <span style={{ lineHeight: '32px' }}>to</span>
-                            <Form.Item name={[field.name, 1]} rules={[{ required: true, message: 'End angle required' }]} style={{ marginBottom: 0 }}>
+                            <Form.Item name={[field.name, 1]} dependencies={[['excluded_ranges', field.name, 0]]} style={{ marginBottom: 0 }}
+                              rules={[({ getFieldValue }) => ({ validator: (_, value) => {
+                                // An empty row is ignored; a half-filled or reversed one is an error.
+                                const start = getFieldValue(['excluded_ranges', field.name, 0]);
+                                if (value == null) return start != null ? Promise.reject(new Error('End angle required')) : Promise.resolve();
+                                return start != null && value <= start ? Promise.reject(new Error('End must be above start')) : Promise.resolve();
+                              } })]}>
                               <InputNumber min={0} max={180} placeholder="End" aria-label="Excluded interval end" style={{ width: 96 }} />
                             </Form.Item>
                             <Button type="text" icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} aria-label="Remove excluded interval" />
@@ -1548,9 +1687,11 @@ function Submission() {
               </dl>
               {searchOnly ? null : estimate || estimating
                 ? <EstimateAlert estimate={estimate} loading={estimating} prefilter={watchedPrefilter !== false} />
-                : <p className="dara-run-hint">{elementCheck.error ? `Fix the elements to see the estimate: ${elementCheck.error}.`
+                : <p className="dara-run-hint">{phaseSet ? 'Refines the listed structures: no database search.'
+                  : elementCheck.error ? `Fix the elements to see the estimate: ${elementCheck.error}.`
                   : estimateFailed ? 'The candidate and run-time estimate is unavailable.'
                     : `${analysisMode === 'elemental' ? 'Enter elements or formulas' : 'Enter formulas'} to see the candidate and run-time estimate.`}</p>}
+              {noDatabase ? <Alert type="warning" showIcon message="COD and MP are both off: only library and uploaded CIFs are candidates." /> : null}
               {seriesMode ? null : <QuickRankingSummary quick={quick} />}
               {quick.shown ? null : msgAlert}
               {/* One primary action per mode; each label carries its time cost. Search-match mode:
@@ -1563,7 +1704,7 @@ function Submission() {
                   </Button>
                   <p className="dara-run-action-note">{batch?.running ? 'Identifying: each file\'s result appears in its row'
                     : batchDone ? <>{`${batchDone.filter(entry => entry.state === 'done').length} of ${batchDone.length} identified · `}
-                      <a href={`/series/?id=${encodeURIComponent(batch.seriesId)}`}>Open in Series</a></>
+                      {batchSaved ? <a href={`/series/?id=${encodeURIComponent(batch.seriesId)}`}>Open in Series</a> : 'nothing saved'}</>
                       : seriesCount < 2 ? 'Needs at least two files' : 'One identification per file with the suggested phases, saved as a series'}</p>
                 </div> : <div>
                   <Button type="primary" size="large" block onClick={openSearchMatch} disabled={!quickReady}>
@@ -1581,7 +1722,7 @@ function Submission() {
                 <div>
                   <Button type="primary" size="large" block onClick={() => onSubmit()} loading={spinning}
                     // Nothing to analyse yet: no pattern (a rerun reuses the original one) and no series files.
-                    disabled={spinning || loadingClone || (phaseSet && !phaseSet.phases) || (seriesMode ? !seriesCount : !watchedPattern && !cloneSource)}>
+                    disabled={spinning || loadingClone || unreadable || (phaseSet && !phaseSet.phases) || (seriesMode ? !seriesCount : !watchedPattern && !cloneSource)}>
                     {seriesMode ? `Run series${seriesCount ? ` (${seriesCount} files)` : ''}` : 'Run analysis'}
                     {runtimeText ? <span className="cost">{`· ${runtimeText}`}</span> : null}
                   </Button>

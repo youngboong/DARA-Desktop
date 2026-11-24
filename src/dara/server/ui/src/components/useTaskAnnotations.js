@@ -20,13 +20,16 @@ export default function useTaskAnnotations(taskId) {
   React.useEffect(() => {
     if (taskId === undefined || taskId === null) return undefined;
     const own = listeners.get(taskId) || new Set();
+    const first = own.size === 0;
     listeners.set(taskId, own.add(setList));
-    if (lists.has(taskId)) setList(lists.get(taskId));
-    else {
-      lists.set(taskId, []);
+    // Another task's labels never stay on screen while this one's load.
+    setList(lists.get(taskId) || []);
+    // The first plot of the task on the page loads the list again: the cache only shares it between
+    // plots shown together (a colleague or another tab may have changed it since).
+    if (first) {
       fetch(`${API}/task/${taskId}/annotations`)
-        .then(response => (response.ok ? response.json() : { annotations: [] }))
-        .then(body => publish(taskId, Array.isArray(body.annotations) ? body.annotations : []))
+        .then(response => (response.ok ? response.json() : null))
+        .then(body => { if (body) publish(taskId, Array.isArray(body.annotations) ? body.annotations : []); })
         .catch(() => {});
     }
     return () => { own.delete(setList); };

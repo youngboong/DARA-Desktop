@@ -1,12 +1,12 @@
 import React from 'react';
 import styled from 'styled-components';
 import Layout from '../components/Layout';
-import { Alert, Badge, Button, Checkbox, Col, Descriptions, Divider, Dropdown, Grid, Input, List, message, Modal, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Badge, Button, Checkbox, Col, Descriptions, Divider, Dropdown, Grid, Input, List, message, Modal, Popover, Row, Select, Space, Spin, Switch, Table, Tabs, Tag, Tooltip, Typography } from 'antd';
 import { ArrowDownOutlined, ArrowUpOutlined, CopyOutlined, DeleteOutlined, DownOutlined, DownloadOutlined, EditOutlined, EllipsisOutlined, InfoCircleOutlined, LeftOutlined, LineChartOutlined, RightOutlined, SearchOutlined } from '@ant-design/icons';
 import Loadable from 'react-loadable'
 import parse from 'html-react-parser';
 import { gofTone, peakCountTone, toneColor } from '../components/statusTone.mjs';
-import { buildRefinementView, exclusionViewRange, isTraceSelected, legendKey, withTreatedObserved } from '../components/refinementPlotState.mjs';
+import { buildRefinementView, countedUnexplained, exclusionViewRange, isTraceSelected, keepUnexplained, legendKey, withTreatedObserved } from '../components/refinementPlotState.mjs';
 import { viewChangeFromRelayout } from '../components/plotNavigation.mjs';
 import { NAVIGATION_CONFIG, NAVIGATION_DRAGMODE } from '../components/usePlotView';
 import { formatParameterWithEsd, latticeParameterRows, latticeStateNote } from '../components/latticeParameters.mjs';
@@ -50,10 +50,10 @@ import { colorPhaseTraces, compositionSegments, fillIndex, fillKeys, tidyFormula
 import {
   BASELINE_LABEL, QUICK_CHECK_HINT, REFINE_ALL_FIRST, addedLabel, alternativeLink, alternativeOfVerdict, availableComparisonBase, baselineRequest, comparisonBase,
   deltaBaseText, deltaStrip, deltaText, leBailPhases, displayedCandidateOf, fitFromSearch, phaseSymbolLookup, searchWithFit,
-  formulaOfPhase, isQuickCheck, knownDisplayFormula, needsBaseline, parseSelection, plotQuery, refineAllRequest, relabelPhaseTraces,
+  formulaOfPhase, isQuickCheck, canonicalSelection, knownDisplayFormula, needsBaseline, parseSelection, plotQuery, refineAllRequest, relabelPhaseTraces,
   rememberDisplayFormulas, removeManyRequest,
   referenceVariants, replacementOf, runText, selectOptionGroups, selectionLabel, spacegroupOfPhase, versionGone, versionPhaseOptions, versionReadyText,
-  weightSpread, NEAR_RWP_RATIO, phaseRecordLine, displayFormula, distinctPhaseLabel, formatSelection, formatSpaceGroup, phaseTableTsv } from '../components/versions.mjs';
+  weightSpread, weightText, NEAR_RWP_RATIO, phaseRecordLine, displayFormula, distinctPhaseLabel, formatSelection, formatSpaceGroup, phaseTableTsv } from '../components/versions.mjs';
 
 const { Text } = Typography;
 const HINT_POLL_MS = 3000;
@@ -260,6 +260,8 @@ function AnnotationEditor({ editor, onCommit, onCancel, onDelete }) {
 
 const RefinementPlot = React.forwardRef(function RefinementPlot({
   task_id, plot_id, excludedRanges = [], peaks = [], onPeakClick, previewSticks = null, onGroups, title = null, phaseColor = null, phaseLegend = null,
+  // 2θ of the unexplained peaks the page counts (countedUnexplained); null draws the server's markers as they are.
+  unexplained = null,
   // Background curve editing: {anchors, selected, onChange, onAdd, onRemove, onSelect, blocked(x)} or null.
   anchorEdit = null,
   // Leaves the Phases / Peaks / Structure tab bar in view under the workspace plot, down to a 768 px screen.
@@ -375,12 +377,12 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
   // react-plotly redraws (a full Plotly.react, 100-500 ms) whenever data, layout or config is a
   // new object, so they are rebuilt only when what they show changes, not on every page render.
   // Legend formulas from the CIFs (NH4H2PO4, not the file stem's PH6NO4); trace order is unchanged.
-  const legendLabeled = plot ? (phaseLegend || (d => d))(colorPhaseTraces(relabelPhaseTraces(plot.data), phaseColor)) : null;
+  const legendLabeled = plot ? keepUnexplained((phaseLegend || (d => d))(colorPhaseTraces(relabelPhaseTraces(plot.data), phaseColor)), unexplained) : null;
   const labeled = legendLabeled && shownTreated ? withTreatedObserved(legendLabeled, shownTreated, treatedObservedName(shownDisplay)) : legendLabeled;
   // The label and colour functions only rename and recolour phase traces: this key describes their
   // output. It reads the colours from phaseColor, because Plotly normalizes the colours of drawn traces in place.
   const labelKey = (labeled || []).map((trace, index) => [trace?.name, phaseColor && ['phase-profile', 'reflection'].includes(plot.data[index]?.meta)
-    ? phaseColor(plot.data[index].legendgroup) : ''].join('\u0000')).join('\u0001');
+    ? phaseColor(plot.data[index].legendgroup) : ''].join('\u0000')).join('\u0001') + (unexplained ? `\u0002${unexplained.join(',')}` : '');
   const view = React.useMemo(() => (plot ? buildRefinementView({ ...plot, data: labeled }, {
     selection, showDiagnostics, showPhaseProfiles, showReflections, scale, yRange, xRange, fitY, plotWidth, title, hklLabels, dAxis, plotHeight: hklLabels ? plotHeight : null,
   }) : null),
@@ -546,9 +548,10 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
             onClick={() => { setAnnotating(value => !value); setLabelEditor(null); setShowAnnotations(true); }} /></Tooltip>}
       </div>
       {onDisplayChange ? <div className="dara-toolbar-group" aria-label="Display treatment of the observed pattern">
-        <Tooltip title="Applied to the observed trace on screen only: the fit, the residual and the tables use the measured data">
+        {/* An identification has no fit or residual for the caption to set apart. */}
+        {identification ? null : <Tooltip title="Applied to the observed trace on screen only: the fit, the residual and the tables use the measured data">
           <span className="dara-toolbar-caption">Display only</span>
-        </Tooltip>
+        </Tooltip>}
         {kalpha2Offered ? <Tooltip title="Rachinger correction: removes the Kα2 component, I(Kα2)/I(Kα1) = 0.5">
           <Checkbox checked={display.kalpha2} onChange={event => onDisplayChange({ ...display, kalpha2: event.target.checked })}>Strip Kα2</Checkbox></Tooltip> : null}
         <label className="dara-toolbar-item">
@@ -566,7 +569,7 @@ const RefinementPlot = React.forwardRef(function RefinementPlot({
     </div>}
     {treatment ? <div style={{ marginBottom: 4 }}><Text type="secondary" style={{ fontSize: 12 }}>
       {treated?.query === treatment && treated.error ? `The treated pattern could not be loaded (${treated.error}); the measured pattern is shown. ` : ''}
-      Display only: the fit, the residual and the tables use the measured data.</Text></div> : null}
+      {identification ? 'Display only: the peak tables use the measured data.' : 'Display only: the fit, the residual and the tables use the measured data.'}</Text></div> : null}
     <div ref={readoutRef} className="dara-readout" aria-label="Cursor position">
       <span className="dara-readout-hint" />
       <span className="dara-readout-value">2θ <b data-k="x">–</b>°</span>
@@ -803,7 +806,7 @@ function PhaseRefinementTable({ phases = [], metadata = {}, details = {}, confid
           if (row.weight_percent == null) return '—';
           const tag = amountTag(row, confidence?.phases?.[row.phase]?.weight_flag);
           const range = spread?.[formulaOfPhase(row.phase)];
-          return <span>{Number(row.weight_percent).toFixed(2)}{row.weight_esd_percent == null ? '' : ` ± ${Number(row.weight_esd_percent).toFixed(2)}`}
+          return <span>{weightText(row.weight_percent, row.weight_esd_percent)}
             {/* On its own line, so the right-aligned amounts keep one decimal column. */}
             {tag ? <div><StatusTag text={tag.text} tone={tag.tone} tooltip={tag.tooltip} /></div> : null}
             {/* Model dependence of the amount: the ± above is for this one fit only. */}
@@ -1041,15 +1044,23 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
   // compare window) goes through this one guard.
   const review = {
     ...savedReview,
-    save: async (choice = savedReview.selection) => {
+    save: async (picked = savedReview.selection) => {
+      // C1 is the automatic fit v1: one fit, one saved selection ('best').
+      const choice = picked === null ? null : canonicalSelection(picked, data.all_results, data.final_result);
       if (isQuickCheck(store.versions, choice)) {
         message.warning(`${QUICK_CHECK_HINT} ${REFINE_ALL_FIRST}.`);
+        return false;
+      }
+      const parsedChoice = parseSelection(choice);
+      if (parsedChoice && typeof parsedChoice === 'object' && store.versions.find(item => item.version === parsedChoice.version)?.adoptable === false
+        && formatSelection(choice) !== formatSelection(savedReview.saved?.selection)) {
+        message.warning(`v${parsedChoice.version}: a lattice parameter is not determined by the data, so this fit cannot be adopted.`);
         return false;
       }
       // Replacing an adoption (possibly a colleague's) is said in words, naming both fits.
       const saved = savedReview.saved || {};
       const old = saved.selection ?? null;
-      if (old !== null && formatSelection(choice) !== formatSelection(old)) {
+      if (old !== null && formatSelection(choice) !== formatSelection(canonicalSelection(old, data.all_results, data.final_result))) {
         const code = sel => selectionCode(sel, store.versions, data.all_results);
         // Older reviews have no adoption time: the last save stands in for it, said as such.
         const when = [dayOf(saved.adopted_at) ? `adopted ${dayOf(saved.adopted_at)}` : dayOf(saved.updated_at) && `saved ${dayOf(saved.updated_at)}`,
@@ -1166,7 +1177,8 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
   const baseParsed = effectiveBase !== null ? parseSelection(effectiveBase) : null;
   const baseVersionNumber = baseParsed && typeof baseParsed === 'object' ? baseParsed.version : null;
   // The task summary shows the adopted fit once one is saved (a version or a candidate).
-  const adoptedSel = savedReview.saved?.selection ?? null;
+  const adoptedSel = savedReview.saved?.selection == null ? null
+    : canonicalSelection(savedReview.saved.selection, data.all_results, data.final_result);
   const adoptedParsed = adoptedSel === null ? null : parseSelection(adoptedSel);
   const adoptedVersionNumber = adoptedParsed && typeof adoptedParsed === 'object' && !versionGone(store.versions, adoptedSel)
     ? adoptedParsed.version : null;
@@ -1174,6 +1186,9 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
   const previewParsed = typeof previewSel === 'string' ? parseSelection(previewSel) : null;
   const previewVersionNumber = previewParsed && typeof previewParsed === 'object' && !versionGone(store.versions, previewSel)
     ? previewParsed.version : null;
+  // A previewed version that was deleted is no longer described: the page returns to the adopted fit.
+  const previewGone = Boolean(previewParsed && typeof previewParsed === 'object' && versionGone(store.versions, previewSel));
+  React.useEffect(() => { if (previewGone) setPreviewSel(undefined); }, [previewGone]);
   // Until the adopted fit is known and loaded, the summary would show the best fit and then jump.
   const summaryPending = !summaryShown.current
     && (savedReview.loading || (adoptedVersionNumber && !(adoptedVersionNumber in versionDetails)));
@@ -1285,6 +1300,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
   // quick check) and compares it with the quick check's own base.
   const refineAll = n => runQuick(refineAllRequest(n, store.versions));
   const quickCheck = versionData?.refine_mode === 'fast';
+  const notAdoptable = Boolean(versionNumber) && store.versions.find(item => item.version === versionNumber)?.adoptable === false;
   const addHint = (hint, target) => runQuick({
     phases: [target], origin: 'add_hint',
     label: addedLabel(hint.formula || formulaOfPhase(hint.phase), { symbol: hint.spacegroup_symbol ?? symbolOf(hint.phase), number: hint.spacegroup_number, ref: hint.phase },
@@ -1509,8 +1525,9 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
     if (done) message.success('Phase table copied (tab-separated: phase, space group, wt%, ± e.s.d.).');
     else message.error('The phase table could not be copied.');
   };
+  // Beside a Le Bail phase the fractions are normalised over the Rietveld phases only: said so.
   const amountText = row => (row?.le_bail ? 'Le Bail' : row?.weight_percent == null ? '—'
-    : `${Number(row.weight_percent).toFixed(2)}${row.weight_esd_percent == null ? '' : ` ± ${Number(row.weight_esd_percent).toFixed(2)}`} wt%`);
+    : `${weightText(row.weight_percent, row.weight_esd_percent)} wt%${summary.weights_relative ? ' (relative)' : ''}`);
 
   if (!summaryPending) summaryShown.current = true;
   else return <SpinContainer><Spin size='large' tip='Loading results…' /></SpinContainer>;
@@ -1660,11 +1677,12 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
           </Text> : null}
           <Button type="primary" icon={<LineChartOutlined />} onClick={() => setPlotId(shownSel)}>Open fit workspace</Button>
         </div>
-        <RefinementPlot task_id={task_id} plot_id={shownSel} excludedRanges={excludedRanges} height={420} compact phaseColor={phaseColor} phaseLegend={phaseLegend} />
+        <RefinementPlot task_id={task_id} plot_id={shownSel} excludedRanges={excludedRanges} height={420} compact phaseColor={phaseColor} phaseLegend={phaseLegend}
+          unexplained={countedUnexplained(summary?.peak_diagnostics)} />
       </section> : null}
       {/* Choosing and annotating the fit sits with the versions it chooses from. */}
       <ReviewPanel data={data} review={review} versions={store.versions} style={{ marginTop: 16, marginBottom: 0 }} />
-      <VersionsPanel taskId={task_id} store={store} review={review}
+      <VersionsPanel taskId={task_id} store={store} review={review} adoptedSel={adoptedSel}
         onView={setPlotId} onPreview={setPreviewSel} shownSel={shownSel} onCompare={(a, b) => setCompare({ a, b })} symbolOf={symbolOf} onRefineAll={quickShown ? refineAll : null} refineBusy={quick.busy}
         extra={quickShown ? <QuickRefineProgress job={quick.job} onCancel={quick.cancel} onDismiss={quick.dismiss} /> : null} />
       <div className="dara-section-head" id="phase-table">
@@ -1747,8 +1765,8 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
           {/* Adopting is decided here, with the fit in view (HighScore: accept the refined model). */}
           {displayedResult ? (workspaceAdopted
             ? <Tooltip title={adoptedText ? `Adopted: ${adoptedText}` : null}><span className="dara-adopted-mark">Adopted</span></Tooltip>
-            : <Tooltip title={quickCheck ? `${REFINE_ALL_FIRST}: a quick check cannot be adopted` : review.error ? 'The review could not be loaded' : 'The report and downloads use the adopted fit (saves the notes too)'}>
-              <span><Button disabled={quickCheck || review.loading || !!review.error || review.saving} loading={review.saving}
+            : <Tooltip title={quickCheck ? `${REFINE_ALL_FIRST}: a quick check cannot be adopted` : notAdoptable ? 'A lattice parameter is not determined by the data: this fit cannot be adopted' : review.error ? 'The review could not be loaded' : 'The report and downloads use the adopted fit (saves the notes too)'}>
+              <span><Button disabled={quickCheck || notAdoptable || review.loading || !!review.error || review.saving} loading={review.saving}
                 onClick={() => review.save(currentSel)}>Adopt this fit</Button></span>
             </Tooltip>) : null}
           {quickShown && displayedResult ? <>
@@ -1784,6 +1802,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
               onSubmit={request => runQuick(request)} />
             <BackgroundEditor open={backgroundOpen} onOpenChange={setBackgroundOpen} busy={quick.busy} disabled={quick.busy} baseDegree={baseDegree}
               manual={Boolean(manualBackground)} onEditCurve={startCurveEdit}
+              twoThetaRange={[displayedResult?.fit_quality?.two_theta_min, displayedResult?.fit_quality?.two_theta_max]}
               getView={() => plotRef.current?.getViewRange?.() || null}
               onSubmit={(background, label) => runQuick({ phases: [], background, origin: 'background', label })} />
             <RefinementControlsDialog open={controlsOpen} busy={quick.busy} onCancel={() => setControlsOpen(false)}
@@ -1826,6 +1845,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
         <div className={curveEdit ? 'dara-plot-with-side' : undefined}>
           <div className="dara-plot-main">
             <RefinementPlot ref={plotRef} task_id={task_id} plot_id={versionPending ? undefined : plot_id} title={data.task_label}
+              unexplained={countedUnexplained(displayedResult?.peak_diagnostics)}
               excludedRanges={[...excludedRanges, ...(versionData?.background?.excluded_ranges || [])]}
               peaks={peaks} previewSticks={preview?.sticks || null} onGroups={setPhaseGroups} phaseColor={phaseColor} phaseLegend={phaseLegend}
               onPeakClick={peakClicksOn && !curveEdit ? onPeakClick : undefined} anchorEdit={editAnchors} display={display} onDisplayChange={setDisplay}
@@ -1854,7 +1874,7 @@ function TaskDetail({ data, task_id, onDelete, sampleList }) {
                 <FitCautions cautions={displayedResult.cautions} style={{ margin: '12px 0' }}
                   fit={fitContext(displayedResult)} remedies={remediesOf(displayedResult)} onRemove={removeFrom(currentSel, displayedPhases)}
                   removeBlocked={removeBlocked} labelOf={labelIn(displayedPhases)} />
-                {advanced ? <RirSemiQuant taskId={task_id} sel={currentSel} /> : null}
+                {advanced ? <RirSemiQuant taskId={task_id} sel={currentSel} phaseLabel={name => (displayedPhases.includes(name) ? labelIn(displayedPhases)(name) : null)} /> : null}
               </> },
               { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel={currentSel} active={fitTab === 'peaks' && !versionPending}
                 phaseLabel={name => (displayedPhases.includes(name) ? labelIn(displayedPhases)(name) : null)} /> },
@@ -1977,6 +1997,11 @@ function SearchSettingsSummary({ data, taskId }) {
 
 function TaskUnavailable({ taskId, reason, data = null, context = null }) {
   const missing = /not found/i.test(reason || '');
+  if (!taskId) return <div className="dara-empty">
+    <h3>No task selected</h3>
+    <p>Open Results and pick a task to see its result.</p>
+    <Button type="primary" href={resultsHref(context)}>Back to Results</Button>
+  </div>;
   if (data?.no_result) return <>
     <div className="dara-empty">
       <h3>No phase combination fits this pattern</h3>
@@ -2074,7 +2099,6 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
   const [display, setDisplay] = React.useState({ kalpha2: false, smooth: 0 });
   const [tab, setTab] = React.useState('phases');
   const [sizes, setSizes] = React.useState(null); // {byPhase, corrected}
-  const [reportReady, setReportReady] = React.useState(false);
   const [refining, setRefining] = React.useState(false);
   const [figureOpen, setFigureOpen] = React.useState(false);
   const [figureStyle, setFigureStyle] = useFigureStyle();
@@ -2083,8 +2107,6 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
     requestJson(`/task/${task_id}/observed-peaks?sel=best`)
       .then(body => { if (current) setSizes({ byPhase: scherrerByPhase(body.rows), corrected: (body.instrument?.mode ?? 'none') !== 'none' }); })
       .catch(() => { if (current) setSizes({ byPhase: {}, corrected: false }); });
-    // The report of an identification is added on the server separately: offer it once it answers.
-    fetch(`${URL}/task/${task_id}/figure.svg`).then(response => { if (current) setReportReady(response.ok); }).catch(() => {});
     return () => { current = false; };
   }, [task_id]);
   const refine = async (extra = []) => {
@@ -2098,13 +2120,15 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
     }
   };
   const phases = data.phases || [];
+  // One label per phase in every table of the page: formula · space group.
+  const identLabel = name => { const row = phases.find(item => item.name === name); return row ? `${row.formula} · ${formatSpaceGroup(row.spacegroup_symbol, row.spacegroup)}` : null; };
   const status = peakStatusText(data.peak_counts);
   const open = data.unexplained_peaks || [];
   const refined = refinedTasks(data);
   const downloads = [
-    ...(reportReady ? [
-      { key: 'report-formats', label: 'Report', children: [{ key: 'report', label: 'PDF + Word' }, { key: 'report-html', label: 'HTML' }] },
-      { key: 'figure', label: 'Figure…' }] : []),
+    // Always offered: rendering a whole figure only to decide whether to show the item cost a render per visit.
+    { key: 'report-formats', label: 'Report', children: [{ key: 'report', label: 'PDF + Word' }, { key: 'report-html', label: 'HTML' }] },
+    { key: 'figure', label: 'Figure…' },
     { key: 'pattern', label: 'Pattern data', children: patternFiles(display).map(file => ({
       key: `pattern:${file.key}`, label: <a href={patternHref(URL, task_id, file.path, 'best')}>{file.label}</a> })) },
     { key: 'peaks', label: <a href={`${URL}/task/${task_id}/peaks.csv?sel=best`}>Reference reflections (CSV)</a> },
@@ -2127,8 +2151,10 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
       <Tooltip title="Open this pattern on the Submit page to change the accepted phases with Search-match; saving makes a new task">
         <Button href={`/?clone_task=${task_id}&search=1`}>Edit phases (Search-match)</Button>
       </Tooltip>
-      <Tooltip title="Refine these phases with Rietveld as a new task: refined amounts, lattice parameters and fit quality (about a minute)">
-        <Button type="primary" loading={refining} onClick={() => refine()}>Refine with Rietveld</Button>
+      {/* Once refined, the refinement is the next step; refining again stays possible but secondary. */}
+      {refined.length ? <Button type="primary" href={`/task/?id=${refined[refined.length - 1]}`}>{`Open refinement (Task ${refined[refined.length - 1]})`}</Button> : null}
+      <Tooltip title={refined.length ? 'Refine these phases again as another new task' : 'Refine these phases with Rietveld as a new task: refined amounts, lattice parameters and fit quality (about a minute)'}>
+        <Button type={refined.length ? 'default' : 'primary'} loading={refining} onClick={() => refine()}>{refined.length ? 'Refine again' : 'Refine with Rietveld'}</Button>
       </Tooltip>
       <TaskMoreMenu onDelete={onDelete} taskId={task_id} />
     </TaskTitle>
@@ -2139,8 +2165,8 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
       </Tooltip>
       <span>{phasesFoundText(phases)}</span>
       {status ? <span className={open.length ? 'dara-ident-open' : undefined}>{status}</span> : null}
-      {open.length ? <Tooltip title={open.map(peak => `${Number(peak[0]).toFixed(2)}°`).join(', ')}>
-        <Button type="link" size="small" style={{ padding: 0 }}>Show 2θ</Button></Tooltip> : null}
+      {open.length ? <Popover trigger={['click', 'hover']} content={open.map(peak => `${Number(peak[0]).toFixed(2)}°`).join(', ')}>
+        <Button type="link" size="small" style={{ padding: 0 }} aria-label="2θ of the unexplained peaks">Show 2θ</Button></Popover> : null}
       {refined.length ? <span>{'Refined with Rietveld: '}{refined.map((id, index) => <React.Fragment key={id}>{index ? ', ' : ''}<a href={`/task/?id=${id}`}>{`Task ${id}`}</a></React.Fragment>)}</span> : null}
     </div>
     <section aria-label="Pattern and reference sticks" style={{ marginTop: 12 }}>
@@ -2155,17 +2181,21 @@ function IdentificationDetail({ data, task_id, onDelete, sampleList }) {
         </p>
         <div className="dara-fit-table"><IdentificationPhaseTable phases={phases} sizes={sizes} rirComplete={data.rir_complete} onTellApart={refine} busy={refining} /></div>
         <Text className="dara-footnote" style={{ marginTop: 8 }}>RIR amounts and Scherrer sizes are estimates without refinement.</Text>
-        {advanced ? <RirSemiQuant taskId={task_id} sel="best" identification /> : null}
+        {advanced ? <RirSemiQuant taskId={task_id} sel="best" identification phaseLabel={identLabel} /> : null}
       </> },
       { key: 'peaks', label: 'Peaks', children: <PeakListTab taskId={task_id} sel="best" active={tab === 'peaks'} identification
-        phaseLabel={name => { const row = phases.find(item => item.name === name); return row ? `${row.formula} · ${formatSpaceGroup(row.spacegroup_symbol, row.spacegroup)}` : null; }} /> },
+        phaseLabel={identLabel} /> },
     ]} />
   </>;
 }
 
 function TaskPage({ location }) {
-  const queryParameters = new URLSearchParams(location.search)  
-  const task_id = queryParameters.get('id')
+  // The static build renders this page without a query string; reading the id only after
+  // mounting keeps the first client render equal to that HTML (a hydration mismatch kept the
+  // spinner's centring class on the title row of unfinished tasks).
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => setMounted(true), []);
+  const task_id = mounted ? new URLSearchParams(location.search).get('id') : null;
   const sampleList = useSampleList(task_id);
   const [error, setError] = React.useState("");
 
@@ -2189,17 +2219,24 @@ function TaskPage({ location }) {
       },
     });
   };
+  const loadedId = React.useRef(null);
   React.useEffect(() => {
-    // handle 404 error
+    if (!mounted) return undefined;
+    // Another task (sample navigation): the previous one's result must not stay on screen.
+    if (loadedId.current !== task_id) { loadedId.current = task_id; setData(undefined); setError(''); }
+    if (!/^\d+$/.test(task_id || '')) { setError(task_id ? `Task ${task_id} not found` : ''); setData(null); return undefined; }
+    let cancelled = false;
     fetch(`${URL}/task/${task_id}`)
-      .then(response => {
-        if (response.status === 404 || response.status === 400) {
-          return response.json().then(data => setError(data.detail)).then(() => null);
-        }
-        return response.json();
+      .then(async response => {
+        if (response.ok) return response.json();
+        const body = await response.json().catch(() => ({}));
+        // FastAPI validation errors carry a list; only a string detail is shown.
+        throw new Error(typeof body.detail === 'string' ? body.detail : `Request failed (HTTP ${response.status})`);
       })
-      .then(data => { rememberDisplayFormulas(data?.display_formulas); setData(data); });
-  }, [task_id, statusRevision]);
+      .then(body => { if (!cancelled) { rememberDisplayFormulas(body?.display_formulas); setData(body); } })
+      .catch(e => { if (!cancelled) { setError(e.message || 'The task could not be loaded.'); setData(null); } });
+    return () => { cancelled = true; };
+  }, [mounted, task_id, statusRevision]);
 
   // Trace hints are simulated in the background after the first load; poll the task summary
   // (every 3 s, for at most 60 s) until the server reports no pending hints.

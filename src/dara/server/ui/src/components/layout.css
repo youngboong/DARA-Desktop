@@ -546,7 +546,8 @@ code {
   white-space: nowrap;
 }
 
-.dara-result-phase i {
+/* only the tray swatch: an italic space-group letter inside the label is an <i> too */
+.dara-result-phase > i {
   display: inline-block;
   align-self: center;
   width: 10px;

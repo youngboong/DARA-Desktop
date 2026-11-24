@@ -741,3 +741,14 @@ def test_doped_entry_gives_way_to_the_entered_formula_of_the_same_structure():
     assert [c["formula"] for c in named["combination"]] == ["ZnO", "Bb"]  # the doped entry is not picked later
     row = next(r for r in named["ranking"] if r["formula"] == "ZnO")
     assert row["alternatives"] == ["cod:5"]
+
+
+def test_formula_outside_the_entered_elements_is_refused():
+    from fastapi import HTTPException
+
+    from dara.server.quick_rank_router import _elements_and_precursors
+
+    assert _elements_and_precursors('["Zn", "O"]', '["ZnO"]')[1] == ["ZnO"]
+    with pytest.raises(HTTPException) as info:
+        _elements_and_precursors('["Zn", "O"]', '["ZnO", "Fe2O3"]')
+    assert info.value.status_code == 400 and info.value.detail.startswith("Fe2O3 contains Fe, which is not")

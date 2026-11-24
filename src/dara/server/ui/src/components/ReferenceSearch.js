@@ -71,7 +71,7 @@ export default function ReferenceSearch({ onAdd, busy = false }) {
       <Button size="small" icon={<UploadOutlined />} disabled={busy}>Upload CIF and add…</Button>
     </Upload>
     {error ? <Alert type="error" showIcon style={{ marginTop: 8 }} message={error} /> : null}
-    {items && !items.length ? <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{`No reference found for ${query}.`}</Text> : null}
+    {items && !items.length ? <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{`No reference found for ${query} in the reference library or the COD index (any spelling of the formula). Upload its CIF instead.`}</Text> : null}
     {items?.length ? <div style={{ marginTop: 8 }}>
       {items.map(item => <div key={item.source} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--dara-border)' }}>
         <span style={{ flex: 1, minWidth: 0 }}>

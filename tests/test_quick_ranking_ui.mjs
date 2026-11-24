@@ -246,7 +246,9 @@ test('stored-pattern ranking: the setup options as typed JSON', async () => {
   ];
   assert.deepEqual(Object.keys(alternativeGroups(ranking, ['cod:1', 'cod:3'])), ['cod:1']);
   assert.deepEqual(alternativeGroups(ranking, ['cod:1', 'cod:2']), {}, 'both selected: nothing to tell apart here');
-  assert.equal(alternativeOf(ranking, ['cod:1'])['cod:2'].source, 'cod:1');
+  assert.deepEqual(alternativeOf(ranking, ['cod:1'])['cod:2'].map(row => row.source), ['cod:1']);
+  const three = [...ranking, { source: 'cod:4', formula: 'TiO2', spacegroup: 141, alternatives: ['cod:2'] }];
+  assert.deepEqual(alternativeOf(three, ['cod:1', 'cod:4'])['cod:2'].map(row => row.source), ['cod:1', 'cod:4'], 'every selected row it stands in for');
   assert.deepEqual(alternativeRecords({ ranking }, ['cod:1']), [{ source: 'cod:2', formula: 'Ti0.99O2', spacegroup: 141, of: 'cod:1' }]);
   console.log('alternatives ok');
 }
@@ -272,6 +274,10 @@ test('peak lookup: peak rows, title, candidate rows and their preview', async ()
   assert.deepEqual(rows.map(row => [row.key, row.lineText, row.peaksText, row.scoreText, row.inRanking]),
     [['cod:1', '49 %', '13/15', '5 %', true], ['cod:2', '100 %', '14/15', '3 %', false]]);
   assert.deepEqual(peakCandidateRows(null), []);
+  // a group represented by another record than in the ranking: added as the ranking's row
+  const regrouped = peakCandidateRows({ candidates: [{ formula: 'ZnO', source: 'cod:9', sources: ['cod:9', 'cod:8'], line: { rel: 1 } }] },
+    [{ key: 'cod:8', sources: ['cod:8', 'cod:9'] }]);
+  assert.deepEqual(regrouped.map(row => [row.key, row.inRanking]), [['cod:8', true]]);
   const response = { ranking: [{ source: 'cod:1', sticks: [[30, 1]] }, { source: 'cod:5' }] };
   assert.deepEqual(withPreviewRow(response, rows[0]).ranking.map(row => [row.source, row.sticks]), [['cod:5', undefined], ['cod:1', [[31.7, 10]]]]);
   assert.equal(withPreviewRow(response, null), response);

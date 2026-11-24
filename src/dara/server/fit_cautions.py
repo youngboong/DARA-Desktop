@@ -46,6 +46,46 @@ def _caution(code: str, level: str, message: str, phase: str | None = None) -> d
     return {"code": code, "level": level, "message": message, "phase": phase}
 
 
+# A refined lattice parameter whose e.s.d. exceeds this fraction of its value is not determined:
+# the normal matrix was (near) singular. BGMN then prints the value rounded to the e.s.d.'s
+# precision (task 118 Le Bail, 2026-11-24: "A=0.8+-4.1" for a cell refined in 0.819-0.852 nm),
+# so the printed number may even lie outside the refinement window.
+UNDETERMINED_LATTICE_ESD = 0.01
+
+
+def undetermined_lattice(phase_details) -> dict[str, list[str]]:
+    """``{phase: [parameter, ...]}`` of refined lattice parameters that the data did not determine."""
+    out: dict[str, list[str]] = {}
+    for phase, details in (phase_details or {}).items():
+        for key, item in ((details or {}).get("lattice_parameters") or {}).items():
+            value, esd = _number((item or {}).get("value")), _number((item or {}).get("esd"))
+            if value and esd is not None and esd > UNDETERMINED_LATTICE_ESD * abs(value):
+                out.setdefault(phase, []).append(str(key))
+    return out
+
+
+def lattice_cautions(cautions, phase_details) -> list[dict]:
+    """``cautions`` with ``lattice_undetermined`` warnings added for undetermined cells, and their
+    ``lattice_at_bound`` warnings dropped (those compared the rounded printed value)."""
+    undetermined = undetermined_lattice(phase_details)
+    kept = [
+        item for item in cautions or []
+        if not (isinstance(item, dict) and item.get("code") == "lattice_at_bound" and item.get("phase") in undetermined)
+    ]
+    have = {item.get("phase") for item in kept if isinstance(item, dict) and item.get("code") == "lattice_undetermined"}
+    for phase, parameters in undetermined.items():
+        if phase in have:
+            continue
+        kept.append(_caution(
+            "lattice_undetermined",
+            "warning",
+            f"{_display_name(phase)}: lattice parameter {', '.join(parameters)} is not determined by the "
+            "data (e.s.d. larger than 1% of the value; the refinement was degenerate). This fit cannot be adopted.",
+            phase,
+        ))
+    return kept
+
+
 def le_bail_names(phase_details) -> list[str]:
     """Phases of ``phase_details`` fitted by Le Bail (``le_bail: true``, no amount)."""
     return [name for name, details in (phase_details or {}).items() if (details or {}).get("le_bail")]
@@ -214,7 +254,7 @@ def fit_cautions(
                 f"{int(missing)} observed peak(s) are not explained by the fitted phases.",
             )
         )
-    return cautions
+    return lattice_cautions(cautions, phase_details)
 
 
 def _largest_percent(diagnostics: dict, cls: str) -> float:

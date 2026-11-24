@@ -406,7 +406,12 @@ async def identification_payload(job: dict, document) -> dict:
             # candidates peak matching cannot tell apart from this phase ("Tell apart with Rietveld")
             "alternatives": [item for item in alternates if item["of"] == phase.get("source")],
         })
-    unexplained = [row for row in rows or [] if row["phase"] is None]
+    unassigned = [row for row in rows or [] if row["phase"] is None]
+    # The Search-match workspace's rule (quick_rank.residual_maxima) for the same selection, so the
+    # page counts the peaks the workspace reported; the bare assignment only when it cannot be rerun.
+    open_peaks = await asyncio.to_thread(lambda: document.unexplained_peaks)
+    unexplained = ([[peak[0], peak[1]] for peak in open_peaks] if open_peaks is not None
+                   else [[row["two_theta_deg"], row["intensity"]] for row in unassigned])
 
     def stamp(key):
         return convert_to_local_tz(job[key]).strftime("%Y-%m-%d %H:%M:%S") if job.get(key) else None
@@ -416,8 +421,8 @@ async def identification_payload(job: dict, document) -> dict:
         "status": job["status"], "task_label": job["job"]["name"], "analysis_mode": MODE,
         "phases": phases, "explained": document.explained,
         "peak_counts": None if rows is None else {
-            "observed": len(rows), "assigned": len(rows) - len(unexplained), "unexplained": len(unexplained)},
-        "unexplained_peaks": [[row["two_theta_deg"], row["intensity"]] for row in unexplained],
+            "observed": len(rows), "assigned": len(rows) - len(unassigned), "unexplained": len(unexplained)},
+        "unexplained_peaks": unexplained,
         "rir_complete": None if rir is None else rir["complete"],
         "best_rwp": None, "final_result": None, "all_results": [],
         "reference_ids": (metadata.get("submission_settings") or {}).get("reference_ids"),

@@ -2,6 +2,7 @@
 // values stay ``null`` so Plotly draws a gap instead of a misleading zero.
 
 import { figureStylePairs } from './figureExport.mjs';
+import { spaceGroupParts } from './versions.mjs';
 
 export const LATTICE_PARAMETERS = ['a', 'b', 'c', 'alpha', 'beta', 'gamma'];
 const ACTIVE_STATES = new Set(['READY', 'RUNNING', 'CANCELLING']);
@@ -11,6 +12,27 @@ const isCompleted = item => item?.state === 'COMPLETED';
 const phasesOf = item => (Array.isArray(item?.summary?.phases) ? item.summary.phases : []);
 
 export const phaseKey = phase => phase?.label || phase?.name || '';
+
+const escapeHtml = text => String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const SPACE_GROUP = /^[PIFCRAB][0-9abcdemn\-_/:₀-₉]+$/;
+
+/**
+ * A phase label ("Fe2O3 · R-3c") as Plotly text: formula digits as subscripts, the space group as
+ * International Tables print it (italic letters, screw subscripts, an overbar as a combining macron).
+ */
+export function plotlyPhaseLabel(label) {
+  return String(label || '').split(' · ').map(segment => {
+    if (SPACE_GROUP.test(segment) && (/[0-9\-_/]/.test(segment) || segment.length >= 4)) {
+      return spaceGroupParts(segment).map(part => (part.kind === 'italic' ? `<i>${escapeHtml(part.text)}</i>`
+        : part.kind === 'screw' ? `<sub>${escapeHtml(part.text)}</sub>` : part.kind === 'bar' ? `${escapeHtml(part.text)}\u0304`
+          : escapeHtml(part.text))).join('');
+    }
+    return /[a-z]{2}/.test(segment) ? escapeHtml(segment) : escapeHtml(segment).replace(/(\d+(?:\.\d+)?)/g, '<sub>$1</sub>');
+  }).join(' · ');
+}
+
+// The quantity a series variable's unit measures, for the axis title ("Temperature (°C)").
+const QUANTITY = { '°C': 'Temperature', K: 'Temperature', min: 'Time', h: 'Time', s: 'Time', d: 'Time' };
 
 /** Whether the page should keep polling. */
 export const hasActiveItems = items => (items || []).some(item => ACTIVE_STATES.has(item?.state));
@@ -29,13 +51,15 @@ export function xAxis(items) {
   if (useVariable) {
     return {
       values: list.map(item => number(item.variable?.value)),
-      title: unit || 'Variable',
+      title: unit ? `${QUANTITY[unit] || 'Variable'} (${unit})` : 'Variable',
+      unit: unit || '',
       usesVariable: true,
     };
   }
   return {
     values: list.map((item, index) => (number(item?.order) ?? index) + 1),
     title: 'Sample order',
+    unit: '',
     usesVariable: false,
   };
 }
