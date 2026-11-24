@@ -118,6 +118,15 @@ def display_formulas_scope(mapping):
         _DISPLAY_FORMULAS.reset(token)
 
 
+def hydroxide(formula: str) -> str:
+    """pymatgen writes hydroxide groups as (HO); chemists write (OH): La(HO)3 -> La(OH)3, LiHO -> LiOH
+    (the same rule as the web page, composition.mjs)."""
+    import re
+
+    text = str(formula).replace("(HO)", "(OH)")
+    return re.sub(r"^([A-Z][a-z]?)HO$", r"\1OH", text)
+
+
 def display_formula_of(reference) -> str | None:
     """Conventional formula of ``reference`` in the current scope, or ``None``."""
     known = _DISPLAY_FORMULAS.get()

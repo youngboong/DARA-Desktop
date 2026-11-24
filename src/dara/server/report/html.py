@@ -118,6 +118,9 @@ _ELEMENT_COUNT = re.compile(r"([A-Z][a-z]?)(\d*(?:\.\d+)?)")
 def tidy_formula(formula: str) -> str:
     """Display formula: near-integer counts of a disordered CIF reduced (Y31.99952O47.99904 -> Y2O3),
     other fractions to at most 3 decimals; the same rule as the web page (composition.mjs)."""
+    from dara.plot import hydroxide
+
+    formula = hydroxide(formula)
     pairs = [(el, float(n) if n else 1.0) for el, n in _ELEMENT_COUNT.findall(formula)]
     if not pairs or "." not in formula:
         return formula

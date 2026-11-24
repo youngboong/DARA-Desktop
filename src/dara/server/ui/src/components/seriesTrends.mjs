@@ -123,11 +123,13 @@ export function seriesPreviewRows(preview) {
  * keys (always sent, so an empty selection draws no strips); `download` asks for an attachment;
  * `style` the figure's look (`figureStyle` of figureExport.mjs).
  */
-export function seriesFigureHref(api, seriesId, { tasks, allTasks, phases, normalize = false, format = 'svg', widthMm = 170, download = false, style = null }) {
+export function seriesFigureHref(api, seriesId, { tasks, allTasks, phases, normalize = false, format = 'svg', widthMm = 170, download = false, style = null, labels = null }) {
   const query = new URLSearchParams();
   if (tasks && allTasks && tasks.length !== allTasks.length) query.set('tasks', tasks.join(','));
   if (phases) query.set('phases', phases.join(','));
   if (normalize) query.set('normalize', 'true');
+  const named = Object.fromEntries(Object.entries(labels || {}).filter(([, text]) => String(text || '').trim()));
+  if (Object.keys(named).length) query.set('labels', JSON.stringify(named));
   if (widthMm !== 170) query.set('width_mm', String(widthMm));
   if (style) figureStylePairs(style).forEach(([name, value]) => query.set(name, value));
   if (download) query.set('download', 'true');

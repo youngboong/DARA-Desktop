@@ -1,6 +1,6 @@
 import React from 'react';
 import Loadable from 'react-loadable';
-import { Alert, Button, Dropdown, Progress, Select, Space, Spin, Switch, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Dropdown, Input, Popover, Progress, Select, Space, Spin, Switch, Table, Tag, Typography, message } from 'antd';
 import { DownOutlined, DownloadOutlined, LineChartOutlined, ReloadOutlined } from '@ant-design/icons';
 import Layout from '../components/Layout';
 import { resultColumns } from '../components/ResultColumns';
@@ -121,6 +121,16 @@ function StackedPatterns({ options, figure, onChange, src }) {
             options={options.phases.map(phase => ({ value: phase.key, label: `${phase.label}${weight(phase)}` }))} /></label>
       </div>
       <div className="dara-toolbar-group">
+        <Popover trigger="click" placement="bottomLeft" title="Pattern labels" content={
+          <div className="dara-figure-labels">
+            {options.tasks.filter(task => figure.tasks.includes(task.task_id)).map(task =>
+              <label key={task.task_id}><span className="dara-num">#{task.task_id}</span>
+                <Input size="small" value={figure.labels?.[task.task_id] ?? ''} placeholder={task.label} maxLength={80}
+                  aria-label={`Label of task ${task.task_id}`}
+                  onChange={event => onChange({ ...figure, labels: { ...figure.labels, [task.task_id]: event.target.value } })} /></label>)}
+          </div>}>
+          <Button size="small">Labels</Button>
+        </Popover>
         <label className="dara-toolbar-item"><span>Normalize each to its max</span>
           <Switch size="small" checked={figure.normalize} onChange={normalize => onChange({ ...figure, normalize })} aria-label="Normalize each pattern" /></label>
       </div>
@@ -238,7 +248,7 @@ function SeriesDetail({ id, onName }) {
   const figureReady = Boolean(figureOptions?.tasks?.length) && figure.tasks.length > 0;
   const figureHref = (style, download = false) => seriesFigureHref(URL, id, {
     tasks: figure.tasks, allTasks: figureOptions?.tasks || [], phases: figure.phases, normalize: figure.normalize,
-    format: style.format, widthMm: style.widthMm, download, style });
+    format: style.format, widthMm: style.widthMm, download, style, labels: figure.labels });
   const downloads = [
     { key: 'table', label: 'Results table (CSV)' },
     { key: 'figure', label: 'Stacked patterns figure…', disabled: !figureReady },

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import tempfile
@@ -384,12 +385,10 @@ def _plain_phase_label(name: str) -> str:
     import re
     from html import unescape
 
-    from dara.plot import phase_display_name
-    from dara.server.report.figures import phase_card
+    from dara.plot import hydroxide, phase_display_name
 
-    text = unescape(re.sub(r"<[^>]+>", "", phase_display_name(name)))
-    card = phase_card(name)
-    return f"{text} · {card}" if card else text
+    # the database record stays in the report; the picker names the phase as the figure does
+    return hydroxide(unescape(re.sub(r"<[^>]+>", "", phase_display_name(name))))
 
 
 def group_phases(tasks: list[tuple[int, list[str], dict]]) -> list[dict]:
@@ -442,9 +441,13 @@ async def _series_figure_data(series_id: str) -> dict:
             weights = {}
         file_name = (record.get("job") or {}).get("name") or f"Task {record['index']}"
         sample = list_row(record, _refreshed_summary(record)).get("sample")
-        tasks.append({"task_id": record["index"], "label": sample or Path(str(file_name)).stem,
+        tasks.append({"task_id": record["index"], "sample": sample, "stem": Path(str(file_name)).stem,
                       "document": document, "refinement": refinement})
         phase_lists.append((record["index"], names, weights))
+    # File names of a series share most of their text; the figure shows only the part that differs.
+    shortened = iter(short_labels([item["stem"] for item in tasks if not item["sample"]]))
+    for item in tasks:
+        item["label"] = item["sample"] or next(shortened)
     groups = group_phases(phase_lists)
     for group in groups:
         group["label"] = _plain_phase_label(group["key"])
@@ -453,6 +456,33 @@ async def _series_figure_data(series_id: str) -> dict:
 
 def _default_phase(group: dict) -> bool:
     return group["max_weight"] is None or group["max_weight"] >= DEFAULT_MIN_WEIGHT_PERCENT
+
+
+def short_labels(stems: list[str]) -> list[str]:
+    """The part of each file name that differs within the series: the text shared by all at the start
+    and at the end is dropped at a separator (``_``, ``-``, space, ``.``). A single name, or one that
+    would become empty, is kept whole."""
+    if len(stems) < 2:
+        return list(stems)
+    separators = "_- ."
+
+    def shared_prefix(values):
+        first = values[0]
+        n = 0
+        while n < len(first) and all(len(v) > n and v[n] == first[n] for v in values):
+            n += 1
+        while n > 0 and first[n - 1] not in separators:  # back to a separator
+            n -= 1
+        return n
+
+    start = shared_prefix(stems)
+    end = shared_prefix([stem[::-1] for stem in stems])
+    out = []
+    for stem in stems:
+        part = stem[start:len(stem) - end] if len(stem) - end > start else ""
+        part = part.strip(separators)
+        out.append(part or stem)
+    return out
 
 
 @router.get("/series/{series_id}/figure-options")
@@ -482,6 +512,7 @@ async def series_figure(
     peaks: Literal["hkl", "symbols", "none"] = "hkl",
     names: Literal["legend", "strips"] = "legend",
     bars: bool = True,
+    labels: Optional[str] = None,
 ):
     """Stacked measured patterns of the series (first task at the bottom) with one reference strip
     per phase and each phase's peaks marked where it was found. ``tasks``: comma-separated task ids
@@ -507,6 +538,12 @@ async def series_figure(
         chosen = [item for item in chosen if str(item["task_id"]) in wanted]
     if not chosen:
         raise HTTPException(422, "No completed task of this series is selected")
+    if labels:  # the analyst's own names, JSON {task id: text}
+        try:
+            custom = {str(key): str(value).strip()[:80] for key, value in json.loads(labels).items()}
+        except (ValueError, AttributeError):
+            raise HTTPException(422, "labels must be a JSON object {task id: text}")
+        chosen = [{**item, "label": custom.get(str(item["task_id"])) or item["label"]} for item in chosen]
     if phases is None:
         groups = [group for group in data["groups"] if _default_phase(group)]
     else:

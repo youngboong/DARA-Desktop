@@ -937,3 +937,8 @@ code {
 
 /* Four mode names on one line at 1366 px. */
 .dara-mode-radio .ant-radio-button-wrapper { padding: 0 8px; white-space: nowrap; }
+
+/* Series figure: one label field per pattern. */
+.dara-figure-labels { display: grid; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.dara-figure-labels label { display: flex; align-items: center; gap: 8px; }
+.dara-figure-labels .ant-input { width: 220px; }

@@ -316,3 +316,11 @@ def test_figure_phase_label_is_name_formula_and_space_group_without_the_record()
     assert phase_strip_label("NiO_225_(cod_1010093)-0") == r"NiO ($\mathit{Fm}\overline{\mathrm{3}}\mathit{m}$)"
     assert "mp-" not in phase_strip_label("La(HO)3_176_(mp_mp-625394)-0")
     assert phase_strip_label("ZnO_186_(cod_9004178)-0", "My $label") == r"My \$label"
+
+
+def test_hydroxide_groups_are_written_oh():
+    from dara.plot import hydroxide
+    from dara.server.report.html import tidy_formula
+
+    assert hydroxide("La(HO)3") == "La(OH)3" and hydroxide("LiHO") == "LiOH" and hydroxide("ZnO") == "ZnO"
+    assert tidy_formula("La(HO)3") == "La(OH)3"

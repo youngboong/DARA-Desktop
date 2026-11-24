@@ -376,10 +376,10 @@ def figure_series(populated, monkeypatch):
 def test_figure_options_list_completed_tasks_in_order_and_the_phase_union(figure_series, client):
     body = client.get("/api/series/s1/figure-options").json()
     assert [task["task_id"] for task in body["tasks"]] == [2, 1]  # series order; the running task 3 is left out
-    assert [task["label"] for task in body["tasks"]] == ["a_300C", "a_500C"]  # file names without extension
+    assert [task["label"] for task in body["tasks"]] == ["300C", "500C"]  # the part of the file names that differs
     assert [phase["key"] for phase in body["phases"]] == ["ZnO_186_(cod_1)-0", "Fe2O3_167_(cod_2)-0"]
     assert body["phases"][0]["tasks"] == [2, 1] and body["phases"][1]["max_weight_percent"] == 10.0
-    assert body["phases"][0]["label"].endswith("COD 1") and all(phase["default"] for phase in body["phases"])
+    assert "COD" not in body["phases"][0]["label"] and all(phase["default"] for phase in body["phases"])
     assert client.get("/api/series/nope/figure-options").status_code == 404
 
 
@@ -388,11 +388,14 @@ def test_series_figure_renders_the_selection(figure_series, client):
     assert svg.status_code == 200 and svg.headers["content-type"] == "image/svg+xml"
     assert 'inline; filename="dara_series_Anneal_patterns_170mm.svg"' in svg.headers["content-disposition"]
     text = svg.content.decode()
-    assert "a_300C" in text and "a_500C" in text and "Zincite" in text and "Intensity (a.u.)" in text
+    assert "300C" in text and "500C" in text and "a_300C" not in text and "Zincite" in text and "Intensity (a.u.)" in text
     assert "COD" not in text  # the database record is never in the figure
     one = client.get("/api/series/s1/figure.svg?tasks=1&phases=&download=true")
     assert one.status_code == 200 and "attachment" in one.headers["content-disposition"]
     assert "a_300C" not in one.content.decode() and "Zincite" not in one.content.decode()
+    named = client.get('/api/series/s1/figure.svg?labels={"1":"Annealed 500 °C"}')
+    assert named.status_code == 200 and "Annealed 500" in named.content.decode() and "300C" in named.content.decode()
+    assert client.get("/api/series/s1/figure.svg?labels=[1]").status_code == 422
     png = client.get("/api/series/s1/figure.png?width_mm=85&dpi=100&normalize=true")
     assert png.status_code == 200 and png.content.startswith(b"\x89PNG")
     assert client.get("/api/series/s1/figure.pdf").content.startswith(b"%PDF")
@@ -409,3 +412,12 @@ def test_series_figure_styles(figure_series, client):
     assert drawn["names=strips&bars=0"] == drawn["bars=0"]  # without strips the names stay in the legend
     for bad in ("peaks=dots", "names=below", "bars=maybe"):
         assert client.get(f"/api/series/s1/figure.svg?{bad}").status_code == 422
+
+
+def test_short_labels_keep_only_the_part_that_differs():
+    from dara.server.series_router import short_labels
+
+    assert short_labels(["NiO_0p7028-La(OH)3_0p1010-ZnO_0p2000--8min", "NiO_0p7028-La(OH)3_0p1010-ZnO_0p2000--2min"]) == ["8min", "2min"]
+    assert short_labels(["CoO-ZnO_900C_60min", "CoO-ZnO_1000C_60min", "CoO-ZnO_1100C_60min"]) == ["900C", "1000C", "1100C"]
+    assert short_labels(["sample_a", "sample_a"]) == ["sample_a", "sample_a"]  # nothing differs: names kept whole
+    assert short_labels(["only one"]) == ["only one"]

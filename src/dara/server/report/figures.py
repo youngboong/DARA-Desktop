@@ -38,14 +38,14 @@ def _default_label(name: str) -> str:
     left out when it is the formula), in mathtext with the text font (Arial has no Unicode subscript
     digits). Never the database record: that is in the report's phase table."""
     try:
-        from dara.plot import COMMON_PHASE_NAMES, display_formula_of, spacegroup_mathtext, spacegroup_symbol
+        from dara.plot import COMMON_PHASE_NAMES, display_formula_of, hydroxide, spacegroup_mathtext, spacegroup_symbol
 
         match = re.match(r"^(.+?)_(\d+)_\(", str(name))
         if not match:
             return str(name).replace("$", r"\$")
         formula, group = match.groups()
         common = COMMON_PHASE_NAMES.get((formula, group))
-        shown = (display_formula_of(name) or formula).replace("$", r"\$")
+        shown = hydroxide(display_formula_of(name) or formula).replace("$", r"\$")
         text = re.sub(r"(\d+(?:\.\d+)?)", lambda found: r"$\mathregular{_{%s}}$" % found.group(1), shown)
         if common and common != shown:
             text = f"{common}, {text}"
