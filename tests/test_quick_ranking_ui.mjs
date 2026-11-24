@@ -276,3 +276,32 @@ test('peak lookup: peak rows, title, candidate rows and their preview', async ()
   assert.deepEqual(withPreviewRow(response, rows[0]).ranking.map(row => [row.source, row.sticks]), [['cod:5', undefined], ['cod:1', [[31.7, 10]]]]);
   assert.equal(withPreviewRow(response, null), response);
 });
+
+test('unexplained markers sit on the curve at the peak, not on a neighbour within 0.15 deg', async () => {
+  const { unexplainedMarkers, curveAt } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  const profile = { two_theta: [27.3, 27.4, 27.5, 27.6, 27.7], net: [100, 400, 2000, 9000, 20000] };
+  assert.equal(curveAt(profile, 27.45), 1200);
+  assert.equal(curveAt(profile, 27.4), 400);
+  assert.equal(curveAt(profile, 30), 0);
+  assert.equal(curveAt(profile, 27.0), 0);
+  // 27.4: the shown value there plus 5 % of the highest point (the 27.6 / 27.7 maxima are not taken)
+  assert.deepEqual(unexplainedMarkers([[27.4, 400]], profile).y, [1400]);
+});
+
+test('zoom after a Plotly relayout: the whole range resets both axes, a pan keeps the intensity rule', async () => {
+  const { zoomAfterRelayout } = await import('../src/dara/server/ui/src/components/quickRanking.mjs');
+  const bounds = [10, 100];
+  const peak = { range: [18, 22], y: 'fit', revision: 3 };
+  assert.equal(zoomAfterRelayout(peak, {}, bounds), null);
+  // wheel / pan: the 2θ window changes, the intensity keeps following it
+  assert.deepEqual(zoomAfterRelayout(peak, { xRange: [16, 24] }, bounds), { range: [16, 24], y: 'fit', whole: false });
+  // wheel back out to the measured range, an axis reset or Plotly's autoscale: the whole pattern on both axes
+  assert.deepEqual(zoomAfterRelayout(peak, { xRange: [10, 100] }, bounds), { range: null, y: null, whole: true });
+  assert.deepEqual(zoomAfterRelayout(peak, { xRange: null, yRange: null }, bounds), { range: null, y: null, whole: true });
+  assert.deepEqual(zoomAfterRelayout(peak, { xRange: null }, bounds), { range: null, y: null, whole: true });
+  // a zoom box fixes both axes; the y axis alone back to autorange keeps the window
+  assert.deepEqual(zoomAfterRelayout(peak, { xRange: [19, 21], yRange: [0, 500] }, bounds), { range: [19, 21], y: [0, 500], whole: false });
+  assert.deepEqual(zoomAfterRelayout(peak, { yRange: null }, bounds), { range: [18, 22], y: null, whole: false });
+  // the normal view (y autorange) stays autorange under the wheel
+  assert.deepEqual(zoomAfterRelayout({ range: null, y: null }, { xRange: [30, 40] }, bounds), { range: [30, 40], y: null, whole: false });
+});

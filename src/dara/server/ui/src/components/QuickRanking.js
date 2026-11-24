@@ -9,13 +9,15 @@ import {
   MAX_REFINE, SORTERS, assignColors, backgroundLabel, backgroundSettings, backgroundTraces, combinationText, taskRankingBody, defaultSelection, nextMatches, overlayTraces, pollDelay, poolText,
   progressText, rankingNotes, rankingRows, refineSelection, requestKey, rowKeyAction, sourceInfo, suggestedKeys, toggleKey,
   mismatchView, poolSources, startingPoints, unexplainedMarkers, unexplainedStatus, weakNotSelected, windowRange, withPoints, withResidualProfile, zoomWindow,
-  alternativeGroups, alternativeOf, alternativeRecords, unexplainedRows, peakTitle, peakCandidateRows, withPreviewRow,
+  alternativeGroups, alternativeOf, alternativeRecords, unexplainedRows, peakTitle, peakCandidateRows, withPreviewRow, zoomAfterRelayout,
 } from './quickRanking.mjs';
+import { viewChangeFromRelayout } from './plotNavigation.mjs';
 import { addAnchor, anchorError, curveWarnings, pchip, removeAnchor } from './backgroundAnchors.mjs';
 import { BackgroundCurvePanel } from './BackgroundEditor';
 
 const Plot = Loadable({ loader: () => import('./RefinementPlotly'), loading: () => <div className="dara-qr-plot-area" /> });
 const URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:8001/api';
+const DOUBLE_CLICK_MS = 300; // Plotly's default doubleClickDelay
 
 // A cancelled job stops on the server; older servers have no DELETE, so its errors are ignored.
 const cancelJob = id => { if (id) fetch(`${URL}/quick-ranking/${id}`, { method: 'DELETE' }).catch(() => {}); };
@@ -564,7 +566,11 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const [showBackground, setShowBackground] = useState(false); // the measured pattern with its background
   const [backgroundOpen, setBackgroundOpen] = useState(false);
   const [backgroundPreview, setBackgroundPreview] = useState(null); // live curve while the Background popover is open
-  const [zoom, setZoom] = useState({ range: null, revision: 0 }); // a click on an unexplained-peak marker zooms there
+  // The plot view: `range` the 2θ window (null: whole pattern), `y` null (autorange), 'fit' (follows the
+  // window: a click on an unexplained-peak marker zooms there) or a zoom box's [lo, hi] (zoomAfterRelayout).
+  const [zoom, setZoom] = useState({ range: null, y: null, revision: 0 });
+  const pendingClick = useRef(null); // a marker click waiting out the double-click delay
+  useEffect(() => () => clearTimeout(pendingClick.current), []);
   const [points, setPoints] = useState(null); // {anchors, selected} while the base points are edited
   const [pointsPreview, setPointsPreview] = useState(null); // {key, view} | {key, error}: the server's curve through them
   const [peak, setPeak] = useState(null); // the unexplained peak whose candidates are shown ({x, d, height, key})
@@ -715,14 +721,20 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
     return () => { current = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [peak?.key, jobId]);
-  const zoomTo = x => {
-    const range = zoomWindow(x, bounds);
-    // The intensity axis follows the window, so a small peak fills the plot.
-    const y = windowRange(shownData.profile, range);
-    // ...and keeps the unexplained-peak markers above the data in view
-    const marks = unexplainedMarkers(left?.unexplained_peaks, shownData.profile);
-    const mark = Math.max(0, ...marks.y.filter((_, i) => marks.x[i] >= range[0] && marks.x[i] <= range[1]));
-    setZoom(previous => ({ range, y: y && mark ? [0, Math.max(y[1], mark * 1.06)] : y, revision: previous.revision }));
+  // The intensity axis follows the window ('fit' zoom), so a small peak fills the plot.
+  const zoomTo = x => setZoom(previous => ({ range: zoomWindow(x, bounds), y: 'fit', revision: previous.revision }));
+  // Back to the whole pattern on both axes; the chosen peak (marker and candidates) goes with the zoom.
+  const wholePattern = () => {
+    setPeak(null);
+    setPeakPreview(null);
+    setZoom(previous => ({ range: null, y: null, revision: previous.revision + 1 }));
+  };
+  // Plotly's own changes (wheel, pan, zoom box, axis reset) keep the zoom state in step with the plot.
+  const onRelayout = event => {
+    const next = zoomAfterRelayout(zoom, viewChangeFromRelayout(event || {}, { full: bounds }), bounds);
+    if (!next) return;
+    if (next.whole) wholePattern();
+    else setZoom(previous => ({ range: next.range, y: next.y, revision: previous.revision }));
   };
   const choosePeak = item => {
     setPeakPreview(null);
@@ -745,20 +757,42 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
   const withBackground = pointTraces || (backgroundPreview ? backgroundTraces(backgroundPreview) : showBackground ? backgroundTraces(data?.background) : null);
   // The residual view shows what is left: the selected phases' sticks would cover it; the preview stays.
   // A peak candidate under the mouse previews its sticks (fitted to what is left) in place of the table's preview.
-  const traces = withBackground || !data ? withBackground || [] : [...overlayTraces(withPreviewRow(shownData, peakPreview), showResidual && left ? [] : selected, colors, peakPreview?.key ?? focused),
-    ...(left?.unexplained_peaks?.length ? [unexplainedMarkers(left.unexplained_peaks, shownData.profile, peak?.x)] : [])];
+  // The curve the plot leads with: the measured pattern in the background view, else the net (or residual) pattern.
+  const backgroundShown = !pointTraces && withBackground ? (backgroundPreview || bgView) : null;
+  const curve = backgroundShown ? { two_theta: backgroundShown.two_theta, net: backgroundShown.observed } : shownData?.profile;
+  // The unexplained peaks are marked in every view but the base-point editor (a click there adds a point).
+  const markers = !pointTraces && left?.unexplained_peaks?.length ? unexplainedMarkers(left.unexplained_peaks, curve, peak?.x) : null;
+  const traces = withBackground || !data ? [...(withBackground || []), ...(markers ? [markers] : [])]
+    : [...overlayTraces(withPreviewRow(shownData, peakPreview), showResidual && left ? [] : selected, colors, peakPreview?.key ?? focused),
+      ...(markers ? [markers] : [])];
+  // 'fit' zoom: the shown curve's range in the window, with the unexplained-peak markers above the data in view.
+  const fitY = range => {
+    const y = windowRange(curve, range);
+    const mark = Math.max(0, ...(markers?.y || []).filter((_, i) => markers.x[i] >= range[0] && markers.x[i] <= range[1]));
+    return y && mark ? [0, Math.max(y[1], mark * 1.06)] : y;
+  };
+  const shownY = zoom.y === 'fit' ? (zoom.range ? fitY(zoom.range) : null) : zoom.y;
   // A click on an unexplained-peak marker zooms there and lists its candidates. The hovered point can be
   // the pattern's (closest in 2-D), so a click within 0.3° of a marker, by the 2θ under the mouse, counts as well.
   const onPlotClick = event => {
-    if (withBackground) return; // no unexplained-peak markers in the background view
+    if (!markers) return;
     const point = event?.points?.find(item => item.data?.meta === 'unexplained');
     const near = unexplainedRows(left)
       .filter(item => Number.isFinite(event?.cursorX) && Math.abs(item.x - event.cursorX) <= 0.3)
       .sort((a, b) => Math.abs(a.x - event.cursorX) - Math.abs(b.x - event.cursorX))[0];
     const item = point ? unexplainedRows(left).find(row => Math.abs(row.x - Number(point.x)) < 1e-6) : near;
     if (!item) return;
-    choosePeak(item);
-    requestAnimationFrame(() => document.querySelector(`.dara-qr-peak-row[data-peak="${item.key}"]`)?.scrollIntoView({ block: 'nearest' }));
+    // Applied after Plotly's double-click delay: the first click of a double-click (back to the whole
+    // pattern) must not zoom in, and redrawing the plot between its clicks would hide the double-click.
+    clearTimeout(pendingClick.current);
+    pendingClick.current = setTimeout(() => {
+      choosePeak(item);
+      requestAnimationFrame(() => document.querySelector(`.dara-qr-peak-row[data-peak="${item.key}"]`)?.scrollIntoView({ block: 'nearest' }));
+    }, DOUBLE_CLICK_MS);
+  };
+  const onDoubleClick = () => {
+    clearTimeout(pendingClick.current);
+    wholePattern();
   };
   let body;
   if (state.status === 'pending') {
@@ -815,20 +849,20 @@ export default function QuickRankingWorkspace({ quick, context, onRefine, onIden
                   <Button size="small" disabled={Boolean(points)} aria-haspopup="dialog">
                     {points ? 'Background: editing points' : backgroundLabel(data.background.settings)} <DownOutlined /></Button>
                 </Popover> : null}
-                {zoom.range ? <Button size="small" type="link" onClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}>Whole pattern</Button> : null}
+                {zoom.range || Array.isArray(zoom.y) ? <Button size="small" type="link" onClick={wholePattern}>Whole pattern</Button> : null}
               </span>
             </div>
             {/* While the base points are edited their list sits beside the plot, so a drag never moves the plot. */}
             {data.profile ? <div className={points ? 'dara-plot-with-side' : undefined}><div className="dara-plot-main">
             <Plot data={traces} useResizeHandler xBounds={bounds} onClick={onPlotClick} anchorEdit={pointsEdit}
-              onDoubleClick={() => setZoom(previous => ({ range: null, revision: previous.revision + 1 }))}
+              onDoubleClick={onDoubleClick} onRelayout={onRelayout}
               className="dara-qr-plot-area" style={{ width: '100%' }}
               layout={{
                 autosize: true, uirevision: `${state.key}-${zoom.revision}`, showlegend: false, hovermode: 'closest',
                 margin: { l: 56, r: 12, t: 8, b: 40 }, font: { size: 12 },
                 xaxis: { title: { text: '2θ (°)' }, ...(zoom.range ? { range: [...zoom.range], autorange: false } : {}) },
                 yaxis: { title: { text: withBackground ? 'Intensity' : showResidual && left ? 'Residual (net)' : 'Net intensity' }, rangemode: 'tozero',
-                  ...(zoom.range && zoom.y ? { range: [...zoom.y], autorange: false } : {}) },
+                  ...(shownY ? { range: [...shownY], autorange: false } : {}) },
               }}
               config={{ displaylogo: false, responsive: true }} /></div>
             {pointsEdit ? <BackgroundCurvePanel side anchors={points.anchors} selected={points.selected}

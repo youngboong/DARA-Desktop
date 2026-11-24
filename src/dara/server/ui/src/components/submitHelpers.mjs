@@ -263,6 +263,15 @@ export function batchRowView(entry) {
   return { text: entry.error || 'Failed', tone: 'fail' };
 }
 
+/**
+ * Whether every file of `keys` is kept by the finished "Identify all" `batch` (each was saved as a
+ * task: `rows[key].taskId`), so leaving the page loses none of them. False while the batch runs, without
+ * a batch, or when a file was never sent (its upload failed, or it was added afterwards).
+ */
+export function batchKept(batch, keys) {
+  return Boolean(batch && !batch.running && keys?.length && keys.every(key => batch.rows?.[key]?.taskId != null));
+}
+
 /** A random lower-case hexadecimal id of `length` digits (a batch's series id). */
 export function hexId(length = 12, random = Math.random) {
   return Array.from({ length }, () => Math.floor(random() * 16).toString(16)).join('');

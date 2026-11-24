@@ -234,23 +234,29 @@ export function nextMatches(residual, rows = [], limit = 3) {
 /** The ranking response with the residual net pattern in place of the measured one (the "what is left" view). */
 export const withResidualProfile = (response, residual) => (residual?.profile?.two_theta?.length ? { ...response, profile: residual.profile } : response);
 
+/** Value of the curve `profile` ({two_theta, net}, 2θ ascending) at 2θ `at`, linearly interpolated; 0 outside it. */
+export function curveAt(profile, at) {
+  const xs = profile?.two_theta || [];
+  const ys = profile?.net || [];
+  const i = xs.findIndex(t => t >= at);
+  if (i < 0 || !Number.isFinite(at)) return 0;
+  if (i === 0) return xs[0] === at && Number.isFinite(ys[0]) ? ys[0] : 0;
+  const [x0, x1, y0, y1] = [xs[i - 1], xs[i], ys[i - 1], ys[i]];
+  if (![y0, y1].every(Number.isFinite)) return 0;
+  return x1 === x0 ? y1 : y0 + ((y1 - y0) * (at - x0)) / (x1 - x0);
+}
+
 /**
- * Markers above the tops of the unexplained peaks: a small downward triangle `pad` above the highest
- * point of the shown `profile` within 0.15° of each peak (so it never covers the data); the
- * `selected` peak (its 2θ) is drawn larger in the interactive colour. `meta: 'unexplained'`
- * identifies them on click.
+ * Markers above the unexplained peaks: a small downward triangle `pad` above the shown `profile` at
+ * each peak's 2θ (the server reports the observed peak's apex, so the marker sits on that peak and
+ * never on a neighbour's flank); the `selected` peak (its 2θ) is drawn larger in the interactive
+ * colour. `meta: 'unexplained'` identifies them on click.
  */
 export function unexplainedMarkers(peaks, profile = null, selected = null) {
   const x = (peaks || []).map(peak => peak[0]).filter(Number.isFinite);
-  const xs = profile?.two_theta || [];
-  const ys = profile?.net || [];
-  const highest = Math.max(0, ...ys.filter(Number.isFinite));
+  const highest = Math.max(0, ...(profile?.net || []).filter(Number.isFinite));
   const pad = 0.05 * highest;
-  const top = at => {
-    let value = 0;
-    xs.forEach((t, i) => { if (Math.abs(t - at) <= 0.15 && Number.isFinite(ys[i])) value = Math.max(value, ys[i]); });
-    return value + pad;
-  };
+  const top = at => Math.max(0, curveAt(profile, at)) + pad;
   const isSelected = at => Number.isFinite(selected) && Math.abs(at - selected) < 1e-6;
   return {
     type: 'scatter', mode: 'markers', name: 'Unexplained peaks', meta: 'unexplained', x, y: x.map(top), cliponaxis: false,
@@ -289,6 +295,28 @@ export const withPreviewRow = (response, row) => (row
 export function zoomWindow(x, bounds, half = 2) {
   const [lo, hi] = Array.isArray(bounds) && bounds.every(Number.isFinite) ? bounds : [-Infinity, Infinity];
   return [Math.max(lo, x - half), Math.min(hi, x + half)];
+}
+
+/**
+ * Plot view after a Plotly relayout `change` (`viewChangeFromRelayout`, 2θ clamped to `bounds`) of the
+ * search-match plot. `zoom` is `{range, y, revision}`: `range` the 2θ window (null: whole pattern),
+ * `y` null (Plotly's autorange), 'fit' (the intensity follows the shown window, as a click on an
+ * unexplained peak sets it) or a fixed [lo, hi] (a zoom box). A 2θ reset or a window back at the
+ * whole measured range is the whole pattern on both axes (`whole: true`); a pan or wheel step keeps
+ * the intensity rule, so a peak's fitted axis never stays behind while the 2θ window widens.
+ * Returns the next `{range, y, whole}` or null when nothing changed.
+ */
+export function zoomAfterRelayout(zoom, change, bounds) {
+  const hasX = 'xRange' in change;
+  const hasY = 'yRange' in change;
+  if (!hasX && !hasY) return null;
+  const full = Array.isArray(bounds) && bounds.every(Number.isFinite) ? bounds : null;
+  const isWhole = range => !range || (full && Math.abs(range[0] - full[0]) <= 1e-6 * (full[1] - full[0])
+    && Math.abs(range[1] - full[1]) <= 1e-6 * (full[1] - full[0]));
+  const range = hasX ? change.xRange : zoom.range;
+  if (hasX && isWhole(range) && (!hasY || change.yRange === null)) return { range: null, y: null, whole: true };
+  const y = hasY ? change.yRange : zoom.y;
+  return { range: isWhole(range) ? null : range, y, whole: false };
 }
 
 /** Intensity range [0, 1.1 × highest net value] of `profile` inside the 2θ `range` (null when there is none). */

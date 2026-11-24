@@ -514,6 +514,7 @@ class _Context:
     lam2: float | None
     window: int = 1  # samples of the window_max filter
     net_window: np.ndarray | None = None  # window_max of the net pattern (before any subtraction)
+    observed: np.ndarray | None = None  # the net pattern (clipped at 0) before any subtraction
 
 
 def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges,
@@ -541,7 +542,7 @@ def _context(angles, intensities, *, wavelength, wmin, wmax, excluded_ranges,
         profile=replace(profile, window_max=net_window),
         x=x, index_of=lambda t: np.interp(t, x, samples), residual=residual, total=total,
         fwhm=estimate_fwhm(x, residual, profile.step), lam1=lam1, lam2=lam2, window=window,
-        net_window=net_window,
+        net_window=net_window, observed=residual,
     ), None
 
 
@@ -946,25 +947,30 @@ def _line_positions(ctx: _Context, cand: Candidate, result: dict) -> np.ndarray:
 
 
 def residual_maxima(ctx: _Context, lines=()) -> list[list[float]]:
-    """``[2theta, height]`` of the residual's local maxima (over the scoring window) that are above
-    the ranking's noise floor (``ObservedProfile.floor``: 6 sigma or 3 % of the strongest net peak)
-    and significant by the unexplained-peak classification (``peak_significance``: 8 sigma and 2 %),
-    except those on one of ``lines`` (the accepted phases' line positions): within max(0.1°, model
-    FWHM), the peak list's assignment rule (``peak_list.observed_peak_rows``). A peak on an
-    accepted line is assigned, whatever its intensity, as a peak list assigns it."""
+    """``[2theta, height]`` of the observed peaks the accepted phases leave unexplained, the rule of a
+    classical search-match (an observed peak with no line of an accepted phase within the matching
+    tolerance). A peak is a local maximum of the net pattern before any subtraction (over the
+    scoring window) whose height is above the ranking's noise floor (``ObservedProfile.floor``: 6
+    sigma or 3 % of the strongest net peak) and significant by the unexplained-peak classification
+    (``peak_significance``: 8 sigma and 2 %). It is unexplained when no line of ``lines`` (the
+    accepted phases' line positions) lies within max(0.1°, model FWHM), the peak list's assignment
+    rule (``peak_list.observed_peak_rows``), and the residual at its apex is still above that floor.
+    ``height`` is the observed apex height. A misfit lobe on the flank of an explained peak is not a
+    peak of the pattern and is never reported."""
     from dara.export.peak_list import ASSIGN_TOLERANCE_DEG
     from dara.server.peak_significance import SIGNIFICANT_REL, SIGNIFICANT_SNR
 
     profile = ctx.profile
     floor = max(profile.floor, SIGNIFICANT_SNR * profile.sigma, SIGNIFICANT_REL * profile.net_max)
-    res, top = ctx.residual, profile.window_max
-    rising = res > np.r_[-np.inf, res[:-1]]  # first sample of a flat top only
-    index = np.flatnonzero((res >= top) & rising & (res > floor))
+    net = ctx.observed if ctx.observed is not None else ctx.residual
+    top = ctx.net_window if ctx.net_window is not None else profile.window_max
+    rising = net > np.r_[-np.inf, net[:-1]]  # first sample of a flat top only
+    index = np.flatnonzero((net >= top) & rising & (net > floor) & (ctx.residual > floor))
     lines = np.asarray(lines, dtype=float)
     if lines.size:
         tolerance = max(ASSIGN_TOLERANCE_DEG, ctx.fwhm)
         index = [i for i in index if np.min(np.abs(lines - ctx.x[i])) > tolerance]
-    return [[round(float(ctx.x[i]), 3), round(float(res[i]), 2)] for i in index]
+    return [[round(float(ctx.x[i]), 3), round(float(net[i]), 2)] for i in index]
 
 
 def residual_step(angles, intensities, candidates, selected, *, wavelength="Cu", wmin=None, wmax=None,

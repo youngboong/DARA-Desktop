@@ -454,6 +454,33 @@ def test_suggested_structure_with_unphysical_density_is_left_out(monkeypatch):
     assert any("unphysical density (cod:1)" in text for text in result["caveats"])
 
 
+def _broad_b_pattern(extra_at=40.0):
+    """A sharp (0.1 deg) and a broad (0.35 deg) phase, plus one peak of neither at ``extra_at``: the
+    search-match model takes the sharp phase's width, so the broad peaks leave residual lobes on their flanks."""
+    x, sharp = _pattern([(A_D, A_I, 20000, 1.0)], fwhm=0.1, seed=1)
+    extra = [([L1 / (2 * np.sin(np.radians(extra_at / 2)))], [1.0], 2000, 1.0)] if extra_at else []
+    _, broad = _pattern([(B_D, B_I, 8000, 1.0), *extra], fwhm=0.35, seed=2)
+    return x, sharp + broad - (50.0 + 0.2 * (80 - x))
+
+
+def test_unexplained_peaks_are_observed_peaks_not_misfit_flanks():
+    # classical rule: an unexplained peak is an observed peak with no accepted line within the tolerance
+    cands = [_cand("cod:1", "Aa", A_D, A_I), _cand("cod:2", "Bb", B_D, B_I)]
+    x, y = _broad_b_pattern()
+    left = qr.residual_step(x, y, cands, ["cod:1", "cod:2"])
+    assert [round(peak[0]) for peak in left["unexplained_peaks"]] == [40]  # no flank lobe of B, the extra peak stays
+    t, height, _ = left["unexplained_peaks"][0]
+    net = np.interp(t, *(np.asarray(left["profile"][k]) for k in ("two_theta", "net")))
+    assert abs(t - 40.0) < 0.05 and height > 1500 and height >= net  # at the observed apex, its height
+    # ranked again with another background (HighScore's granularity / bending, or base points): the same peak
+    for background in ({"method": "sonneveld_visser", "granularity": 60, "bending_factor": 2},
+                       {"method": "auto", "anchors": [[12.0, 63.6], [35.0, 59.0], [60.0, 54.0], [79.5, 50.1]]}):
+        again = qr.residual_step(x, y, cands, ["cod:1", "cod:2"], background=background)
+        assert [round(peak[0]) for peak in again["unexplained_peaks"]] == [40], background
+    x, y = _broad_b_pattern(extra_at=None)
+    assert qr.residual_step(x, y, cands, ["cod:1", "cod:2"])["unexplained_peaks"] == []
+
+
 def test_combination_stops_when_no_significant_peak_is_left_unexplained():
     # a dense decoy that only fits the background noise would still pass the gain stop (>= STOP_GAIN)
     tt = np.arange(12.5, 79, 1.37)

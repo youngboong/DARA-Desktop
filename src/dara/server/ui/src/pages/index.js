@@ -12,7 +12,7 @@ import { FwhmCurveButton } from '../components/InstrumentFwhmCurve';
 import { curveText } from '../components/instrumentCurve.mjs';
 import useAdvancedTools from '../components/useAdvancedTools';
 import {
-  advancedChanges, batchName, batchRowView, checkElements, forgetRemembered, hexId, limiter, previewShape, readRecentElements, readRemembered,
+  advancedChanges, batchKept, batchName, batchRowView, checkElements, forgetRemembered, hexId, limiter, previewShape, readRecentElements, readRemembered,
   rememberElements, runAfterSuccess, unrecognisedTokens, writeRemembered,
 } from '../components/submitHelpers.mjs';
 import { phaseSetIdFromSearch, phaseSetLabel, withoutPhaseSet } from '../components/knownPhases.mjs';
@@ -719,7 +719,10 @@ function Submission() {
     quick.open();
   };
   // Leaving with a pattern or a ranking on the page asks first (refresh, closing the tab, another site).
-  const unsaved = Boolean(watchedPattern || (seriesFiles || []).length || quick.ranked || quick.state.status === 'pending');
+  // Series files saved as tasks by a finished "Identify all" are kept: leaving then loses nothing.
+  const seriesKept = batchKept(batch, (seriesFiles || []).map(fileKey));
+  const unsaved = Boolean(watchedPattern || ((seriesFiles || []).length && !seriesKept) || batch?.running || verifying
+    || quick.ranked || quick.state.status === 'pending');
   useEffect(() => {
     if (!unsaved) return undefined;
     const warn = event => { if (!leaving.current) { event.preventDefault(); event.returnValue = ''; } };
@@ -1654,4 +1657,9 @@ function Submission() {
   );
 }
 
-export default Submission;
+// Every navigation to this page (the header's DARA logo or Submit link, also while already here) mounts a
+// fresh form: no file, chemistry, search-match or batch carries over; the per-browser remembered
+// settings apply again. The quick ranking's own history entries keep the key, so Back does not reset it.
+export default function SubmitPage({ location }) {
+  return <Submission key={location?.key || 'initial'} />;
+}

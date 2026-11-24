@@ -149,3 +149,16 @@ console.log('element entry, recent sets, file-name tokens and preview ok');
   assert.match(hexId(), /^[0-9a-f]{12}$/);
   console.log('batch helpers ok');
 }
+
+{
+  // Leaving after "Identify all" warns only while a file would be lost (batchKept)
+  const { batchKept } = await import('../src/dara/server/ui/src/components/submitHelpers.mjs');
+  const rows = { a: { state: 'done', taskId: 1 }, b: { state: 'failed', taskId: 2, error: 'fizzled' } };
+  assert.equal(batchKept({ running: false, rows }, ['a', 'b']), true); // a failed task is still a saved task
+  assert.equal(batchKept({ running: true, rows }, ['a', 'b']), false);
+  assert.equal(batchKept({ running: false, rows: { ...rows, b: { state: 'failed', error: 'HTTP 500' } } }, ['a', 'b']), false); // never sent
+  assert.equal(batchKept({ running: false, rows }, ['a', 'b', 'c']), false); // a file added after the batch
+  assert.equal(batchKept(null, ['a']), false);
+  assert.equal(batchKept({ running: false, rows }, []), false);
+  console.log('batch kept ok');
+}
