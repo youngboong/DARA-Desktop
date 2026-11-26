@@ -73,6 +73,7 @@ MAX_QUEUED = 8
 FAILED_RUN_KEEP_S = 24 * 3600
 JOB_ID_RE = re.compile(r"^q-[0-9a-f]{12}$")
 COD_SOURCE_RE = re.compile(r"^cod:(\d{1,9})$")
+MP_SOURCE_RE = re.compile(r"^mp:((?:mp|mvc)-\d{1,9})$")
 LIBRARY_SOURCE_RE = re.compile(r"^library:([A-Za-z0-9_-]{1,64})$")
 # Iteration steps per BGMN stage for quick re-refinements (BGMN default: 10x the parameter
 # count). Measured on well-converged fits: 1.1-1.7x faster, Rwp within 0.03 and weight fractions
@@ -108,9 +109,9 @@ class QuickPhase(BaseModel):
     @field_validator("source")
     @classmethod
     def _source(cls, value: str) -> str:
-        if value == "task" or COD_SOURCE_RE.match(value) or LIBRARY_SOURCE_RE.match(value):
+        if value == "task" or COD_SOURCE_RE.match(value) or MP_SOURCE_RE.match(value) or LIBRARY_SOURCE_RE.match(value):
             return value
-        raise ValueError("source must be 'task', 'cod:<code>' or 'library:<id>'")
+        raise ValueError("source must be 'task', 'cod:<code>', 'mp:<material id>' or 'library:<id>'")
 
 
 class QuickBackground(BaseModel):
@@ -864,6 +865,19 @@ def _resolve_new_cif(item: QuickPhase, refs: dict, library: dict) -> tuple[str, 
         path = structure_db.cod_cache_dir() / f"{code}.cif"
         if not structure_db.is_valid_cif_file(path):
             raise QuickRefineError(f"COD entry {code} is not in the local cache.")
+        cif = Cif.from_file(path)
+        cif.filename = item.ref
+        return item.ref, cif, None
+    mp = MP_SOURCE_RE.match(item.source)
+    if mp:
+        from dara import structure_db
+
+        material_id = mp.group(1)
+        if f"_(mp_{material_id})" not in item.ref or not valid_reference_filename(item.ref):
+            raise QuickRefineError(f"Reference name {item.ref} does not match Materials Project entry {material_id}.")
+        path = structure_db.mp_cache_dir() / f"{material_id}.cif"
+        if not structure_db.is_valid_cif_file(path):
+            raise QuickRefineError(f"Materials Project entry {material_id} is not in the local cache.")
         cif = Cif.from_file(path)
         cif.filename = item.ref
         return item.ref, cif, None

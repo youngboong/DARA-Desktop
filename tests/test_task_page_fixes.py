@@ -109,6 +109,7 @@ def test_reference_search_finds_a_hydroxide_by_any_spelling(monkeypatch):
     monkeypatch.setattr(structure_db, "shared_cod_database", lambda: SimpleNamespace(preparsed_info=rows))
     monkeypatch.setattr(router, "_read_registry", lambda: [])
     monkeypatch.setattr(structure_db, "cod_cache_dir", lambda: __import__("pathlib").Path("."))
+    monkeypatch.setattr(router, "_mp_rows", lambda reduced: [])  # COD only here; MP has its own test
     for query in ("La(OH)3", "LaH3O3", "La(HO)3"):
         assert [item["database_id"] for item in router.search_references(query)] == ["9001"]
 
@@ -173,3 +174,22 @@ def test_identification_counts_unexplained_peaks_by_the_search_match_rule(monkey
     assert calls["selected"] == ["cod:1"] and calls["background"] == {"method": "rolling_minimum"}
     # a phase without a source (cannot be simulated again): the page keeps its own assignment
     assert IdentificationDocument(xrd, {}, [], [{"name": "x"}]).unexplained_peaks is None
+
+
+def test_reference_search_finds_materials_project_structures(tmp_path, monkeypatch):
+    """La(OH)3 is not in the COD index; the downloaded MP library rows find it by any spelling."""
+    import json
+
+    from dara import structure_db
+    from dara.server import reference_library_router as ref
+
+    monkeypatch.setattr(structure_db, "mp_cache_dir", lambda: tmp_path)
+    monkeypatch.delenv("MP_API_KEY", raising=False)
+    (tmp_path / "library-rows-x.json").write_text(json.dumps({"rows": [
+        {"material_id": "mp-625394", "formula": "La(HO)3", "spacegroup": 176, "e_above_hull": 0.0},
+        {"material_id": "mp-1", "formula": "LaO", "spacegroup": 225, "e_above_hull": 0.1},
+    ]}), encoding="utf-8")
+    for query in ("La(OH)3", "LaH3O3", "La(HO)3"):
+        found = [item for item in ref.search_references(query) if item["database"] == "MP"]
+        assert [item["source"] for item in found] == ["mp:mp-625394"]
+        assert found[0]["ref"] == "La(HO)3_176_(mp_mp-625394)-0" and found[0]["cached"] is False

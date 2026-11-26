@@ -8,7 +8,7 @@ const { Text } = Typography;
 
 /**
  * "Add a known phase" in the Add phase drawer: search the reference library and the COD index by
- * formula or COD id, or upload a CIF to the library; Add refines it into the displayed fit as a
+ * formula or COD id (Materials Project too), or upload a CIF to the library; Add refines it into the displayed fit as a
  * new version (through `onAdd`, as for peak-search candidates).
  */
 export default function ReferenceSearch({ onAdd, busy = false }) {
@@ -35,6 +35,8 @@ export default function ReferenceSearch({ onAdd, busy = false }) {
       // A COD entry outside the local cache is downloaded first (quick refinements read the cache).
       if (item.source.startsWith('cod:') && !item.cached) {
         await requestJson(`/reference-search/cod/${item.database_id}`, { method: 'POST' });
+      } else if (item.source.startsWith('mp:') && !item.cached) {
+        await requestJson(`/reference-search/mp/${item.database_id}`, { method: 'POST' });
       }
       onAdd({ ref: item.ref, source: item.source, formula: item.formula, spacegroup_number: item.spacegroup_number });
     } catch (e) { setError(e.message); }
@@ -71,14 +73,14 @@ export default function ReferenceSearch({ onAdd, busy = false }) {
       <Button size="small" icon={<UploadOutlined />} disabled={busy}>Upload CIF and add…</Button>
     </Upload>
     {error ? <Alert type="error" showIcon style={{ marginTop: 8 }} message={error} /> : null}
-    {items && !items.length ? <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{`No reference found for ${query} in the reference library or the COD index (any spelling of the formula). Upload its CIF instead.`}</Text> : null}
+    {items && !items.length ? <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>{`No reference found for ${query} in the reference library, COD or Materials Project. Upload its CIF instead.`}</Text> : null}
     {items?.length ? <div style={{ marginTop: 8 }}>
       {items.map(item => <div key={item.source} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 0', borderBottom: '1px solid var(--dara-border)' }}>
         <span style={{ flex: 1, minWidth: 0 }}>
           <strong><ChemicalFormula formula={item.formula || item.ref} /></strong>
           <Text type="secondary">{` · ${item.spacegroup_number ? `SG ${item.spacegroup_number}` : 'SG ?'} · ${item.database} ${item.database_id || ''}`}</Text>
           {item.e_hull != null ? <Tooltip title="Energy above hull (eV/atom) of the matching Materials Project entry"><Text type="secondary">{` · E_hull ${Number(item.e_hull).toFixed(3)}`}</Text></Tooltip> : null}
-          {item.source.startsWith('cod:') && !item.cached ? <Tooltip title="Downloaded from crystallography.net when added"><Tag style={{ marginLeft: 6 }}>download</Tag></Tooltip> : null}
+          {(item.source.startsWith('cod:') || item.source.startsWith('mp:')) && !item.cached ? <Tooltip title={item.source.startsWith('mp:') ? 'Downloaded from Materials Project when added' : 'Downloaded from crystallography.net when added'}><Tag style={{ marginLeft: 6 }}>download</Tag></Tooltip> : null}
         </span>
         <Button size="small" loading={adding === item.source} disabled={busy || (adding && adding !== item.source)} onClick={() => add(item)}>Add</Button>
       </div>)}

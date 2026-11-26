@@ -13,6 +13,7 @@ import re
 import tempfile
 import threading
 import uuid
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from dara.cif import Cif
 from dara.server.setting import get_dara_server_settings
 from dara.structure_quality import validate_cif
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api")
 
 MAX_CIF_BYTES = 5 * 1024 * 1024
@@ -248,8 +250,60 @@ def _cod_item(row) -> dict:
     }
 
 
+def _mp_item(row: dict) -> dict:
+    from dara.structure_db import is_valid_cif_file, mp_cache_dir
+
+    material_id, formula = str(row["material_id"]), str(row["formula"])
+    spacegroup = row.get("spacegroup")
+    e_hull = row.get("e_above_hull")
+    suffix = "" if e_hull is None else f"-{round(1000 * float(e_hull))}"
+    return {
+        # the name the normal search gives this structure (structure_db._document_to_cif)
+        "ref": f"{formula}_{spacegroup if spacegroup is not None else 'unknown'}_(mp_{material_id}){suffix}",
+        "source": f"mp:{material_id}",
+        "database": "MP",
+        "database_id": material_id,
+        "formula": formula,
+        "spacegroup_number": int(spacegroup) if str(spacegroup).isdigit() else None,
+        "e_hull": e_hull,
+        "cached": is_valid_cif_file(mp_cache_dir() / f"{material_id}.cif"),
+    }
+
+
+def _mp_rows(reduced: str) -> list[dict]:
+    """Materials Project rows of a reduced formula: the downloaded structure library first (offline),
+    else one formula query when a key is set (``[]`` when neither answers)."""
+    import json
+
+    from dara.structure_db import MaterialsProjectDatabase, mp_cache_dir
+
+    rows: dict[str, dict] = {}
+    for path in sorted(mp_cache_dir().glob("library-rows-*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        for row in data.get("rows") or []:
+            if row.get("material_id") and _reduced(row.get("formula")) == reduced:
+                rows.setdefault(str(row["material_id"]), row)
+    if rows or not os.environ.get("MP_API_KEY"):
+        return list(rows.values())
+    try:
+        db = MaterialsProjectDatabase()
+        for doc in db._query(formulas=[reduced], max_structures=20):
+            structure = db._doc_value(doc, "structure")
+            row = db._index_row(doc, structure.composition if structure is not None else None)
+            row["e_above_hull"] = row.get("e_above_hull", db._doc_value(doc, "energy_above_hull"))
+            if _reduced(row.get("formula")) == reduced:
+                rows.setdefault(row["material_id"], row)
+    except Exception:  # noqa: BLE001 - offline or a bad key: the COD and library results stand
+        logger.info("Reference search: Materials Project query failed", exc_info=True)
+    return list(rows.values())
+
+
 def search_references(query: str) -> list[dict]:
-    """Reference library entries and COD index rows for a formula (``Fe2O3``) or a COD id."""
+    """Reference library entries, COD index rows and Materials Project structures for a formula
+    (``Fe2O3``) or a COD id."""
     from pymatgen.core import Composition
 
     from dara.structure_db import shared_cod_database
@@ -283,7 +337,8 @@ def search_references(query: str) -> list[dict]:
             if row[0] == reduced or _reduced(row[0]) == reduced]
     # most stable first; rows without an energy last
     rows.sort(key=lambda row: (row[3] is None, row[3] if row[3] is not None else 0, str(row[1])))
-    return (items + [_cod_item(row) for row in rows])[:SEARCH_LIMIT]
+    mp = sorted(_mp_rows(reduced), key=lambda row: (row.get("e_above_hull") is None, row.get("e_above_hull") or 0))
+    return (items + [_cod_item(row) for row in rows] + [_mp_item(row) for row in mp])[:SEARCH_LIMIT]
 
 
 def _reduced(formula) -> str | None:
@@ -300,6 +355,25 @@ async def reference_search(q: str = ""):
     import asyncio
 
     return {"query": q, "items": await asyncio.to_thread(search_references, q)}
+
+
+@router.post("/reference-search/mp/{material_id}")
+async def fetch_mp_reference(material_id: str):
+    """Download Materials Project structure ``material_id`` into the local cache."""
+    import asyncio
+
+    from dara.structure_db import MaterialsProjectDatabase, is_valid_cif_file, mp_cache_dir
+
+    if not re.fullmatch(r"(?:mp|mvc)-\d{1,9}", material_id):
+        raise HTTPException(404, "Unknown Materials Project id")
+    if not is_valid_cif_file(mp_cache_dir() / f"{material_id}.cif"):
+        try:
+            await asyncio.to_thread(MaterialsProjectDatabase().download_to_cache, [material_id], "queries")
+        except Exception as exc:  # noqa: BLE001 - no key, offline, unknown id
+            raise HTTPException(502, f"Materials Project download failed: {exc}")
+        if not is_valid_cif_file(mp_cache_dir() / f"{material_id}.cif"):
+            raise HTTPException(502, "Materials Project returned no structure for this id")
+    return {"material_id": material_id, "cached": True}
 
 
 @router.post("/reference-search/cod/{code}")

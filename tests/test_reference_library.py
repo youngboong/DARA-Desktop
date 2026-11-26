@@ -172,6 +172,7 @@ def cod_index(monkeypatch, tmp_path):
     monkeypatch.setattr(structure_db, "shared_cod_database", lambda: SimpleNamespace(preparsed_info=info))
     monkeypatch.setattr(structure_db, "cod_cache_dir", lambda: tmp_path / "cod")
     monkeypatch.setattr(lib, "_COD_ROWS_BY_ID", None)
+    monkeypatch.setattr(lib, "_mp_rows", lambda reduced: [])  # no Materials Project rows in these tests
     (tmp_path / "cod").mkdir()
 
 
